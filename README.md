@@ -2,7 +2,7 @@
 
 ## Setup
 
-Download the following data:
+Download data for the following directories (place as many examples as you want):
 
 - **`data/webarena/human_trajectories`**  
   [Google Drive](https://drive.google.com/drive/folders/1NrN_sawtYK2V_uHnmmS8ugmGIKUAsPgt)
@@ -14,3 +14,9 @@ Download the following data:
   ```bash
   git clone https://github.com/sierra-research/tau2-bench data/tau2_repo
   ```
+
+## Usage
+
+Main notebook: `ingest_data.ipynb`
+
+McGill-NLP/WebLinx downloads are handled in the notebook.
