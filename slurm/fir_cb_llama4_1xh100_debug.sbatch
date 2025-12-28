@@ -41,8 +41,8 @@ echo "Work dir:    $(pwd)"
 echo "=========================================="
 
 # --- Paths (edit if your layout differs) ---
-REPO_DIR="$HOME/scratch/harmful-agents-meta-dataset"
-VENV_DIR="$HOME/scratch/.venvs/cb_env"
+REPO_DIR="/scratch/memoozd/harmful-agents-meta-dataset"
+VENV_DIR="/scratch/memoozd/.venvs/cb_env"
 
 # If you submitted from inside the repo, prefer that.
 if [[ -n "${SLURM_SUBMIT_DIR:-}" && -d "$SLURM_SUBMIT_DIR" ]]; then

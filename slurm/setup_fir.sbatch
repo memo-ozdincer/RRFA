@@ -14,10 +14,9 @@ echo "=============================================="
 echo "  CB Fir Setup (Alliance)"
 echo "=============================================="
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_DIR="/scratch/memoozd/harmful-agents-meta-dataset"
 
-# Fir scratch is documented as $HOME/scratch; allow override if you use something else.
-: "${SCRATCH_DIR:=$HOME/scratch}"
+: "${SCRATCH_DIR:=/scratch/memoozd}"
 
 # Venv location (override via ENV_ROOT/ENV_NAME)
 : "${ENV_ROOT:=$SCRATCH_DIR/.venvs}"
