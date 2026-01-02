@@ -1,17 +1,20 @@
 #!/bin/bash
 #SBATCH -A aip-rgrosse
 #SBATCH -D /project/6105522/memoozd/harmful-agents-meta-dataset
-#SBATCH --time=02:00:00
-#SBATCH --gres=gpu:h100:4
-#SBATCH --cpus-per-task=48
-#SBATCH --mem=256GB
-#SBATCH --job-name=cb_llama31_8b_4xh100
+#SBATCH --time=04:00:00
+#SBATCH --gres=gpu:h100:1
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=64GB
+#SBATCH --job-name=cb_llama31_8b_1xh100
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 
 # =============================================================================
-# Circuit Breakers Training - Killarney 4×H100 (Llama-3.1-8B-Instruct)
+# Circuit Breakers Training - Killarney 1×H100 (Llama-3.1-8B-Instruct)
 # =============================================================================
+#
+# NOTE: Using 1×H100 because 4×H100 nodes are down
+# Full training (150 steps) on single GPU with increased gradient accumulation
 #
 # Submit from your project directory:
 #   cd /project/6105522/memoozd/harmful-agents-meta-dataset
@@ -84,8 +87,8 @@ export XDG_CACHE_HOME="$CACHE_ROOT/xdg"
 # =============================================================================
 export WANDB_MODE=online
 export WANDB_PROJECT=circuit-breakers
-export WANDB_RUN_GROUP=killarney-cb-4xh100
-export WANDB_TAGS=killarney,cb,4xh100,llama31
+export WANDB_RUN_GROUP=killarney-cb-1xh100-full
+export WANDB_TAGS=killarney,cb,1xh100,llama31,full-training
 
 # =============================================================================
 # Distributed Training Setup
@@ -107,22 +110,20 @@ echo "========================================"
 echo "Job ID: $SLURM_JOB_ID"
 echo "Date: $(date)"
 echo "Account: aip-rgrosse"
-echo "GPUs: 4 x H100 SXM 80GB"
+echo "GPUs: 1 x H100 SXM 80GB (4x nodes down)"
 echo "Model: meta-llama/Llama-3.1-8B-Instruct"
+echo "Total Steps: 150 (full training)"
 echo "Output: $RUN_DIR/outputs/cb_llama31_8b_instruct"
 echo "========================================"
 
-accelerate launch \
-  --num_processes 4 \
-  --mixed_precision bf16 \
-  --main_process_port $MASTER_PORT \
-  scripts/train_circuit_breaker.py \
-    --preset llama-3.1-8b-instruct \
-    --loss-weighting dual \
-    --total-steps 150 \
-    --batch-size 8 \
-    --gradient-accumulation-steps 2 \
-    --output-dir "$RUN_DIR/outputs/cb_llama31_8b_instruct"
+# Single GPU - no accelerate needed, use higher gradient accumulation
+python scripts/train_circuit_breaker.py \
+  --preset llama-3.1-8b-instruct \
+  --loss-weighting dual \
+  --total-steps 150 \
+  --batch-size 4 \
+  --gradient-accumulation-steps 8 \
+  --output-dir "$RUN_DIR/outputs/cb_llama31_8b_instruct"
 
 echo "========================================"
 echo "Training completed!"

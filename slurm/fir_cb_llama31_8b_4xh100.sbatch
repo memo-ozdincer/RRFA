@@ -52,6 +52,15 @@ source "$VENV_DIR/bin/activate"
 export HF_TOKEN=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
 export WANDB_API_KEY=ed8d3e45635321a86859f77337bdb4dfb5ceb113
 
+# =============================================================================
+# CPU Threading Configuration
+# =============================================================================
+export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-12}
+export OPENBLAS_NUM_THREADS=${SLURM_CPUS_PER_TASK:-12}
+export MKL_NUM_THREADS=${SLURM_CPUS_PER_TASK:-12}
+export NUMEXPR_NUM_THREADS=${SLURM_CPUS_PER_TASK:-12}
+export VECLIB_MAXIMUM_THREADS=${SLURM_CPUS_PER_TASK:-12}
+
 RUN_DIR="$SCRATCH_DIR/cb_runs/$SLURM_JOB_ID"
 mkdir -p "$RUN_DIR"
 
@@ -74,29 +83,21 @@ export WANDB__SERVICE_WAIT="${WANDB__SERVICE_WAIT:-300}"
 
 export MASTER_ADDR="$(hostname)"
 export MASTER_PORT=29500
-export OMP_NUM_THREADS=12
 
 # =============================================================================
-# Memory Optimizations for Circuit Breaker Training
+# PyTorch Memory Optimization
 # =============================================================================
-# The CB trainer loads BOTH a trainable model AND a frozen reference model,
-# which doubles memory requirements. With 4 H100s (80GB each = 320GB total):
-#
-# Llama-3.1-8B in bf16: ~16GB per copy × 2 = ~32GB base per GPU
-# With gradient checkpointing + LoRA, this should fit comfortably.
-#
-# If you still hit OOM, try:
-#   --batch-size 4 --gradient-accumulation-steps 4
-# =============================================================================
-
-# PyTorch memory settings
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 
+# =============================================================================
+# Job Info
+# =============================================================================
 echo "========================================"
-echo "Starting Circuit Breaker Training"
+echo "Circuit Breaker Training - Fir"
 echo "========================================"
 echo "Job ID: $SLURM_JOB_ID"
-echo "GPUs: 4 x H100"
+echo "Date: $(date)"
+echo "GPUs: 4 x H100 SXM 80GB"
 echo "Model: meta-llama/Llama-3.1-8B-Instruct"
 echo "Output: $RUN_DIR/outputs/cb_llama31_8b_instruct"
 echo "========================================"

@@ -2,9 +2,10 @@
 #SBATCH --job-name=cb_llama31_8b_4xh100_rorqual
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=48
 #SBATCH --gpus-per-node=h100:4
-#SBATCH --time=06:00:00
+#SBATCH --mem=256G
+#SBATCH --time=02:00:00
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 #SBATCH --account=def-zhijing_gpu
@@ -21,8 +22,7 @@
 # Notes:
 # - Rorqual compute nodes have NO INTERNET ACCESS.
 # - Run setup on login node first: bash slurm/setup_rorqual.sbatch
-# - Ensure you have access to the gated Llama weights (pre-downloaded).
-# - Set HF_TOKEN on login node before submitting if needed.
+# - HF_TOKEN and WANDB_API_KEY are hardcoded for memoozd
 # - GPU nodes: 64 cores, 498G memory, 4×H100 (SXM5 interconnect).
 #
 # =============================================================================
@@ -50,6 +50,21 @@ fi
 
 source "$VENV_DIR/bin/activate"
 
+# =============================================================================
+# Hardcoded API Tokens (for memoozd only - do not share)
+# =============================================================================
+export HF_TOKEN=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
+export WANDB_API_KEY=ed8d3e45635321a86859f77337bdb4dfb5ceb113
+
+# =============================================================================
+# CPU Threading Configuration
+# =============================================================================
+export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-12}
+export OPENBLAS_NUM_THREADS=${SLURM_CPUS_PER_TASK:-12}
+export MKL_NUM_THREADS=${SLURM_CPUS_PER_TASK:-12}
+export NUMEXPR_NUM_THREADS=${SLURM_CPUS_PER_TASK:-12}
+export VECLIB_MAXIMUM_THREADS=${SLURM_CPUS_PER_TASK:-12}
+
 RUN_DIR="$PROJECT_DIR/cb_runs/$SLURM_JOB_ID"
 mkdir -p "$RUN_DIR"
 
@@ -72,7 +87,24 @@ export WANDB__SERVICE_WAIT="${WANDB__SERVICE_WAIT:-300}"
 
 export MASTER_ADDR="$(hostname)"
 export MASTER_PORT=29500
-export OMP_NUM_THREADS=8
+
+# =============================================================================
+# PyTorch Memory Optimization
+# =============================================================================
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
+
+# =============================================================================
+# Job Info
+# =============================================================================
+echo "========================================"
+echo "Circuit Breaker Training - Rorqual"
+echo "========================================"
+echo "Job ID: $SLURM_JOB_ID"
+echo "Date: $(date)"
+echo "GPUs: 4 x H100 SXM5"
+echo "Model: meta-llama/Llama-3.1-8B-Instruct"
+echo "Output: $RUN_DIR/outputs/cb_llama31_8b_instruct"
+echo "========================================"
 
 accelerate launch \
   --num_processes 4 \
@@ -82,4 +114,11 @@ accelerate launch \
     --preset llama-3.1-8b-instruct \
     --loss-weighting dual \
     --total-steps 150 \
+    --batch-size 8 \
+    --gradient-accumulation-steps 2 \
     --output-dir "$RUN_DIR/outputs/cb_llama31_8b_instruct"
+
+echo "========================================"
+echo "Training completed!"
+echo "Date: $(date)"
+echo "========================================"

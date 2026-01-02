@@ -1,37 +1,39 @@
 #!/bin/bash
-#SBATCH --job-name=cb_llama31_8b_1xh100_debug_fir
+#SBATCH --job-name=cb_llama31_8b_1xh100_debug_rorqual
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=12
 #SBATCH --gpus=h100:1
 #SBATCH --mem=64G
-#SBATCH --time=00:45:00
-#SBATCH --chdir=/scratch/memoozd/harmful-agents-meta-dataset
+#SBATCH --time=01:00:00
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
-#SBATCH --account=def-zhijing
+#SBATCH --account=def-zhijing_gpu
 
 # =============================================================================
-# Circuit Breakers Training - Fir 1×H100 Debug (Llama-3.1-8B-Instruct)
+# Circuit Breakers Debug - Rorqual 1×H100 (Llama-3.1-8B-Instruct)
 # =============================================================================
 #
-# Single-GPU version for testing/debugging. Lower batch size and fewer steps.
-# Use fir_cb_llama31_8b_4xh100.sbatch for full training.
+# Single-GPU debug/test version. For full training, use:
+#   slurm/rorqual_cb_llama31_8b_4xh100.sbatch
 #
-# Submit from your SCRATCH clone:
-#   cd /scratch/memoozd/harmful-agents-meta-dataset
+# Submit:
+#   cd /lustre09/project/6098391/memoozd/harmful-agents-meta-dataset
 #   mkdir -p logs
-#   sbatch slurm/fir_cb_llama31_8b_1xh100_debug.sbatch
+#   sbatch slurm/rorqual_cb_llama31_8b_1xh100_debug.sbatch
 #
-# Note: HF_TOKEN and WANDB_API_KEY are hardcoded for memoozd
+# Notes:
+# - Rorqual compute nodes have NO INTERNET ACCESS.
+# - Run setup on login node first: bash slurm/setup_rorqual.sbatch
+# - HF_TOKEN and WANDB_API_KEY are hardcoded for memoozd
 #
 # =============================================================================
 
 set -euo pipefail
 
-SCRATCH_DIR="/scratch/memoozd"
-REPO_DIR="$SCRATCH_DIR/harmful-agents-meta-dataset"
-VENV_DIR="$SCRATCH_DIR/.venvs/cb_env"
+PROJECT_DIR="/lustre09/project/6098391/memoozd"
+REPO_DIR="$PROJECT_DIR/harmful-agents-meta-dataset"
+VENV_DIR="$PROJECT_DIR/.venvs/cb_env"
 
 cd "$REPO_DIR"
 mkdir -p logs
@@ -43,7 +45,8 @@ module load python/3.11.5
 
 if [[ ! -d "$VENV_DIR" ]]; then
   echo "ERROR: venv not found at $VENV_DIR"
-  echo "Run once: sbatch slurm/setup_fir.sbatch"
+  echo "Run setup on LOGIN NODE first (no internet on compute):"
+  echo "  bash slurm/setup_rorqual.sbatch"
   exit 1
 fi
 
@@ -64,10 +67,10 @@ export MKL_NUM_THREADS=${SLURM_CPUS_PER_TASK:-8}
 export NUMEXPR_NUM_THREADS=${SLURM_CPUS_PER_TASK:-8}
 export VECLIB_MAXIMUM_THREADS=${SLURM_CPUS_PER_TASK:-8}
 
-RUN_DIR="$SCRATCH_DIR/cb_runs/$SLURM_JOB_ID"
+RUN_DIR="$PROJECT_DIR/cb_runs/$SLURM_JOB_ID"
 mkdir -p "$RUN_DIR"
 
-CACHE_ROOT="$SCRATCH_DIR/cb_cache"
+CACHE_ROOT="$PROJECT_DIR/cb_cache"
 mkdir -p "$CACHE_ROOT"/{hf,wandb,torch,xdg}
 export HF_HOME="$CACHE_ROOT/hf"
 export TRANSFORMERS_CACHE="$CACHE_ROOT/hf/transformers"
@@ -76,7 +79,7 @@ export WANDB_DIR="$CACHE_ROOT/wandb"
 export TORCH_HOME="$CACHE_ROOT/torch"
 export XDG_CACHE_HOME="$CACHE_ROOT/xdg"
 
-# W&B defaults for HPC (disabled for debug run by default)
+# W&B defaults (offline for Rorqual, disabled for debug by default)
 export WANDB_MODE="${WANDB_MODE:-disabled}"
 export WANDB_PROJECT="${WANDB_PROJECT:-circuit-breakers}"
 
@@ -89,17 +92,16 @@ export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 # Job Info
 # =============================================================================
 echo "========================================"
-echo "CB Training - DEBUG (Fir 1×H100)"
+echo "CB Training - DEBUG (Rorqual 1×H100)"
 echo "========================================"
 echo "Job ID: $SLURM_JOB_ID"
 echo "Date: $(date)"
-echo "GPUs: 1 x H100 SXM 80GB"
+echo "GPUs: 1 x H100 SXM5"
 echo "Model: meta-llama/Llama-3.1-8B-Instruct"
 echo "Steps: 10 (debug)"
 echo "Output: $RUN_DIR/outputs/cb_llama31_8b_debug"
 echo "========================================"
 
-# Run with single GPU, reduced batch size, minimal steps for testing
 python scripts/train_circuit_breaker.py \
   --preset llama-3.1-8b-instruct \
   --loss-weighting dual \
@@ -111,4 +113,5 @@ python scripts/train_circuit_breaker.py \
 
 echo "========================================"
 echo "Debug training completed!"
+echo "Date: $(date)"
 echo "========================================"
