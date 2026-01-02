@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:h100:1
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=64GB
-#SBATCH --job-name=cb_llama31_8b_1xh100
+#SBATCH --job-name=cb_llama31_8b_1xh100_full
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 
