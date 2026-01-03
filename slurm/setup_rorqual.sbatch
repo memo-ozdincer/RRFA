@@ -47,7 +47,11 @@ module --force purge || true
 module load StdEnv/2023
 module load cuda/12.6
 module load python/3.11.5
-
+if ! command -v uv >/dev/null 2>&1; then
+  echo "Installing uv..."
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  export PATH="$HOME/.local/bin:$PATH"
+fi
 # Create venv
 if [[ ! -d "$VENV_DIR" ]]; then
   echo "Creating venv: $VENV_DIR"
@@ -59,7 +63,6 @@ echo "Python: $(python -V)"
 echo "Which:  $(which python)"
 
 export HF_HOME="$CACHE_ROOT/hf"
-export TRANSFORMERS_CACHE="$CACHE_ROOT/hf/transformers"
 export HF_DATASETS_CACHE="$CACHE_ROOT/hf/datasets"
 export WANDB_DIR="$CACHE_ROOT/wandb"
 export TORCH_HOME="$CACHE_ROOT/torch"
@@ -71,13 +74,13 @@ echo "Venv:  $VENV_DIR"
 echo "Cache: $CACHE_ROOT"
 echo ""
 
-pip install --upgrade pip setuptools wheel
+uv pip install --upgrade pip setuptools wheel
 
 echo "Installing Python deps (requirements.txt)..."
-pip install -r requirements.txt
+uv pip install -r requirements.txt
 
 echo "Ensuring CUDA PyTorch wheels (cu121)..."
-pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cu121
+uv pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cu121
 
 python - << 'PY'
 import torch
@@ -87,6 +90,43 @@ if torch.cuda.is_available():
     print("num gpus:", torch.cuda.device_count())
     for i in range(torch.cuda.device_count()):
         print(f"  gpu {i}:", torch.cuda.get_device_name(i))
+PY
+
+python - << 'PY'
+"""Sanity check HF cache for offline compute nodes.
+
+Rorqual compute nodes typically have no outbound internet, so the model/tokenizer
+must already exist in the local HF cache under $HF_HOME.
+"""
+import os
+
+model_id = "meta-llama/Llama-3.1-8B-Instruct"
+
+try:
+  from huggingface_hub import snapshot_download
+
+  snapshot_download(
+    repo_id=model_id,
+    local_files_only=True,
+    resume_download=True,
+    allow_patterns=[
+      "*.json",
+      "tokenizer.*",
+      "special_tokens_map.json",
+      "tokenizer_config.json",
+      "config.json",
+      "generation_config.json",
+      "model.safetensors*",
+      "pytorch_model*.bin*",
+    ],
+  )
+  print(f"✅ HF cache looks populated for: {model_id}")
+except Exception as e:
+  print(f"⚠️  HF cache is missing files for: {model_id}")
+  print("    On the LOGIN NODE (with internet), pre-download into the cache, e.g.:")
+  print(f"      huggingface-cli download {model_id} --local-dir $HF_HOME/hub --local-dir-use-symlinks False")
+  print("    Then rerun your training job; compute nodes run offline.")
+  print(f"    Details: {e}")
 PY
 
 echo ""

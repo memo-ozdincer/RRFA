@@ -36,11 +36,6 @@ VENV_DIR="$PROJECT_DIR/.venvs/cb_env"
 cd "$REPO_DIR"
 mkdir -p logs
 
-module purge || true
-module load StdEnv/2023
-module load cuda/12.6
-module load python/3.11.5
-
 # On Alliance systems, some modules can remain loaded via default collections.
 # Use --force to unload everything deterministically.
 module --force purge || true
@@ -113,11 +108,15 @@ mkdir -p "$RUN_DIR"
 CACHE_ROOT="$PROJECT_DIR/cb_cache"
 mkdir -p "$CACHE_ROOT"/{hf,wandb,torch,xdg}
 export HF_HOME="$CACHE_ROOT/hf"
-export TRANSFORMERS_CACHE="$CACHE_ROOT/hf/transformers"
 export HF_DATASETS_CACHE="$CACHE_ROOT/hf/datasets"
 export WANDB_DIR="$CACHE_ROOT/wandb"
 export TORCH_HOME="$CACHE_ROOT/torch"
 export XDG_CACHE_HOME="$CACHE_ROOT/xdg"
+
+# Compute nodes have no outbound internet; force HF/Transformers to use local cache.
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export HF_DATASETS_OFFLINE=1
 
 # W&B defaults for HPC (offline since no internet on compute).
 export WANDB_MODE="${WANDB_MODE:-offline}"
@@ -150,6 +149,8 @@ echo "========================================"
 
 python -m accelerate.commands.launch \
   --num_processes 4 \
+  --num_machines 1 \
+  --dynamo_backend no \
   --mixed_precision bf16 \
   --main_process_port $MASTER_PORT \
   scripts/train_circuit_breaker.py \
