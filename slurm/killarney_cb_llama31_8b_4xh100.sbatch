@@ -76,9 +76,6 @@ print("torch:", torch.__version__)
 print("transformers:", transformers.__version__)
 PY
 
-# =============================================================================
-# Hardcoded API Tokens (for memoozd only - do not share)
-# =============================================================================
 export HF_TOKEN=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
 export WANDB_API_KEY=ed8d3e45635321a86859f77337bdb4dfb5ceb113
 
