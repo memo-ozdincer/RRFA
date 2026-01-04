@@ -47,10 +47,12 @@ fi
 source "$VENV_DIR/bin/activate"
 
 # =============================================================================
-# Hardcoded API Tokens (for memoozd only - do not share)
+# API Tokens (export these from login node before submitting)
 # =============================================================================
-export HF_TOKEN=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
-export WANDB_API_KEY=ed8d3e45635321a86859f77337bdb4dfb5ceb113
+# Before running sbatch, export on login node:
+#   export HF_TOKEN=hf_...
+#   export WANDB_API_KEY=...
+# Job will inherit these from the environment.
 
 # =============================================================================
 # CPU Threading Configuration
