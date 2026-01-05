@@ -28,7 +28,33 @@ module --force purge || true
 module load StdEnv/2023
 module load cuda/12.6
 module load python/3.11.5
+module load git-lfs/3.3.0 || echo "git-lfs module not available, trying system git-lfs"
 module list
+
+echo "=== Git LFS check ==="
+# Ensure Git LFS files are pulled (training data is stored via LFS)
+if command -v git-lfs &> /dev/null || command -v git lfs &> /dev/null; then
+  echo "Git LFS available, pulling data files..."
+  git lfs pull --include="data/circuit_breakers/**/*.jsonl" || echo "Warning: git lfs pull failed"
+else
+  echo "WARNING: git-lfs not found. Large data files may be LFS pointers!"
+fi
+
+# Validate training data file exists and is valid JSON (not an LFS pointer)
+DATA_FILE="$REPO_DIR/data/circuit_breakers/cb_training_batches.jsonl"
+if [[ -f "$DATA_FILE" ]]; then
+  FIRST_CHAR=$(head -c 1 "$DATA_FILE")
+  if [[ "$FIRST_CHAR" != "{" ]]; then
+    echo "ERROR: $DATA_FILE appears to be a Git LFS pointer, not actual data!"
+    echo "First line: $(head -n 1 "$DATA_FILE")"
+    echo "Run 'git lfs pull' to download the actual file."
+    exit 1
+  fi
+  echo "Training data validated: $(wc -l < "$DATA_FILE") lines"
+else
+  echo "ERROR: Training data not found at $DATA_FILE"
+  exit 1
+fi
 
 echo "=== Venv check ==="
 if [[ ! -d "$VENV_DIR" ]]; then
@@ -70,5 +96,4 @@ python scripts/train_circuit_breaker.py \
   --gradient-accumulation-steps 1 \
   --output-dir "$RUN_DIR/debug_output"
 
-echo "=== Debug trainin
 echo "=== Debug complete ==="
