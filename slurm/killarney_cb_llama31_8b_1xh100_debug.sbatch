@@ -17,7 +17,7 @@
 #   slurm/killarney_cb_llama31_8b_4xh100.sbatch
 #
 # Submit from your project directory:
-#   cd /project/6105522/harmful-agents-meta-dataset
+#   cd /project/6105522/memoozd/harmful-agents-meta-dataset
 #   mkdir -p logs
 #   sbatch slurm/killarney_cb_llama31_8b_1xh100_debug.sbatch
 #
@@ -27,10 +27,10 @@ set -euo pipefail
 
 mkdir -p logs
 
-PROJECT_DIR="/project/6105522"
+PROJECT_DIR="/project/6105522/memoozd"
 SCRATCH_DIR="$HOME/scratch"
-REPO_DIR="/project/6105522/harmful-agents-meta-dataset"
-VENV_DIR="$PROJECT_DIR/.venvs/cb_env"
+REPO_DIR="/project/6105522/memoozd/harmful-agents-meta-dataset"
+VENV_DIR="/project/6105522/memoozd/.venvs/cb_env"
 
 cd "$REPO_DIR"
 

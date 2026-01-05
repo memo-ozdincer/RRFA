@@ -10,7 +10,7 @@ set -euo pipefail
 # - Pre-download gated Llama model into HF cache
 #
 # Usage:
-#   cd /project/6105522/harmful-agents-meta-dataset
+#   cd /project/6105522/memoozd/harmful-agents-meta-dataset
 #   export HF_TOKEN=hf_...   # required for gated Llama models (generate new one if expired)
 #   bash scripts/killarney_online_setup.sh
 #
@@ -25,9 +25,9 @@ set -euo pipefail
 #   bash scripts/killarney_online_setup.sh
 # =============================================================================
 
-PROJECT_DIR="${PROJECT_DIR:-/project/6105522}"
+PROJECT_DIR="${PROJECT_DIR:-/project/6105522/memoozd}"
 REPO_DIR="${REPO_DIR:-$PROJECT_DIR/harmful-agents-meta-dataset}"
-VENV_DIR="${VENV_DIR:-$PROJECT_DIR/.venvs/cb_env}"
+VENV_DIR="${VENV_DIR:-/project/6105522/memoozd/.venvs/cb_env}"
 CACHE_ROOT="${CACHE_ROOT:-$PROJECT_DIR/cb_cache}"
 HF_MODEL_ID="${HF_MODEL_ID:-meta-llama/Llama-3.1-8B-Instruct}"
 

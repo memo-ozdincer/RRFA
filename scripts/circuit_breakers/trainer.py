@@ -554,11 +554,20 @@ class CircuitBreakerDataset(Dataset):
         self.batches = []
 
         # Load all batches
+        if not os.path.exists(data_path):
+            raise FileNotFoundError(f"Training data not found: {data_path}")
+        
         with open(data_path, 'r') as f:
-            for line in f:
+            for line_num, line in enumerate(f, start=1):
                 line = line.strip()
-                if line:
+                if not line:
+                    continue
+                try:
                     self.batches.append(json.loads(line))
+                except json.JSONDecodeError as e:
+                    print(f"ERROR: Failed to parse JSON on line {line_num} of {data_path}")
+                    print(f"Line content (first 200 chars): {line[:200]!r}")
+                    raise
 
         # Count completion-style examples
         completion_count = sum(
