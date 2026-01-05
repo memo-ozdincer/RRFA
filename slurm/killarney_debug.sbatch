@@ -38,8 +38,9 @@ fi
 source "$VENV_DIR/bin/activate"
 echo "Python: $(python -V)"
 echo "Which:  $(which python)"
-Quick package check ==="
-python -c "import torch, transformers, peft; print('torch:', torch.__version__, '| CUDA:', torch.cuda.is_available(), '| GPUs:', torch.cuda.device_count())"
+
+echo "=== Quick package check ==="
+python -c 'import torch, transformers, peft; print("torch:", torch.__version__, "| CUDA:", torch.cuda.is_available(), "| GPUs:", torch.cuda.device_count())'
 
 echo "=== Environment setup ==="
 export OMP_NUM_THREADS=4
