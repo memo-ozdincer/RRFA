@@ -17,10 +17,12 @@
 # Full training (150 steps) on 4 GPUs with distributed training
 #
 # MEMORY OPTIMIZATIONS for L40S (44GB usable per GPU):
-# - DeepSpeed ZeRO Stage 2: shards optimizer states across GPUs
 # - Reduced max_seq_length: 512 (vs 2048 default)
 # - Reduced batch_size: 1 per GPU (vs 2 default)
 # - Higher gradient accumulation: 16 (effective batch = 4*1*16 = 64)
+#
+# NOTE: DeepSpeed is NOT compatible with this training loop because
+# it computes gradients for both harmful and benign samples per step.
 #
 # Submit from your project directory:
 #   cd /project/6105522/memoozd/harmful-agents-meta-dataset
@@ -74,7 +76,7 @@ def check(mod: str) -> None:
         print(f"ERROR: failed to import '{mod}': {e}")
         sys.exit(1)
 
-for m in ("torch", "transformers", "peft", "accelerate", "deepspeed"):
+for m in ("torch", "transformers", "peft", "accelerate"):
     check(m)
 
 import torch, transformers
@@ -152,23 +154,19 @@ echo "Total Steps: 150 (full training)"
 echo "Batch Size: 1 per GPU (4 total)"
 echo "Max Seq Length: 512"
 echo "Gradient Accum: 16 (effective batch: 64)"
-echo "DeepSpeed: ZeRO Stage 2"
 echo "Output: $RUN_DIR/outputs/cb_llama31_8b_instruct"
 echo "========================================"
 
 # =============================================================================
-# Multi-GPU Training with Accelerate + DeepSpeed ZeRO Stage 2
+# Multi-GPU Training with Accelerate (DDP)
 # =============================================================================
 # Memory-optimized configuration for L40S GPUs:
-# - DeepSpeed ZeRO Stage 2 shards optimizer states across GPUs
 # - batch_size=1, max_seq_length=512 to fit in 44GB VRAM
 # - Effective batch size = 4 GPUs × 1 batch × 16 accumulation = 64
 accelerate launch \
   --num_processes=4 \
   --num_machines=1 \
   --mixed_precision=bf16 \
-  --use_deepspeed \
-  --deepspeed_config_file="$REPO_DIR/configs/deepspeed_zero2_l40s.json" \
   scripts/train_circuit_breaker.py \
   --preset llama-3.1-8b-instruct \
   --loss-weighting dual \
