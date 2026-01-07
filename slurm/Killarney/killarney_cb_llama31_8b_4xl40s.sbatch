@@ -149,8 +149,8 @@ echo "========================================"
 # =============================================================================
 # Multi-GPU Training with Accelerate
 # =============================================================================
-# With 4 GPUs, use lower gradient accumulation (2 instead of 8)
-# Effective batch size = 4 GPUs × 4 batch × 2 accumulation = 32
+# With 4 GPUs, reduce batch size to 2 to avoid OOM
+# Effective batch size = 4 GPUs × 2 batch × 4 accumulation = 32
 accelerate launch \
   --num_processes=4 \
   --num_machines=1 \
@@ -159,8 +159,8 @@ accelerate launch \
   --preset llama-3.1-8b-instruct \
   --loss-weighting dual \
   --total-steps 150 \
-  --batch-size 4 \
-  --gradient-accumulation-steps 2 \
+  --batch-size 2 \
+  --gradient-accumulation-steps 4 \
   --output-dir "$RUN_DIR/outputs/cb_llama31_8b_instruct"
 
 echo "========================================"
