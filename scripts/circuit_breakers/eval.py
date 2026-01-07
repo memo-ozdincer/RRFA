@@ -21,13 +21,30 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 
-# Handle both script and module imports
-try:
-    from .hf_utils import resolve_hf_token
-except ImportError:
-    # Running as script, add parent to path
-    sys.path.insert(0, str(Path(__file__).parent.parent))
-    from circuit_breakers.hf_utils import resolve_hf_token
+
+# =============================================================================
+# HuggingFace Token Resolution (inlined to avoid import issues)
+# =============================================================================
+
+def resolve_hf_token(explicit_token: Optional[str] = None) -> Optional[str]:
+    """Resolve a Hugging Face access token.
+
+    Precedence:
+    1) explicit_token (caller-provided)
+    2) HF_TOKEN
+    3) HUGGINGFACE_HUB_TOKEN
+    4) HUGGINGFACE_TOKEN (legacy)
+
+    Returns None if no token is available.
+    """
+    if explicit_token:
+        return explicit_token
+
+    return (
+        os.environ.get("HF_TOKEN")
+        or os.environ.get("HUGGINGFACE_HUB_TOKEN")
+        or os.environ.get("HUGGINGFACE_TOKEN")
+    )
 
 
 # =============================================================================
@@ -883,28 +900,19 @@ def main():
     wandb_run = None
     if use_wandb:
         try:
-            # Handle both script and module imports
-            try:
-                from scripts.utils.wandb_logging import (
-                    build_wandb_init_kwargs,
-                    get_git_metadata,
-                    get_host_metadata,
-                    get_slurm_metadata,
-                    parse_tags,
-                    wandb_is_available,
-                )
-            except ImportError:
-                # Add repo root to path
-                repo_root = Path(__file__).resolve().parents[2]
+            # Add repo root to path for imports
+            repo_root = Path(__file__).resolve().parents[2]
+            if str(repo_root) not in sys.path:
                 sys.path.insert(0, str(repo_root))
-                from scripts.utils.wandb_logging import (
-                    build_wandb_init_kwargs,
-                    get_git_metadata,
-                    get_host_metadata,
-                    get_slurm_metadata,
-                    parse_tags,
-                    wandb_is_available,
-                )
+
+            from scripts.utils.wandb_logging import (
+                build_wandb_init_kwargs,
+                get_git_metadata,
+                get_host_metadata,
+                get_slurm_metadata,
+                parse_tags,
+                wandb_is_available,
+            )
 
             if wandb_is_available():
                 repo_dir = Path(__file__).resolve().parents[2]
