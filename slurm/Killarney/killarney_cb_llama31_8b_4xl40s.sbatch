@@ -39,30 +39,6 @@ module --force purge || true
 module load StdEnv/2023
 module load cuda/12.6
 module load python/3.11.5
-module load git-lfs/3.3.0 || echo "git-lfs module not available"
-
-# Ensure Git LFS files are pulled (training data is stored via LFS)
-echo "=== Git LFS check ==="
-if command -v git-lfs &> /dev/null || git lfs version &> /dev/null; then
-  git lfs pull --include="data/circuit_breakers/**/*.jsonl" || echo "Warning: git lfs pull had issues"
-else
-  echo "WARNING: git-lfs not available"
-fi
-
-# Validate training data
-DATA_FILE="$REPO_DIR/data/circuit_breakers/cb_training_batches.jsonl"
-if [[ -f "$DATA_FILE" ]]; then
-  FIRST_CHAR=$(head -c 1 "$DATA_FILE")
-  if [[ "$FIRST_CHAR" != "{" ]]; then
-    echo "ERROR: $DATA_FILE is a Git LFS pointer, not actual data!"
-    echo "Run 'git lfs pull' to download the file."
-    exit 1
-  fi
-  echo "Training data validated: $(wc -l < "$DATA_FILE") lines"
-else
-  echo "ERROR: Training data not found at $DATA_FILE"
-  exit 1
-fi
 
 if [[ ! -d "$VENV_DIR" ]]; then
   echo "ERROR: venv not found at $VENV_DIR"
