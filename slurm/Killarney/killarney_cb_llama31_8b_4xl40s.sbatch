@@ -127,7 +127,7 @@ export NCCL_DEBUG=INFO
 # =============================================================================
 # PyTorch Memory Optimization
 # =============================================================================
-export PYTORCH_ALLOC_CONF="expandable_segments:True"
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 
 # =============================================================================
 # Job Info

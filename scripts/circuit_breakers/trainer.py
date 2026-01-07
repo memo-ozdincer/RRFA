@@ -902,11 +902,16 @@ class CircuitBreakerTrainer:
         return asdict(self.config)
     
     def _load_models(self):
-        """Load trainable and frozen reference models."""
+        """Load trainable model with LoRA adapters.
+
+        Memory optimization: Instead of loading a separate frozen reference model,
+        we use the same model and toggle LoRA adapters on/off to get frozen
+        representations. This saves ~16GB per GPU for Llama-8B class models.
+        """
         self.accelerator.print(f"Loading model: {self.config.base_model}")
 
         hf_token = resolve_hf_token()
-        
+
         # Determine dtype
         dtype_map = {
             "bfloat16": torch.bfloat16,
@@ -914,7 +919,7 @@ class CircuitBreakerTrainer:
             "float32": torch.float32,
         }
         torch_dtype = dtype_map.get(self.config.torch_dtype, torch.bfloat16)
-        
+
         # Load trainable model with LoRA
         # Under multi-GPU Accelerate/DDP, keep device_map=None and let Accelerate place shards.
         # device_map="auto" is only safe for single-process inference-style loading.
@@ -927,10 +932,10 @@ class CircuitBreakerTrainer:
             trust_remote_code=True,
             token=hf_token,
         )
-        
+
         if self.config.gradient_checkpointing:
             self.model.gradient_checkpointing_enable()
-        
+
         # Setup LoRA
         lora_config = LoraConfig(
             r=self.config.lora.r,
@@ -941,22 +946,13 @@ class CircuitBreakerTrainer:
             task_type=TaskType.CAUSAL_LM,
             bias="none",
         )
-        
+
         self.model = get_peft_model(self.model, lora_config)
         self.model.print_trainable_parameters()
-        
-        # Load frozen reference model (for computing loss targets)
-        self.accelerator.print("Loading frozen reference model...")
-        self.frozen_model = AutoModelForCausalLM.from_pretrained(
-            self.config.base_model,
-            torch_dtype=torch_dtype,
-            device_map=device_map,
-            trust_remote_code=True,
-            token=hf_token,
-        )
-        self.frozen_model.eval()
-        for param in self.frozen_model.parameters():
-            param.requires_grad = False
+
+        # No separate frozen model - we use adapter toggling instead
+        # to get frozen representations from the same model
+        self.frozen_model = None
     
     def _setup_data(self):
         """Setup dataset and dataloader."""
@@ -1002,13 +998,17 @@ class CircuitBreakerTrainer:
     
     def _prepare_accelerator(self):
         """Prepare models and optimizer with accelerator for multi-GPU."""
-        self.model, self.frozen_model, self.optimizer, self.dataloader, self.scheduler = \
+        self.model, self.optimizer, self.dataloader, self.scheduler = \
             self.accelerator.prepare(
-                self.model, self.frozen_model, self.optimizer, self.dataloader, self.scheduler
+                self.model, self.optimizer, self.dataloader, self.scheduler
             )
     
     def _setup_extractors(self):
-        """Setup representation extractors for both models."""
+        """Setup representation extractors.
+
+        Note: We use the same model for both trainable and frozen representations
+        by toggling LoRA adapters on/off, so we only need one extractor.
+        """
         method = (self.config.representation_extraction or "").strip().lower()
         if method not in {"hidden_states", "hooks"}:
             raise ValueError(
@@ -1021,14 +1021,12 @@ class CircuitBreakerTrainer:
         if method == "hooks":
             # Get the underlying model (unwrap accelerator and PEFT)
             unwrapped_model = self.accelerator.unwrap_model(self.model)
-            unwrapped_frozen = self.accelerator.unwrap_model(self.frozen_model)
 
             self.model_extractor = RepresentationExtractor(
                 unwrapped_model, self.config.cb_target_layers
             )
-            self.frozen_extractor = RepresentationExtractor(
-                unwrapped_frozen, self.config.cb_target_layers
-            )
+            # No separate frozen extractor - we reuse model_extractor with adapters disabled
+            self.frozen_extractor = None
         else:
             # No hooks required.
             self.model_extractor = None
@@ -1079,14 +1077,16 @@ class CircuitBreakerTrainer:
         # === Process Harmful Samples (Rerouting) ===
         if self._rep_extraction_method == "hooks":
             self.model_extractor.clear()
-            self.frozen_extractor.clear()
 
         harmful_input_ids = batch['harmful_input_ids']
         harmful_attention_mask = batch['harmful_attention_mask']
         harmful_loss_mask = batch.get('harmful_loss_mask', None)
 
+        # Get reference to underlying PEFT model for adapter toggling
+        unwrapped_model = self.accelerator.unwrap_model(self.model)
+
         if self._rep_extraction_method == "hooks":
-            # Forward through trainable model
+            # Forward through trainable model (adapters enabled)
             _ = self.model(
                 input_ids=harmful_input_ids,
                 attention_mask=harmful_attention_mask,
@@ -1094,14 +1094,17 @@ class CircuitBreakerTrainer:
             )
             harmful_model_reps = self.model_extractor.get_representations()
 
-            # Forward through frozen model (no grad)
+            # Forward through same model with adapters disabled (frozen behavior)
+            self.model_extractor.clear()
             with torch.no_grad():
-                _ = self.frozen_model(
+                unwrapped_model.disable_adapter_layers()
+                _ = self.model(
                     input_ids=harmful_input_ids,
                     attention_mask=harmful_attention_mask,
                     use_cache=False,
                 )
-            harmful_frozen_reps = self.frozen_extractor.get_representations()
+                unwrapped_model.enable_adapter_layers()
+            harmful_frozen_reps = self.model_extractor.get_representations()
         else:
             outputs = self.model(
                 input_ids=harmful_input_ids,
@@ -1113,14 +1116,17 @@ class CircuitBreakerTrainer:
             harmful_model_reps = _select_hidden_states(outputs, self.config.cb_target_layers)
             del outputs
 
+            # Get frozen representations by disabling adapters
             with torch.no_grad():
-                frozen_outputs = self.frozen_model(
+                unwrapped_model.disable_adapter_layers()
+                frozen_outputs = self.model(
                     input_ids=harmful_input_ids,
                     attention_mask=harmful_attention_mask,
                     output_hidden_states=True,
                     use_cache=False,
                     return_dict=True,
                 )
+                unwrapped_model.enable_adapter_layers()
                 harmful_frozen_reps = _select_hidden_states(
                     frozen_outputs, self.config.cb_target_layers
                 )
@@ -1138,14 +1144,13 @@ class CircuitBreakerTrainer:
         # === Process Benign Samples (Retain) ===
         if self._rep_extraction_method == "hooks":
             self.model_extractor.clear()
-            self.frozen_extractor.clear()
 
         benign_input_ids = batch['benign_input_ids']
         benign_attention_mask = batch['benign_attention_mask']
         benign_loss_mask = batch.get('benign_loss_mask', None)
 
         if self._rep_extraction_method == "hooks":
-            # Forward through trainable model
+            # Forward through trainable model (adapters enabled)
             _ = self.model(
                 input_ids=benign_input_ids,
                 attention_mask=benign_attention_mask,
@@ -1153,14 +1158,17 @@ class CircuitBreakerTrainer:
             )
             benign_model_reps = self.model_extractor.get_representations()
 
-            # Forward through frozen model (no grad)
+            # Forward through same model with adapters disabled (frozen behavior)
+            self.model_extractor.clear()
             with torch.no_grad():
-                _ = self.frozen_model(
+                unwrapped_model.disable_adapter_layers()
+                _ = self.model(
                     input_ids=benign_input_ids,
                     attention_mask=benign_attention_mask,
                     use_cache=False,
                 )
-            benign_frozen_reps = self.frozen_extractor.get_representations()
+                unwrapped_model.enable_adapter_layers()
+            benign_frozen_reps = self.model_extractor.get_representations()
         else:
             outputs = self.model(
                 input_ids=benign_input_ids,
@@ -1172,14 +1180,17 @@ class CircuitBreakerTrainer:
             benign_model_reps = _select_hidden_states(outputs, self.config.cb_target_layers)
             del outputs
 
+            # Get frozen representations by disabling adapters
             with torch.no_grad():
-                frozen_outputs = self.frozen_model(
+                unwrapped_model.disable_adapter_layers()
+                frozen_outputs = self.model(
                     input_ids=benign_input_ids,
                     attention_mask=benign_attention_mask,
                     output_hidden_states=True,
                     use_cache=False,
                     return_dict=True,
                 )
+                unwrapped_model.enable_adapter_layers()
                 benign_frozen_reps = _select_hidden_states(
                     frozen_outputs, self.config.cb_target_layers
                 )
