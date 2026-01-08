@@ -1,11 +1,55 @@
 # Circuit Breakers Pipeline: Complete Reference
 
-**Version:** 2.0
-**Last Updated:** January 7, 2026
+**Version:** 2.1
+**Last Updated:** January 8, 2026
 **Target Model:** `meta-llama/Llama-3.1-8B-Instruct` (tested), `meta-llama/Llama-4-Scout-17B-16E-Instruct` (supported)
 **Hardware:** 4 × NVIDIA L40S 48GB (tested), 4 × NVIDIA H100 SXM 80GB (supported)
 
-> **Major Update (v2.0):** Added full agentic data support with multi-turn traces, tool calls, and data augmentation pipeline. The training pipeline now handles `messages[]` arrays with tool_calls natively.
+> **Major Update (v2.1):** Fixed critical data quality issue where synthetic completions were preventing effective CB training. Added gradient diagnostics. Fixed alpha decay schedule.
+
+---
+
+## CRITICAL: Known Issues and Fixes (v2.1)
+
+Before running training, address these critical issues:
+
+### Issue 1: Synthetic Completions (ROOT CAUSE of Training Failures)
+
+**Problem:** The data pipeline generates synthetic labels like:
+```
+"[TOOL_CALL] search_web\n(Expected: retrieve_multimodal_docs, but injection caused flip to: search_web)"
+```
+These are NOT actual model outputs. CB training requires REAL harmful completions.
+
+**Fix:** Run the realistic completions generator before training:
+```bash
+python scripts/augmentation/generate_real_cb_completions.py \
+    --input data/circuit_breakers/harmful/harmful_pairs.completions.jsonl \
+    --mode realistic-tools
+```
+
+### Issue 2: Alpha Decay Schedule Incomplete
+
+**Problem:** With `alpha_decay_multiplier=2.0`, training ends at 50% of the schedule (α=5.0 instead of 0).
+
+**Fix:** Set `--alpha-decay-multiplier 1.0` so α reaches 0 at end of training.
+
+### Issue 3: Gradient Flow Verification
+
+**Problem:** The warning `None of the inputs have requires_grad=True` may indicate gradients not flowing.
+
+**Fix:** Use the v2 SLURM script which includes gradient diagnostics and optionally disables gradient checkpointing:
+```bash
+sbatch slurm/Killarney/killarney_cb_llama31_8b_4xl40s_v2.sbatch
+```
+
+### Quick Validation Checklist
+
+Before training, verify:
+- [ ] `reroute_loss` should DECREASE during training (not stay at ~0.999)
+- [ ] Data has realistic completions (not synthetic labels)
+- [ ] Alpha schedule completes within training steps
+- [ ] Gradient norms are non-zero (logged every 50 steps)
 
 ---
 

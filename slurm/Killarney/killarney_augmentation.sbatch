@@ -1,15 +1,14 @@
 #!/bin/bash
 #SBATCH --job-name=cb_augment
-#SBATCH --output=%x_%j.out
-#SBATCH --error=%x_%j.err
+#SBATCH -A aip-rgrosse
+#SBATCH -D /project/6105522/memoozd/harmful-agents-meta-dataset
 #SBATCH --time=02:00:00
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
+#SBATCH --gres=gpu:l40s:1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=32G
-#SBATCH --account=def-ssanner
-#SBATCH --mail-type=ALL
-#SBATCH --mail-user=memo.ozdincer@mail.utoronto.ca
+#SBATCH --mem=48GB
+#SBATCH --job-name=eval_cb_llama31_8b
+#SBATCH --output=logs/%x_%j.out
+#SBATCH --error=logs/%x_%j.err
 
 ##############################################################################
 # Circuit Breaker Data Augmentation Pipeline

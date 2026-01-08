@@ -1142,7 +1142,45 @@ class CircuitBreakerTrainer:
             # No hooks required.
             self.model_extractor = None
             self.frozen_extractor = None
-    
+
+    def _compute_gradient_stats(self) -> Dict[str, float]:
+        """Compute gradient statistics for debugging.
+
+        Returns statistics about gradient magnitudes for LoRA parameters.
+        Helps diagnose if gradients are flowing properly.
+        """
+        stats = {
+            'grad_norm_total': 0.0,
+            'grad_norm_lora_a': 0.0,
+            'grad_norm_lora_b': 0.0,
+            'params_with_grad': 0,
+            'params_without_grad': 0,
+        }
+
+        total_norm_sq = 0.0
+        lora_a_norm_sq = 0.0
+        lora_b_norm_sq = 0.0
+
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                if param.grad is not None:
+                    grad_norm_sq = param.grad.data.norm(2).item() ** 2
+                    total_norm_sq += grad_norm_sq
+                    stats['params_with_grad'] += 1
+
+                    if 'lora_A' in name:
+                        lora_a_norm_sq += grad_norm_sq
+                    elif 'lora_B' in name:
+                        lora_b_norm_sq += grad_norm_sq
+                else:
+                    stats['params_without_grad'] += 1
+
+        stats['grad_norm_total'] = total_norm_sq ** 0.5
+        stats['grad_norm_lora_a'] = lora_a_norm_sq ** 0.5
+        stats['grad_norm_lora_b'] = lora_b_norm_sq ** 0.5
+
+        return stats
+
     def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
         """
         Execute one training step - Agentic Enhanced Version.
@@ -1347,6 +1385,16 @@ class CircuitBreakerTrainer:
         if use_dual:
             metrics['cs'] = cs
             metrics['cr'] = cr
+
+        # Gradient diagnostics (every 50 steps on main process)
+        if self.global_step % 50 == 1 and self.accelerator.is_main_process:
+            grad_stats = self._compute_gradient_stats()
+            metrics.update(grad_stats)
+            if grad_stats.get('grad_norm_total', 0) < 1e-8:
+                self.accelerator.print(
+                    f"  WARNING: Very small gradients detected! "
+                    f"grad_norm={grad_stats.get('grad_norm_total', 0):.2e}"
+                )
 
         return metrics
     
