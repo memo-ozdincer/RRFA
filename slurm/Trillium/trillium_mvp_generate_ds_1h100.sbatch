@@ -54,6 +54,10 @@ source "$VENV_DIR/bin/activate"
 CACHE_ROOT="$SCRATCH_DIR/cb_cache"
 mkdir -p "$CACHE_ROOT"/{hf/hub,hf/datasets,torch}
 
+# CRITICAL FIX: Override HOME to trick flashinfer and other tools that hardcode ~/.cache
+# This redirects any tool trying to write to ~/.cache to $CACHE_ROOT/.cache
+export HOME="$CACHE_ROOT"
+
 export HF_HOME="$CACHE_ROOT/hf"
 export HF_HUB_CACHE="$CACHE_ROOT/hf/hub"
 export HF_DATASETS_CACHE="$CACHE_ROOT/hf/datasets"
@@ -86,6 +90,7 @@ echo "Python: $(python -V)"
 echo "Which:  $(which python)"
 echo ""
 echo "Cache Configuration:"
+echo "  HOME: $HOME"
 echo "  HF_HOME: $HF_HOME"
 echo "  HF_HUB_CACHE: $HF_HUB_CACHE"
 echo "  HF_HUB_OFFLINE: $HF_HUB_OFFLINE"

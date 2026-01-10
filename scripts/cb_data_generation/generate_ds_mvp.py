@@ -30,10 +30,18 @@ import os
 
 # Hardcode scratch/cache directories for /scratch/memoozd/
 cache_root = "/scratch/memoozd/cb_cache"
+
+# CRITICAL FIX: Override HOME to trick flashinfer that defaults to ~/.cache
+# This redirects any tool trying to write to ~/.cache to /scratch/memoozd/cb_cache/.cache
+os.environ["HOME"] = cache_root 
+
 os.makedirs(os.path.join(cache_root, "vllm"), exist_ok=True)
 os.makedirs(os.path.join(cache_root, "flashinfer"), exist_ok=True)
+os.makedirs(os.path.join(cache_root, "xdg_cache"), exist_ok=True) # Ensure XDG dir exists
+
 os.environ["VLLM_USAGE_STATS_DIR"] = os.path.join(cache_root, "vllm")
 os.environ["FLASHINFER_WORKSPACE_DIR"] = os.path.join(cache_root, "flashinfer")
+os.environ["XDG_CACHE_HOME"] = os.path.join(cache_root, "xdg_cache") # Re-assert XDG cache
 
 import argparse
 import json
