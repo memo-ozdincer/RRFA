@@ -102,20 +102,8 @@ else
     echo "⚠️  Dr file not found: $DR_FILE"
 fi
 
-# Validate Eval set
-if [[ -f "$EVAL_FILE" ]]; then
-    echo ""
-    echo "--- Validating Eval: $EVAL_FILE ---"
-    if python scripts/cb_data_generation/validate_format.py \
-        --data "$EVAL_FILE"; then
-        echo "✅ Eval set validation PASSED"
-    else
-        echo "❌ Eval set validation FAILED"
-        VALIDATION_PASSED=false
-    fi
-else
-    echo "⚠️  Eval file not found: $EVAL_FILE"
-fi
+# NOTE: Eval set validation removed - eval sets are created by create_eval.sbatch
+# and will be validated there if needed
 
 # =============================================================================
 # Summary
@@ -130,7 +118,6 @@ if $VALIDATION_PASSED; then
     echo "Data ready for training:"
     echo "  Ds: $DS_FILE"
     echo "  Dr: $DR_FILE"
-    echo "  Eval: $EVAL_FILE"
     exit 0
 else
     echo "❌ Some validations FAILED"
