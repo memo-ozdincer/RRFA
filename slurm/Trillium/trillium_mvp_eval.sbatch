@@ -90,9 +90,16 @@ echo "========================================"
 # =============================================================================
 # Configuration
 # =============================================================================
-# UPDATE THESE PATHS:
 BASE_MODEL="meta-llama/Llama-3.1-8B-Instruct"
-CB_ADAPTER="$SCRATCH_DIR/cb_runs/latest/outputs/cb_mvp_adapter"  # Update with actual path
+
+# Find the most recent run directory (by modification time)
+LATEST_RUN=$(ls -td $SCRATCH_DIR/cb_runs/*/ 2>/dev/null | head -1)
+if [[ -z "$LATEST_RUN" ]]; then
+    echo "ERROR: No run directory found in $SCRATCH_DIR/cb_runs/"
+    exit 1
+fi
+
+CB_ADAPTER="${LATEST_RUN}outputs/cb_mvp_adapter"
 
 DATA_DIR="$SCRATCH_DIR/cb_mvp_data"
 EVAL_DATA="$DATA_DIR/eval_stage1.jsonl"
@@ -100,6 +107,9 @@ TOOL_SCHEMA="configs/tool_schemas/b4_standard_v1.json"
 OUTPUT_DIR="$SCRATCH_DIR/cb_mvp_eval"
 
 mkdir -p "$OUTPUT_DIR"
+
+echo "Latest run: $LATEST_RUN"
+echo "CB adapter: $CB_ADAPTER"
 
 # =============================================================================
 # Check Dependencies
