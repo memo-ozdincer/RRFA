@@ -1,28 +1,30 @@
 #!/bin/bash
-#SBATCH --job-name=mvp_ds_gen
+#SBATCH --job-name=mvp_dr_1h100
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=4
+#SBATCH --gpus-per-node=1
 #SBATCH --time=02:00:00
 #SBATCH --output=/scratch/memoozd/logs/%x_%j.out
 #SBATCH --error=/scratch/memoozd/logs/%x_%j.err
 #SBATCH --account=def-zhijing
 
 # =============================================================================
-# Stage 1 MVP: Generate Ds (Harmful Set) with Behavioral Filtering
-# Trillium 4×H100 (tensor parallel)
+# Stage 1 MVP: Generate Dr (Retain Set) as Paired Benign Twins
+# Trillium 1×H100 (single GPU)
 # =============================================================================
 #
-# Generates Circuit Breaker Ds set using behavioral filtering:
-# - Only includes samples where the attack SUCCEEDS (model calls wrong tool)
-# - Uses vLLM with tensor_parallel=4 for high-throughput batched inference
-# - Outputs in Llama 3.1 tool-calling format
+# Generates Circuit Breaker Dr set:
+# - Creates benign twins of Ds samples (removes injection)
+# - Only includes samples where model calls CORRECT tool
+# - Uses transformers backend (single GPU, no tensor parallelism)
 #
-# Hardware: 4x NVIDIA H100 SXM (80GB each = 320GB total)
-# Estimated time: ~1-2 hours for full dataset
+# Hardware: 1x NVIDIA H100 SXM (80GB)
+# Estimated time: ~2 hours
+#
+# DEPENDENCY: Run trillium_mvp_generate_ds_1h100.sbatch first!
 #
 # Submit from $SCRATCH:
 #   cd /scratch/memoozd/harmful-agents-meta-dataset
-#   sbatch slurm/Trillium/trillium_mvp_generate_ds.sbatch
+#   sbatch slurm/Trillium/trillium_mvp_generate_dr_1h100.sbatch
 #
 # =============================================================================
 
@@ -77,13 +79,8 @@ echo "  HF_HUB_CACHE: $HF_HUB_CACHE"
 echo "  HF_HUB_OFFLINE: $HF_HUB_OFFLINE"
 echo ""
 
-# Quick cache check
-echo "Hub cache contents:"
-ls -1d "$HF_HUB_CACHE"/models--* 2>/dev/null | head -5 || echo "  (no models cached yet - run prefetch_models.sh first!)"
-echo ""
-
 # =============================================================================
-# Preflight GPU Check
+# GPU Check
 # =============================================================================
 python - << 'PY'
 import sys
@@ -108,49 +105,51 @@ echo ""
 # Job Info
 # =============================================================================
 echo "========================================"
-echo "Stage 1 MVP: Generate Ds (Behavioral Filtering)"
+echo "Stage 1 MVP: Generate Dr (Paired Benign Twins)"
 echo "========================================"
 echo "Job ID: $SLURM_JOB_ID"
 echo "Date: $(date)"
-echo "GPU: 4 x H100 SXM 80GB (tensor_parallel=4)"
-echo "Backend: vLLM"
-echo "Model: mlabonne/Meta-Llama-3.1-8B-Instruct-abliterated"
+echo "GPU: 1 x H100 SXM 80GB"
+echo "Backend: transformers (single GPU)"
+echo "Model: meta-llama/Llama-3.1-8B-Instruct"
 echo "========================================"
 
 # =============================================================================
-# Output Directories
+# Check Dependencies
 # =============================================================================
 OUTPUT_DIR="$SCRATCH_DIR/cb_mvp_data"
-mkdir -p "$OUTPUT_DIR"
+DS_FILE="$OUTPUT_DIR/ds_stage1.jsonl"
+
+if [[ ! -f "$DS_FILE" ]]; then
+    echo "ERROR: Ds file not found at $DS_FILE"
+    echo "Please run trillium_mvp_generate_ds_1h100.sbatch first!"
+    exit 1
+fi
+
+echo "Found Ds file: $DS_FILE"
+echo "Ds sample count: $(wc -l < "$DS_FILE")"
 
 # =============================================================================
-# Run Ds Generation
+# Run Dr Generation
 # =============================================================================
-# IMPORTANT: Use abliterated model so attacks can succeed
-# Standard Llama-3.1-Instruct will refuse harmful completions!
+# NOTE: Dr uses the standard (non-abliterated) model for benign twins
+# This ensures the retain set represents normal, safe behavior
 #
-# vLLM with tensor_parallel=4 provides ~10-20x throughput improvement
+# Using transformers backend (default) for single GPU
 
-python scripts/cb_data_generation/generate_ds_mvp.py \
-    --b4-data data/fujitsu/orchestrator_attacks_combined_deduplicated.jsonl \
+python scripts/cb_data_generation/generate_dr_mvp.py \
+    --ds-data "$DS_FILE" \
     --tool-schema configs/tool_schemas/b4_standard_v1.json \
-    --model mlabonne/Meta-Llama-3.1-8B-Instruct-abliterated \
-    --backend vllm \
-    --tensor-parallel 4 \
-    --batch-size 64 \
+    --model meta-llama/Llama-3.1-8B-Instruct \
+    --backend transformers \
+    --device auto \
     --dtype bfloat16 \
-    --temperature 0.7 \
-    --min-yield 0.10 \
-    --fail-on-low-yield \
-    --output "$OUTPUT_DIR/ds_stage1.jsonl" \
-    --output-ids "$OUTPUT_DIR/ds_stage1_ids.txt"
+    --temperature 0.3 \
+    --output "$OUTPUT_DIR/dr_stage1.jsonl"
 
 echo "========================================"
-echo "Ds generation complete!"
+echo "Dr generation complete!"
 echo "========================================"
-echo "Output: $OUTPUT_DIR/ds_stage1.jsonl"
-echo ""
-
-# IDs file is created automatically by --output-ids
-
+echo "Output: $OUTPUT_DIR/dr_stage1.jsonl"
+echo "Dr sample count: $(wc -l < "$OUTPUT_DIR/dr_stage1.jsonl" 2>/dev/null || echo 0)"
 echo "========================================"
