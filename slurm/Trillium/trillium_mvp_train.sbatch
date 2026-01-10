@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=mvp_train
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=1
+#SBATCH --gpus-per-node=4
 #SBATCH --time=05:00:00
 #SBATCH --output=/scratch/memoozd/logs/%x_%j.out
 #SBATCH --error=/scratch/memoozd/logs/%x_%j.err
@@ -187,6 +187,7 @@ echo "Combined file: $COMBINED_FILE ($(wc -l < "$COMBINED_FILE") batches)"
 # 1. Doesn't match Llama 3.1 chat template (<|start_header_id|>assistant etc.)
 # 2. Missing <|eot_id|>/<|eom_id|> terminators on completions
 # 3. Causes assistant boundary masking to fail
+# 4. Mixed tool call formats ([TOOL_CALLS] vs <|python_tag|>)
 # This step rebuilds the text field with proper formatting.
 echo ""
 echo "Rebuilding training data with proper Llama 3.1 format..."
@@ -194,10 +195,15 @@ echo "Rebuilding training data with proper Llama 3.1 format..."
 FIXED_FILE="${COMBINED_FILE%.jsonl}_llama31.jsonl"
 TOOL_SCHEMA="configs/tool_schemas/b4_standard_v1.json"
 
-python scripts/cb_data_generation/rebuild_training_data.py \
+# Use V2 rebuild script which:
+# - Converts [TOOL_CALLS] format to <|python_tag|>
+# - Adds proper Llama 3.1 headers and terminators
+# - Filters to tool-routing samples only (critical for CB training)
+python scripts/cb_data_generation/rebuild_training_data_v2.py \
     --input "$COMBINED_FILE" \
     --output "$FIXED_FILE" \
-    --tool-schema "$TOOL_SCHEMA"
+    --tool-schema "$TOOL_SCHEMA" \
+    --filter-tool-only
 
 if [[ ! -f "$FIXED_FILE" ]]; then
     echo "ERROR: Failed to create fixed training file"
