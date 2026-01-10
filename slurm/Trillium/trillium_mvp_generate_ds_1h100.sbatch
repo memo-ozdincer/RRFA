@@ -68,6 +68,9 @@ export VLLM_USAGE_STATS_DIR="$CACHE_ROOT/vllm"
 export FLASHINFER_WORKSPACE_DIR="$CACHE_ROOT/flashinfer"
 mkdir -p "$VLLM_USAGE_STATS_DIR" "$FLASHINFER_WORKSPACE_DIR"
 
+# Use FlashAttention backend instead of FlashInfer (avoids permission issues)
+export VLLM_ATTENTION_BACKEND="FLASH_ATTN"
+
 # DO NOT SET TRANSFORMERS_CACHE - deprecated and causes cache fragmentation
 
 # =============================================================================
