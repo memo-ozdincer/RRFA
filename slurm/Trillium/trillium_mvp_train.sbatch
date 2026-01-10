@@ -181,6 +181,34 @@ fi
 echo "Combined file: $COMBINED_FILE ($(wc -l < "$COMBINED_FILE") batches)"
 
 # =============================================================================
+# CRITICAL FIX: Rebuild Training Data with Proper Llama 3.1 Format
+# =============================================================================
+# The original data used simple "User: ... Assistant: ..." format which:
+# 1. Doesn't match Llama 3.1 chat template (<|start_header_id|>assistant etc.)
+# 2. Missing <|eot_id|>/<|eom_id|> terminators on completions
+# 3. Causes assistant boundary masking to fail
+# This step rebuilds the text field with proper formatting.
+echo ""
+echo "Rebuilding training data with proper Llama 3.1 format..."
+
+FIXED_FILE="${COMBINED_FILE%.jsonl}_llama31.jsonl"
+TOOL_SCHEMA="configs/tool_schemas/b4_standard_v1.json"
+
+python scripts/cb_data_generation/rebuild_training_data.py \
+    --input "$COMBINED_FILE" \
+    --output "$FIXED_FILE" \
+    --tool-schema "$TOOL_SCHEMA"
+
+if [[ ! -f "$FIXED_FILE" ]]; then
+    echo "ERROR: Failed to create fixed training file"
+    exit 1
+fi
+echo "Fixed file: $FIXED_FILE ($(wc -l < "$FIXED_FILE") batches)"
+
+# Use the fixed file for training
+COMBINED_FILE="$FIXED_FILE"
+
+# =============================================================================
 # Resolve Model Path (Offline Fix)
 # =============================================================================
 echo ""

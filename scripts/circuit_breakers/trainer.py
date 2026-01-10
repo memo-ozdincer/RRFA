@@ -67,8 +67,10 @@ from scripts.utils.wandb_logging import (
 # =============================================================================
 
 # Patterns to identify assistant response boundaries
+# CRITICAL: These must match the actual chat template format used during training
 ASSISTANT_START_PATTERNS = [
-    r"\[/INST\]",              # Llama style
+    r"<\|start_header_id\|>assistant<\|end_header_id\|>",  # Llama 3.1 (PRIMARY)
+    r"\[/INST\]",              # Llama 2 style
     r"<\|assistant\|>",        # ChatML style
     r"<\|im_start\|>assistant", # Qwen style
     r"ASSISTANT:",             # Simple format
@@ -77,9 +79,10 @@ ASSISTANT_START_PATTERNS = [
 
 # Tool call patterns (for agent traces)
 TOOL_CALL_PATTERNS = [
+    r"<\|python_tag\|>",       # Llama 3.1 tool call marker (PRIMARY)
     r"<tool_call>",
     r"<function_call>",
-    r"\{\"tool\":",
+    r'\{"name":\s*"',          # JSON tool call start
     r"Action:\s*\w+",
     r"```tool_code",
 ]
@@ -1157,7 +1160,12 @@ class CircuitBreakerTrainer:
             weight_decay=self.config.weight_decay,
         )
         
-        total_steps = min(self.config.total_steps, len(self.dataloader))
+        # CRITICAL FIX: Use config.total_steps for scheduler, NOT min(total_steps, len(dataloader))
+        # The previous logic caused LR to decay to near-zero too early when training 
+        # for more steps than one epoch (i.e., multiple passes through the data).
+        # If we want to train for N steps but dataset has M < N samples, we'll loop,
+        # so the scheduler should use N to properly decay learning rate over the full training.
+        total_steps = self.config.total_steps
         
         self.scheduler = get_linear_schedule_with_warmup(
             self.optimizer,
