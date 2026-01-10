@@ -4,8 +4,8 @@
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=1
 #SBATCH --time=00:30:00
-#SBATCH --output=logs/%x_%j.out
-#SBATCH --error=logs/%x_%j.err
+#SBATCH --output=/scratch/memoozd/logs/%x_%j.out
+#SBATCH --error=/scratch/memoozd/logs/%x_%j.err
 
 # =============================================================================
 # DEBUG SCRIPT - Trillium 1×H100, 3 training steps, catches real code errors

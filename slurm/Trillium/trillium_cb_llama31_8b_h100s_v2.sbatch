@@ -4,8 +4,8 @@
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=4
 #SBATCH --time=03:00:00
-#SBATCH --output=logs/%x_%j.out
-#SBATCH --error=logs/%x_%j.err
+#SBATCH --output=/scratch/memoozd/logs/%x_%j.out
+#SBATCH --error=/scratch/memoozd/logs/%x_%j.err
 
 # =============================================================================
 # Circuit Breakers Training v2 - Trillium 4×H100

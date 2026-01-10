@@ -4,8 +4,8 @@
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=1
 #SBATCH --time=02:00:00
-#SBATCH --output=logs/%x_%j.out
-#SBATCH --error=logs/%x_%j.err
+#SBATCH --output=/scratch/memoozd/logs/%x_%j.out
+#SBATCH --error=/scratch/memoozd/logs/%x_%j.err
 
 # =============================================================================
 # Circuit Breakers Evaluation - Trillium 1×H100 (Llama-3.1-8B-Instruct)

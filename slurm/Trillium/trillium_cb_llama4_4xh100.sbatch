@@ -3,8 +3,8 @@
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=4
 #SBATCH --time=06:00:00
-#SBATCH --output=%x_%j.out
-#SBATCH --error=%x_%j.err
+#SBATCH --output=/scratch/memoozd/logs/%x_%j.out
+#SBATCH --error=/scratch/memoozd/logs/%x_%j.err
 #SBATCH --account=def-zhijing  # TODO: Set your Trillium RAP (def-/rrg-/rpp-)
 
 # =============================================================================
