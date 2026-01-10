@@ -166,6 +166,50 @@ def remove_injection(prompt: str, benign_query: Optional[str] = None) -> str:
 # Model Loading and Generation (reuse from generate_ds_mvp)
 # =============================================================================
 
+def resolve_local_model_path(model_id: str) -> str:
+    """
+    Resolve a HuggingFace model ID to its local cache path.
+    
+    When in offline mode, we need to pass the actual local path instead of
+    a Hub model ID to avoid API calls during model_info() checks.
+    """
+    from huggingface_hub import scan_cache_dir
+    
+    # If it's already a local path, return as-is
+    if os.path.isdir(model_id):
+        return model_id
+    
+    # Try to find in HF cache
+    try:
+        cache_info = scan_cache_dir()
+        
+        for repo in cache_info.repos:
+            if repo.repo_id == model_id:
+                # Get the latest revision
+                for revision in repo.revisions:
+                    snapshot_path = revision.snapshot_path
+                    if os.path.isdir(snapshot_path):
+                        return str(snapshot_path)
+        
+        # Fallback: construct path manually
+        hf_home = os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
+        hub_cache = os.path.join(hf_home, "hub")
+        cache_name = "models--" + model_id.replace("/", "--")
+        model_cache = os.path.join(hub_cache, cache_name)
+        
+        if os.path.isdir(model_cache):
+            snapshots_dir = os.path.join(model_cache, "snapshots")
+            if os.path.isdir(snapshots_dir):
+                snapshots = os.listdir(snapshots_dir)
+                if snapshots:
+                    return os.path.join(snapshots_dir, snapshots[0])
+        
+    except Exception as e:
+        logger.warning(f"Could not resolve local path for {model_id}: {e}")
+    
+    return model_id
+
+
 def load_model_and_tokenizer(
     model_path: str,
     device: str = "auto",
@@ -180,16 +224,20 @@ def load_model_and_tokenizer(
     offline_mode = os.environ.get("HF_HUB_OFFLINE", "0") == "1"
     
     logger.info(f"Loading model: {model_path}")
+    
+    # In offline mode, resolve Hub ID to local cache path to avoid API calls
     if offline_mode:
+        resolved_path = resolve_local_model_path(model_path)
+        if resolved_path != model_path:
+            logger.info(f"  Resolved to local path: {resolved_path}")
+        model_path = resolved_path
         logger.info("  (offline mode - using cached files only)")
     
-    # use_fast=False avoids Mistral regex patching which makes API calls even in offline mode
     tokenizer = AutoTokenizer.from_pretrained(
         model_path,
         token=hf_token,
         trust_remote_code=True,
         local_files_only=offline_mode,
-        use_fast=not offline_mode,  # Use slow tokenizer in offline mode to avoid API calls
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
