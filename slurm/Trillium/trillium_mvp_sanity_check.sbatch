@@ -86,7 +86,7 @@ if [[ -z "$LATEST_RUN" ]]; then
     exit 1
 fi
 
-ADAPTER_PATH="${LATEST_RUN}outputs/cb_mvp_adapter"
+ADAPTER_PATH="${LATEST_RUN}outputs/cb_mvp_adapter/final"
 
 echo "Latest run: $LATEST_RUN"
 echo "Adapter path: $ADAPTER_PATH"
@@ -94,8 +94,17 @@ echo "Adapter path: $ADAPTER_PATH"
 # Check if adapter exists
 if [[ ! -d "$ADAPTER_PATH" ]]; then
     echo "WARNING: Adapter path not found: $ADAPTER_PATH"
-    echo "Running pre-training sanity check (base model only)..."
-    ADAPTER_ARG=""
+    echo "Trying checkpoint directory..."
+    # Try to find latest checkpoint
+    CHECKPOINT=$(ls -td ${LATEST_RUN}outputs/cb_mvp_adapter/checkpoint-* 2>/dev/null | head -1)
+    if [[ -n "$CHECKPOINT" ]]; then
+        ADAPTER_PATH="$CHECKPOINT"
+        echo "Found checkpoint: $ADAPTER_PATH"
+        ADAPTER_ARG="--adapter-path $ADAPTER_PATH"
+    else
+        echo "No adapter found, running base model only..."
+        ADAPTER_ARG=""
+    fi
 else
     ADAPTER_ARG="--adapter-path $ADAPTER_PATH"
 fi

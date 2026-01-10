@@ -100,7 +100,7 @@ if [[ -z "$LATEST_RUN" ]]; then
     exit 1
 fi
 
-CB_ADAPTER="${LATEST_RUN}outputs/cb_mvp_adapter"
+CB_ADAPTER="${LATEST_RUN}outputs/cb_mvp_adapter/final"
 
 DATA_DIR="$SCRATCH_DIR/cb_mvp_data"
 EVAL_DATA="$DATA_DIR/eval_stage1.jsonl"
@@ -122,9 +122,16 @@ if [[ ! -f "$EVAL_DATA" ]]; then
 fi
 
 if [[ ! -d "$CB_ADAPTER" ]]; then
-    echo "ERROR: CB adapter not found at $CB_ADAPTER"
-    echo "Please complete training first!"
-    exit 1
+    echo "WARNING: Final adapter not found at $CB_ADAPTER"
+    echo "Trying to find latest checkpoint..."
+    CHECKPOINT=$(ls -td ${LATEST_RUN}outputs/cb_mvp_adapter/checkpoint-* 2>/dev/null | head -1)
+    if [[ -n "$CHECKPOINT" ]]; then
+        CB_ADAPTER="$CHECKPOINT"
+        echo "Found checkpoint: $CB_ADAPTER"
+    else
+        echo "ERROR: No adapter found. Please complete training first!"
+        exit 1
+    fi
 fi
 
 echo "Eval data: $EVAL_DATA ($(wc -l < "$EVAL_DATA") samples)"
