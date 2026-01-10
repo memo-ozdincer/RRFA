@@ -42,6 +42,18 @@ echo "  TRANSFORMERS_CACHE: $TRANSFORMERS_CACHE"
 echo ""
 
 # =============================================================================
+# HuggingFace Token
+# =============================================================================
+if [[ -z "${HF_TOKEN:-}" ]]; then
+    echo "WARNING: HF_TOKEN not set. Some gated models may fail to download."
+    echo "         Export it before running: export HF_TOKEN=hf_xxx"
+    echo ""
+else
+    echo "HF_TOKEN: Set ✓"
+    echo ""
+fi
+
+# =============================================================================
 # Load Environment
 # =============================================================================
 module --force purge || true
@@ -87,11 +99,14 @@ import torch
 import os
 
 model_name = '$MODEL'
+hf_token = os.environ.get('HF_TOKEN')
+
 print(f'Downloading tokenizer for {model_name}...')
 
-# Download tokenizer
+# Download tokenizer (with token for gated models like Llama)
 tokenizer = AutoTokenizer.from_pretrained(
     model_name,
+    token=hf_token,
     trust_remote_code=True,
 )
 print(f'  Tokenizer cached to: {tokenizer.name_or_path}')
@@ -105,6 +120,7 @@ model = AutoModelForCausalLM.from_pretrained(
     torch_dtype=torch.bfloat16,
     low_cpu_mem_usage=True,
     trust_remote_code=True,
+    token=hf_token,
 )
 print(f'  Model cached successfully')
 
@@ -145,8 +161,10 @@ echo "========================================"
 
 python -c "
 from transformers import AutoTokenizer
+import os
 
-tokenizer = AutoTokenizer.from_pretrained('meta-llama/Llama-3.1-8B-Instruct')
+hf_token = os.environ.get('HF_TOKEN')
+tokenizer = AutoTokenizer.from_pretrained('meta-llama/Llama-3.1-8B-Instruct', token=hf_token)
 
 # Test chat template
 messages = [
