@@ -227,6 +227,9 @@ def adapter_sanity_check(
     """
     hf_token = resolve_hf_token()
     
+    # Check if we're in offline mode (compute nodes have no internet)
+    offline_mode = os.environ.get("HF_HUB_OFFLINE", "0") == "1"
+    
     logger.info("=" * 60)
     logger.info("ADAPTER SANITY CHECK")
     logger.info("=" * 60)
@@ -234,12 +237,15 @@ def adapter_sanity_check(
     logger.info(f"Adapter: {adapter_path or 'None (infrastructure test)'}")
     logger.info(f"Epsilon threshold: {epsilon}")
     logger.info(f"Test prompts: {len(test_prompts)}")
+    if offline_mode:
+        logger.info("Mode: offline (using cached files only)")
     
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(
         base_model_path,
         token=hf_token,
         trust_remote_code=True,
+        local_files_only=offline_mode,
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -255,6 +261,7 @@ def adapter_sanity_check(
         device_map=device_map,
         trust_remote_code=True,
         token=hf_token,
+        local_files_only=offline_mode,
     )
     base_model.eval()
     
@@ -267,6 +274,7 @@ def adapter_sanity_check(
             device_map=device_map,
             trust_remote_code=True,
             token=hf_token,
+            local_files_only=offline_mode,
         )
         adapter_model = PeftModel.from_pretrained(adapter_model, adapter_path)
         adapter_model.eval()

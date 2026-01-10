@@ -176,12 +176,18 @@ def load_model_and_tokenizer(
     
     hf_token = resolve_hf_token()
     
+    # Check if we're in offline mode (compute nodes have no internet)
+    offline_mode = os.environ.get("HF_HUB_OFFLINE", "0") == "1"
+    
     logger.info(f"Loading model: {model_path}")
+    if offline_mode:
+        logger.info("  (offline mode - using cached files only)")
     
     tokenizer = AutoTokenizer.from_pretrained(
         model_path,
         token=hf_token,
         trust_remote_code=True,
+        local_files_only=offline_mode,
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -192,6 +198,7 @@ def load_model_and_tokenizer(
         device_map=device,
         trust_remote_code=True,
         token=hf_token,
+        local_files_only=offline_mode,
     )
     model.eval()
     
