@@ -27,16 +27,13 @@ Usage:
 
 # Set cache directories BEFORE any other imports (for vLLM/flashinfer)
 import os
-if "SCRATCH_DIR" not in os.environ:
-    scratch_dir = os.environ.get("SCRATCH", os.path.expanduser("~/scratch"))
-    cache_root = os.path.join(scratch_dir, "cb_cache")
-else:
-    cache_root = os.path.join(os.environ["SCRATCH_DIR"], "cb_cache")
 
+# Hardcode scratch/cache directories for /scratch/memoozd/
+cache_root = "/scratch/memoozd/cb_cache"
 os.makedirs(os.path.join(cache_root, "vllm"), exist_ok=True)
 os.makedirs(os.path.join(cache_root, "flashinfer"), exist_ok=True)
-os.environ.setdefault("VLLM_USAGE_STATS_DIR", os.path.join(cache_root, "vllm"))
-os.environ.setdefault("FLASHINFER_WORKSPACE_DIR", os.path.join(cache_root, "flashinfer"))
+os.environ["VLLM_USAGE_STATS_DIR"] = os.path.join(cache_root, "vllm")
+os.environ["FLASHINFER_WORKSPACE_DIR"] = os.path.join(cache_root, "flashinfer")
 
 import argparse
 import json
