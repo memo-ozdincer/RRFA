@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=mvp_train
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=1
-#SBATCH --time=06:00:00
+#SBATCH --gpus-per-node=4
+#SBATCH --time=03:00:00
 #SBATCH --output=/scratch/memoozd/logs/%x_%j.out
 #SBATCH --error=/scratch/memoozd/logs/%x_%j.err
 #SBATCH --account=def-zhijing
@@ -241,6 +241,7 @@ torch.cuda.empty_cache()
 # =============================================================================
 echo ""
 echo "Starting Circuit Breaker training..."
+echo "Using $SLURM_GPUS_ON_NODE GPUs"
 
 # STAGE 1 FIX: Improved hyperparameters
 # - alpha-max 10.0: Paper default, stronger rerouting push (was 1.0)
@@ -248,7 +249,10 @@ echo "Starting Circuit Breaker training..."
 # - preset llama-3.1-8b-instruct: Match the actual model
 # - total-steps 500: More training with low baseline ASR
 
-python scripts/train_circuit_breaker.py \
+# Multi-GPU training with Accelerate
+# With 4 GPUs: effective batch = 4 (batch_size) * 4 (grad_accum) * 4 (GPUs) = 64
+accelerate launch --num_processes ${SLURM_GPUS_ON_NODE:-1} \
+    scripts/train_circuit_breaker.py \
     --preset llama-3.1-8b-instruct \
     --base-model "$BASE_MODEL" \
     --data-path "$COMBINED_FILE" \
