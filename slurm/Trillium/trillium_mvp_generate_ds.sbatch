@@ -44,9 +44,15 @@ if [[ ! -d "$VENV_DIR" ]]; then
 fi
 export CACHE_ROOT=/scratch/memoozd/cb_cache
 export HF_HOME="$CACHE_ROOT/hf"
-export HF_HUB_CACHE="$HF_HOME/hub"
-export HF_DATASETS_CACHE="$HF_HOME/datasets"
-export TRANSFORMERS_CACHE=/scratch/memoozd/cb_cache/hf/transformers
+
+# Point hub cache to the directory that actually contains the downloaded files:
+export HF_HUB_CACHE="$HF_HOME/transformers"
+export TRANSFORMERS_CACHE="$HF_HOME/transformers"
+
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+mkdir -p "$HF_HUB_CACHE"
+
 export HF_HUB_OFFLINE=1 # Optional: fail fast if model not cached
 source "$VENV_DIR/bin/activate"
 
