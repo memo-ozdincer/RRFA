@@ -48,11 +48,18 @@ echo "Python: $(python -V)"
 # =============================================================================
 CACHE_ROOT="$SCRATCH_DIR/cb_cache"
 mkdir -p "$CACHE_ROOT"/{hf,torch}
+
+# CRITICAL FIX: Override HOME
+export HOME="$CACHE_ROOT"
+
 export HF_HOME="$CACHE_ROOT/hf"
 export HF_HUB_CACHE="$CACHE_ROOT/hf/hub"  # Explicit hub cache location
 export HF_DATASETS_CACHE="$CACHE_ROOT/hf/datasets"
-export TRANSFORMERS_CACHE="$CACHE_ROOT/hf/transformers"
+# export TRANSFORMERS_CACHE="$CACHE_ROOT/hf/transformers" # Deprecated
 export TORCH_HOME="$CACHE_ROOT/torch"
+export XDG_CACHE_HOME="$CACHE_ROOT/xdg_cache"
+mkdir -p "$XDG_CACHE_HOME"
+
 export HF_HUB_OFFLINE=1  # Fail fast if model not cached (no internet on compute nodes)
 export TRANSFORMERS_OFFLINE=1  # Disable all network calls in transformers
 

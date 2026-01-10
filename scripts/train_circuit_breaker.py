@@ -31,10 +31,29 @@ Examples:
 
 import argparse
 import sys
+import os
 from pathlib import Path
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# CRITICAL FIX: Ensure HOME is redirected to scratch cache if SCRATCH_DIR is available
+# This protects against any libraries defaulting to ~/.cache
+if "SCRATCH_DIR" in os.environ:
+     cache_root = os.path.join(os.environ["SCRATCH_DIR"], "cb_cache")
+else:
+     # Fallback or try to infer from SCRATCH env
+     scratch = os.environ.get("SCRATCH", os.path.expanduser("~/scratch"))
+     cache_root = os.path.join(scratch, "cb_cache")
+
+# Only override if we are actually in a SLURM-like environment (check for cache dir existence maybe?)
+# Or just do it if the sbatch didn't do it? 
+# The SBATCH fix is primary, but this is a safety net.
+if os.path.exists(cache_root):
+     os.environ["HOME"] = cache_root
+     os.makedirs(os.path.join(cache_root, "xdg_cache"), exist_ok=True)
+     os.environ.setdefault("XDG_CACHE_HOME", os.path.join(cache_root, "xdg_cache"))
+
 
 from scripts.circuit_breakers.config import get_config, CONFIG_PRESETS
 from scripts.circuit_breakers.trainer import CircuitBreakerTrainer

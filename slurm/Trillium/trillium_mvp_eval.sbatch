@@ -51,10 +51,16 @@ source "$VENV_DIR/bin/activate"
 CACHE_ROOT="$SCRATCH_DIR/cb_cache"
 mkdir -p "$CACHE_ROOT"/{hf/hub,hf/datasets,torch}
 
+# CRITICAL FIX: Override HOME
+export HOME="$CACHE_ROOT"
+
 export HF_HOME="$CACHE_ROOT/hf"
 export HF_HUB_CACHE="$CACHE_ROOT/hf/hub"
 export HF_DATASETS_CACHE="$CACHE_ROOT/hf/datasets"
 export TORCH_HOME="$CACHE_ROOT/torch"
+export XDG_CACHE_HOME="$CACHE_ROOT/xdg_cache"
+export XDG_CONFIG_HOME="$CACHE_ROOT/xdg_config"
+mkdir -p "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME"
 
 # Enable offline mode - fail fast if model not cached
 export HF_HUB_OFFLINE=1

@@ -56,6 +56,9 @@ source "$VENV_DIR/bin/activate"
 CACHE_ROOT="$SCRATCH_DIR/cb_cache"
 mkdir -p "$CACHE_ROOT"/{hf/hub,hf/datasets,torch}
 
+# CRITICAL FIX: Override HOME to trick flashinfer and other tools that hardcode ~/.cache
+export HOME="$CACHE_ROOT"
+
 export HF_HOME="$CACHE_ROOT/hf"
 export HF_HUB_CACHE="$CACHE_ROOT/hf/hub"
 export HF_DATASETS_CACHE="$CACHE_ROOT/hf/datasets"
@@ -68,11 +71,15 @@ export TRANSFORMERS_OFFLINE=1
 # Redirect XDG directories to writable scratch space (fixes vLLM and FlashInfer permission errors)
 export XDG_CACHE_HOME="$CACHE_ROOT/xdg_cache"
 export XDG_CONFIG_HOME="$CACHE_ROOT/xdg_config"
-mkdir -p "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME"
+export FLASHINFER_WORKSPACE_DIR="$CACHE_ROOT/flashinfer"
+mkdir -p "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$FLASHINFER_WORKSPACE_DIR"
 
 # Disable vLLM usage statistics (avoids writing to ~/.config/vllm)
 export VLLM_NO_USAGE_STATS=1
 export DO_NOT_TRACK=1
+
+# Force vLLM to use flash_attn backend instead of flashinfer (as fallback/safety)
+export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 
 # DO NOT SET TRANSFORMERS_CACHE - deprecated and causes cache fragmentation
 
@@ -83,6 +90,7 @@ echo "Python: $(python -V)"
 echo "Which:  $(which python)"
 echo ""
 echo "Cache Configuration:"
+echo "  HOME: $HOME"
 echo "  HF_HOME: $HF_HOME"
 echo "  HF_HUB_CACHE: $HF_HUB_CACHE"
 echo "  HF_HUB_OFFLINE: $HF_HUB_OFFLINE"

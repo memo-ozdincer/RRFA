@@ -36,6 +36,18 @@ import json
 import logging
 import os
 import re
+
+# CRITICAL FIX: Ensure HOME is redirected to scratch cache
+if "SCRATCH_DIR" in os.environ:
+     cache_root = os.path.join(os.environ["SCRATCH_DIR"], "cb_cache")
+else:
+     scratch = os.environ.get("SCRATCH", os.path.expanduser("~/scratch"))
+     cache_root = os.path.join(scratch, "cb_cache")
+
+if os.path.exists(cache_root):
+     os.environ["HOME"] = cache_root
+     os.makedirs(os.path.join(cache_root, "xdg_cache"), exist_ok=True)
+     os.environ.setdefault("XDG_CACHE_HOME", os.path.join(cache_root, "xdg_cache"))
 import sys
 from datetime import datetime, timezone
 from pathlib import Path

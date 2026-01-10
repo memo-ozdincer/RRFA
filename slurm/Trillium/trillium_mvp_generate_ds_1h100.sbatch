@@ -1,8 +1,8 @@
 #!/bin/bash
-#SBATCH --job-name=mvp_ds_4h100
+#SBATCH --job-name=mvp_ds_1h100
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=4
-#SBATCH --time=0:20:00
+#SBATCH --gpus-per-node=1
+#SBATCH --time=08:00:00
 #SBATCH --output=/scratch/memoozd/logs/%x_%j.out
 #SBATCH --error=/scratch/memoozd/logs/%x_%j.err
 #SBATCH --account=def-zhijing
@@ -128,7 +128,7 @@ echo "Job ID: $SLURM_JOB_ID"
 echo "Date: $(date)"
 echo "GPU: 1 x H100 SXM 80GB"
 echo "Backend: vLLM (batched inference)"
-echo "Model: mlabonne/Meta-Llama-3.1-8B-Instruct-abliterated"
+echo "Model: meta-llama/Llama-3.1-8B-Instruct"
 echo "========================================"
 
 # =============================================================================
@@ -140,8 +140,8 @@ mkdir -p "$OUTPUT_DIR"
 # =============================================================================
 # Run Ds Generation
 # =============================================================================
-# IMPORTANT: Use abliterated model so attacks can succeed
-# Standard Llama-3.1-Instruct will refuse harmful completions!
+# Using standard Llama-3.1-Instruct for reliable tool calling
+# Will naturally succeed on some attacks (enough for 10%+ yield)
 #
 # Using vLLM backend with batched inference for 10-20x speedup
 # For faster processing, use --limit to reduce dataset size
@@ -149,22 +149,22 @@ mkdir -p "$OUTPUT_DIR"
 python scripts/cb_data_generation/generate_ds_mvp.py \
     --b4-data data/fujitsu/orchestrator_attacks_combined_deduplicated.jsonl \
     --tool-schema configs/tool_schemas/b4_standard_v1.json \
-    --model mlabonne/Meta-Llama-3.1-8B-Instruct-abliterated \
+    --model meta-llama/Llama-3.1-8B-Instruct \
     --backend vllm \
-    --tensor-parallel 4 \
+    --tensor-parallel 1 \
     --batch-size 32 \
     --dtype bfloat16 \
     --temperature 0.7 \
     --min-yield 0.10 \
     --fail-on-low-yield \
-    --output "$OUTPUT_DIR/ds_stage1_${SLURM_JOB_ID}.jsonl" \
-    --output-ids "$OUTPUT_DIR/ds_stage1_ids_${SLURM_JOB_ID}.txt"
+    --output "$OUTPUT_DIR/ds_stage1.jsonl" \
+    --output-ids "$OUTPUT_DIR/ds_stage1_ids.txt"
 
 echo "========================================"
 echo "Ds generation complete!"
 echo "========================================"
-echo "Output: $OUTPUT_DIR/ds_stage1_${SLURM_JOB_ID}.jsonl"
-echo "Sample count: $(wc -l < "$OUTPUT_DIR/ds_stage1_${SLURM_JOB_ID}.jsonl" 2>/dev/null || echo 0)"
+echo "Output: $OUTPUT_DIR/ds_stage1.jsonl"
+echo "Sample count: $(wc -l < "$OUTPUT_DIR/ds_stage1.jsonl" 2>/dev/null || echo 0)"
 echo ""
 
 # IDs file is created automatically by --output-ids

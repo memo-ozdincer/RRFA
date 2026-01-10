@@ -52,11 +52,17 @@ source "$VENV_DIR/bin/activate"
 CACHE_ROOT="$SCRATCH_DIR/cb_cache"
 mkdir -p "$CACHE_ROOT"/{hf/hub,hf/datasets,torch,wandb}
 
+# CRITICAL FIX: Override HOME to trick flashinfer and other tools that hardcode ~/.cache
+export HOME="$CACHE_ROOT"
+
 export HF_HOME="$CACHE_ROOT/hf"
 export HF_HUB_CACHE="$CACHE_ROOT/hf/hub"
 export HF_DATASETS_CACHE="$CACHE_ROOT/hf/datasets"
 export TORCH_HOME="$CACHE_ROOT/torch"
 export WANDB_DIR="$CACHE_ROOT/wandb"
+export XDG_CACHE_HOME="$CACHE_ROOT/xdg_cache" # Ensure this is redirected too
+export XDG_CONFIG_HOME="$CACHE_ROOT/xdg_config"
+mkdir -p "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME"
 
 # Enable offline mode - fail fast if model not cached
 export HF_HUB_OFFLINE=1
@@ -68,6 +74,7 @@ export WANDB_MODE=offline
 echo "Python: $(python -V)"
 echo ""
 echo "Cache Configuration:"
+echo "  HOME: $HOME"
 echo "  HF_HOME: $HF_HOME"
 echo "  HF_HUB_CACHE: $HF_HUB_CACHE"
 echo "  HF_HUB_OFFLINE: $HF_HUB_OFFLINE"
