@@ -5,8 +5,6 @@
 #SBATCH --time=00:30:00
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=1
-#SBATCH --mem=48G
-#SBATCH --cpus-per-task=8
 
 # ============================================================================
 # Sample Outputs - See what baseline vs CB model actually produces
