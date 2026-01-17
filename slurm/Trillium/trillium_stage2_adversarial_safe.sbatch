@@ -93,11 +93,14 @@ echo ""
 echo "GENERATING ADVERSARIAL-SAFE SAMPLES"
 echo ""
 
+OUTPUT_DIR="$SCRATCH_DIR/cb_stage2_data/retain"
+mkdir -p "$OUTPUT_DIR"
+
 python scripts/cb_data_generation/generate_adversarial_safe.py \
     --b4-data data/fujitsu/orchestrator_attacks_combined_deduplicated.jsonl \
     --tool-schema configs/tool_schemas/b4_standard_v1.json \
     --model meta-llama/Llama-3.1-8B-Instruct \
-    --output data/circuit_breakers/retain/adversarial_safe.jsonl \
+    --output "$OUTPUT_DIR/adversarial_safe.jsonl" \
     --target-n 500 \
     --temperature 0.1 \
     --batch-size 32
