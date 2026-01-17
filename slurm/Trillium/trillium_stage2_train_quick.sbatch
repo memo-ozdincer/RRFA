@@ -6,7 +6,6 @@
 #SBATCH --time=00:30:00
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=1
-#SBATCH --mem=64G
 #SBATCH --cpus-per-task=16
 
 # ============================================================================
