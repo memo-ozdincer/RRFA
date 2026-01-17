@@ -69,7 +69,6 @@ echo "========================================"
 # Configuration
 # =============================================================================
 BASE_MODEL="meta-llama/Llama-3.1-8B-Instruct"
-DATA_DIR="$SCRATCH_DIR/cb_mvp_data"
 CB_DATA_DIR="$PROJECT_DIR/data/circuit_breakers"
 STAGE2_DATA_DIR="$SCRATCH_DIR/cb_stage2_data"
 
@@ -77,122 +76,37 @@ STAGE2_DATA_DIR="$SCRATCH_DIR/cb_stage2_data"
 MERGED_FILE="$STAGE2_DATA_DIR/stage2/train.jsonl"
 FALLBACK_MERGED_FILE="$CB_DATA_DIR/stage2/train.jsonl"
 
-# Fallback to individual files if merged not available
-DS_FILE="$DATA_DIR/ds_stage2.jsonl"
-DR_FILE="$DATA_DIR/dr_stage2.jsonl"
-
-# Check for merged Stage 2 data first
-if [[ -f "$MERGED_FILE" ]]; then
-    echo "Using merged Stage 2 data: $MERGED_FILE"
-    COMBINED_FILE="$MERGED_FILE"
-    SKIP_MERGE=1
-elif [[ -f "$FALLBACK_MERGED_FILE" ]]; then
-    echo "Using merged Stage 2 data: $FALLBACK_MERGED_FILE"
-    COMBINED_FILE="$FALLBACK_MERGED_FILE"
-    SKIP_MERGE=1
-else
-    echo "Merged Stage 2 data not found, using individual files..."
-    SKIP_MERGE=0
-    
-    # Fallback to Stage 1 data if Stage 2 not ready
-    if [[ ! -f "$DS_FILE" ]]; then
-        echo "Stage 2 Ds not found, using Stage 1 Ds..."
-        DS_FILE="$DATA_DIR/ds_stage1.jsonl"
-    fi
-    if [[ ! -f "$DR_FILE" ]]; then
-        echo "Stage 2 Dr not found, using Stage 1 Dr..."
-        DR_FILE="$DATA_DIR/dr_stage1.jsonl"
-    fi
-fi
-
-COMBINED_FILE="${COMBINED_FILE:-$DATA_DIR/cb_training_stage2.jsonl}"
 RUN_DIR="$SCRATCH_DIR/cb_runs/$SLURM_JOB_ID"
 OUTPUT_DIR="$RUN_DIR/outputs/cb_stage2_adapter"
 
 mkdir -p "$RUN_DIR"/{logs,outputs}
 
-if [[ -z "$SKIP_MERGE" ]] || [[ "$SKIP_MERGE" != "1" ]]; then
-    echo "Ds file: $DS_FILE ($(wc -l < "$DS_FILE") samples)"
-    echo "Dr file: $DR_FILE ($(wc -l < "$DR_FILE") samples)"
-fi
-
-# =============================================================================
-# Stage 2 Fix: Create training batches (skip if using merged data)
-# =============================================================================
-if [[ "$SKIP_MERGE" == "1" ]]; then
-    echo ""
-    echo "Using pre-merged Stage 2 data: $COMBINED_FILE"
-    echo "Samples: $(wc -l < "$COMBINED_FILE")"
+if [[ -f "$MERGED_FILE" ]]; then
+    COMBINED_FILE="$MERGED_FILE"
+    echo "Using merged Stage 2 data: $COMBINED_FILE"
+elif [[ -f "$FALLBACK_MERGED_FILE" ]]; then
+    COMBINED_FILE="$FALLBACK_MERGED_FILE"
+    echo "Using merged Stage 2 data: $COMBINED_FILE"
 else
-    echo ""
-    echo "Creating Stage 2 training batches with 5:1 Dr:Ds ratio..."
-    python -c "
-import json
-from pathlib import Path
-import random
-
-ds_file = Path('$DS_FILE')
-dr_file = Path('$DR_FILE')
-output_file = Path('$COMBINED_FILE')
-
-# Load samples
-ds_samples = [json.loads(line) for line in ds_file.read_text().strip().split('\n') if line.strip()]
-dr_samples = [json.loads(line) for line in dr_file.read_text().strip().split('\n') if line.strip()]
-
-print(f'Loaded {len(ds_samples)} Ds samples')
-print(f'Loaded {len(dr_samples)} Dr samples')
-
-# Stage 2 FIX: Replicate Dr to achieve 5:1 ratio
-target_dr_count = len(ds_samples) * 5
-if len(dr_samples) < target_dr_count:
-    # Replicate Dr samples
-    replication_factor = (target_dr_count // len(dr_samples)) + 1
-    dr_samples_expanded = (dr_samples * replication_factor)[:target_dr_count]
-    print(f'Expanded Dr from {len(dr_samples)} to {len(dr_samples_expanded)} (5:1 ratio)')
-    dr_samples = dr_samples_expanded
-
-# Create batches
-batches = []
-
-# First, pair each Ds with 5 Dr samples
-for i, ds in enumerate(ds_samples):
-    batch = {
-        'harmful': ds,
-        'retain': dr_samples[i * 5:(i + 1) * 5] if i * 5 + 5 <= len(dr_samples) else [dr_samples[i % len(dr_samples)]]
-    }
-    batches.append(batch)
-
-# Shuffle
-random.seed(42)
-random.shuffle(batches)
-
-# Write
-with open(output_file, 'w') as f:
-    for batch in batches:
-        f.write(json.dumps(batch) + '\n')
-
-print(f'Created {len(batches)} training batches')
-print(f'Average Dr per batch: {sum(len(b[\"retain\"]) if isinstance(b[\"retain\"], list) else 1 for b in batches) / len(batches):.1f}')
-"
+    echo "ERROR: Merged Stage 2 data not found."
+    echo "Run: sbatch slurm/Trillium/trillium_stage2_merge.sbatch"
+    exit 1
 fi
 
 # =============================================================================
-# Rebuild with Llama 3.1 format
+# Stage 2 Fix: Create CB training batches from flat samples
 # =============================================================================
 echo ""
-echo "Rebuilding training data with proper Llama 3.1 format..."
+echo "Creating Stage 2 training batches (5:1 Dr:Ds)..."
 
-FIXED_FILE="${COMBINED_FILE%.jsonl}_llama31.jsonl"
-TOOL_SCHEMA="configs/tool_schemas/b4_standard_v1.json"
-
-python scripts/cb_data_generation/rebuild_training_data_v2.py \
+STAGE2_BATCHES="$STAGE2_DATA_DIR/stage2/train_batches.jsonl"
+python scripts/cb_data_generation/create_stage2_batches.py \
     --input "$COMBINED_FILE" \
-    --output "$FIXED_FILE" \
-    --tool-schema "$TOOL_SCHEMA" \
-    --filter-tool-only
+    --output "$STAGE2_BATCHES" \
+    --benign-per-harmful 5
 
-echo "Fixed file: $FIXED_FILE ($(wc -l < "$FIXED_FILE") batches)"
-COMBINED_FILE="$FIXED_FILE"
+echo "Batches file: $STAGE2_BATCHES ($(wc -l < "$STAGE2_BATCHES") batches)"
+COMBINED_FILE="$STAGE2_BATCHES"
 
 # =============================================================================
 # Resolve Model Path
@@ -232,9 +146,6 @@ accelerate launch --num_processes ${SLURM_GPUS_ON_NODE:-1} \
     --lora-r 16 \
     --lora-alpha 32 \
     --cb-target-layers 15 \
-    --max-grad-norm 0.5 \
-    --rr-weight 0.7 \
-    --retain-weight 1.3 \
     --wandb-project "circuit-breakers-mvp" \
     --wandb-run-name "cb_stage2_collapse_fix_${SLURM_JOB_ID}" \
     --wandb-notes "Stage 2: alpha=0.5, single layer 15, 5:1 Dr:Ds ratio"
