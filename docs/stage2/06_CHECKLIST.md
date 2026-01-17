@@ -180,20 +180,9 @@ wc -l data/circuit_breakers/retain/tau2_traces.jsonl
 
 - [ ] `tau2_traces.jsonl` created with ≥300 samples
 
-### 1.5 Ingest UltraChat — Network Required
+### 1.5 UltraChat (Deferred)
 
-```bash
-# Run on login node (has network)
-python scripts/cb_data_generation/ingest_ultrachat.py \
-    --output data/circuit_breakers/retain/ultrachat_subset.jsonl \
-    --n-samples 2000
-
-# Verify
-wc -l data/circuit_breakers/retain/ultrachat_subset.jsonl
-# Expected: 2000
-```
-
-- [ ] `ultrachat_subset.jsonl` created with ~2000 samples
+UltraChat is non-agentic; defer for now. Focus on AgentDojo + TAU2.
 
 ### 1.6 Ingest XSTest (Optional) — Network Required
 

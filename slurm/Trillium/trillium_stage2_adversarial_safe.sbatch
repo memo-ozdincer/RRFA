@@ -71,6 +71,7 @@ export TORCH_HOME="$CACHE_ROOT/torch"
 # Enable offline mode - fail fast if model not cached
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
+export HF_DATASETS_OFFLINE=1
 
 # Redirect XDG directories to writable scratch space
 export XDG_CACHE_HOME="$CACHE_ROOT/xdg_cache"
@@ -90,6 +91,39 @@ export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 export SCRATCH="$SCRATCH_DIR"
 
 echo ""
+echo "Cache Configuration:"
+echo "  HF_HOME: $HF_HOME"
+echo "  HF_HUB_CACHE: $HF_HUB_CACHE"
+echo "  HF_HUB_OFFLINE: $HF_HUB_OFFLINE"
+echo ""
+
+# Quick cache check
+echo "Hub cache contents:"
+ls -1d "$HF_HUB_CACHE"/models--* 2>/dev/null | head -5 || echo "  (no models cached yet - run prefetch_models.sh first!)"
+echo ""
+
+MODEL_ID="meta-llama/Llama-3.1-8B-Instruct"
+MODEL_CACHE_DIR="$HF_HUB_CACHE/models--${MODEL_ID//\//--}"
+if [[ ! -d "$MODEL_CACHE_DIR" ]]; then
+  echo "ERROR: Model cache missing: $MODEL_CACHE_DIR"
+  echo "       Run: bash slurm/Trillium/prefetch_models.sh"
+  exit 1
+fi
+
+MODEL_PATH="$(python - << 'PY'
+from huggingface_hub import snapshot_download
+model_id = "meta-llama/Llama-3.1-8B-Instruct"
+local_path = snapshot_download(repo_id=model_id, local_files_only=True)
+print(local_path)
+PY
+)"
+
+if [[ -z "$MODEL_PATH" || ! -d "$MODEL_PATH" ]]; then
+  echo "ERROR: Failed to resolve local model path for $MODEL_ID"
+  exit 1
+fi
+
+echo ""
 echo "GENERATING ADVERSARIAL-SAFE SAMPLES"
 echo ""
 
@@ -99,7 +133,7 @@ mkdir -p "$OUTPUT_DIR"
 python scripts/cb_data_generation/generate_adversarial_safe.py \
     --b4-data data/fujitsu/orchestrator_attacks_combined_deduplicated.jsonl \
     --tool-schema configs/tool_schemas/b4_standard_v1.json \
-    --model meta-llama/Llama-3.1-8B-Instruct \
+    --model "$MODEL_PATH" \
     --output "$OUTPUT_DIR/adversarial_safe.jsonl" \
     --target-n 500 \
     --temperature 0.1 \

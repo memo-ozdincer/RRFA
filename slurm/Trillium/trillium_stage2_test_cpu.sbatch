@@ -68,18 +68,33 @@ echo "STAGE 2 DATA PIPELINE TEST"
 echo "========================================================================"
 echo ""
 
+STAGE2_DATA_DIR="$SCRATCH_DIR/cb_stage2_data"
+TRAIN_FILE="$STAGE2_DATA_DIR/stage2/train.jsonl"
+EVAL_FILE="$STAGE2_DATA_DIR/stage2/eval.jsonl"
+
+if [[ ! -f "$TRAIN_FILE" ]]; then
+  TRAIN_FILE="data/circuit_breakers/stage2/train.jsonl"
+fi
+if [[ ! -f "$EVAL_FILE" ]]; then
+  EVAL_FILE="data/circuit_breakers/stage2/eval.jsonl"
+fi
+
+echo "Using train file: $TRAIN_FILE"
+echo "Using eval file:  $EVAL_FILE"
+echo ""
+
 # -----------------------------------------------------------------------------
 # Test 1: Validate data format
 # -----------------------------------------------------------------------------
 echo "=== TEST 1: Data Format Validation ==="
 python scripts/cb_data_generation/validate_format.py \
-  --data data/circuit_breakers/stage2/train.jsonl \
+  --data "$TRAIN_FILE" \
   2>&1 | tee "$RUN_DIR/validation_train.log"
 
 echo ""
 echo "=== Validating eval set ==="
 python scripts/cb_data_generation/validate_format.py \
-  --data data/circuit_breakers/stage2/eval.jsonl \
+  --data "$EVAL_FILE" \
   2>&1 | tee "$RUN_DIR/validation_eval.log"
 
 # Check validation passed
@@ -141,8 +156,8 @@ def analyze_dataset(path):
 
     return len(samples)
 
-train_count = analyze_dataset("data/circuit_breakers/stage2/train.jsonl")
-eval_count = analyze_dataset("data/circuit_breakers/stage2/eval.jsonl")
+train_count = analyze_dataset("$TRAIN_FILE")
+eval_count = analyze_dataset("$EVAL_FILE")
 
 print(f"\n✅ Successfully loaded {train_count + eval_count} total samples")
 PYEOF
@@ -163,7 +178,7 @@ tokenizer = AutoTokenizer.from_pretrained(
 )
 
 print("Testing tokenization on 5 samples...")
-with open("data/circuit_breakers/stage2/train.jsonl") as f:
+with open("$TRAIN_FILE") as f:
     for i, line in enumerate(f):
         if i >= 5:
             break

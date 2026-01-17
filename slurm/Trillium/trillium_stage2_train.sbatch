@@ -56,9 +56,11 @@ echo "========================================"
 BASE_MODEL="meta-llama/Llama-3.1-8B-Instruct"
 DATA_DIR="$SCRATCH_DIR/cb_mvp_data"
 CB_DATA_DIR="$PROJECT_DIR/data/circuit_breakers"
+STAGE2_DATA_DIR="$SCRATCH_DIR/cb_stage2_data"
 
 # Stage 2 merged data file (created by merge_stage2_data.py)
-MERGED_FILE="$CB_DATA_DIR/stage2/train.jsonl"
+MERGED_FILE="$STAGE2_DATA_DIR/stage2/train.jsonl"
+FALLBACK_MERGED_FILE="$CB_DATA_DIR/stage2/train.jsonl"
 
 # Fallback to individual files if merged not available
 DS_FILE="$DATA_DIR/ds_stage2.jsonl"
@@ -68,6 +70,10 @@ DR_FILE="$DATA_DIR/dr_stage2.jsonl"
 if [[ -f "$MERGED_FILE" ]]; then
     echo "Using merged Stage 2 data: $MERGED_FILE"
     COMBINED_FILE="$MERGED_FILE"
+    SKIP_MERGE=1
+elif [[ -f "$FALLBACK_MERGED_FILE" ]]; then
+    echo "Using merged Stage 2 data: $FALLBACK_MERGED_FILE"
+    COMBINED_FILE="$FALLBACK_MERGED_FILE"
     SKIP_MERGE=1
 else
     echo "Merged Stage 2 data not found, using individual files..."

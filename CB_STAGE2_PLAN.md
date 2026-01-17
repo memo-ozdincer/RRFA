@@ -178,30 +178,9 @@ def generate_adversarial_safe_samples(b4_records, model, tool_schema, n_target=5
 
 **Expected yield:** From Stage 1 baseline, ~95% of samples should resist (5.2% ASR means 94.8% resist).
 
-#### Task 2.1.2: Add UltraChat General Capability
+#### Task 2.1.2: UltraChat (Deferred)
 
-From the original CB paper - essential for maintaining general capability:
-
-```python
-def load_ultrachat_retain(n_samples=3000):
-    """Load general conversation capability samples."""
-    ds = load_dataset("HuggingFaceH4/ultrachat_200k", split="test_sft")
-    
-    samples = []
-    for item in ds.shuffle()[:n_samples]:
-        # Format as Llama 3.1 conversation
-        messages = []
-        for turn in item["messages"]:
-            messages.append({"role": turn["role"], "content": turn["content"]})
-        
-        samples.append({
-            "messages": messages[:-1],  # All but last
-            "assistant_raw": messages[-1]["content"],  # Last turn
-            "metadata": {"split": "retain", "source": "ultrachat"}
-        })
-    
-    return samples
-```
+UltraChat is non-agentic; defer for now. Focus on AgentDojo + TAU2 as retain anchors.
 
 #### Task 2.1.3: Add XSTest Borderline Cases
 
