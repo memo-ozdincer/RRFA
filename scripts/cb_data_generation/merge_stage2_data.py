@@ -115,6 +115,18 @@ def normalize_sample(sample: Dict[str, Any], split: str, source: str) -> Dict[st
     # Tool-call marker
     assistant_raw = sample.get("assistant_raw", "")
     sample["metadata"]["has_tool_calls"] = "<|python_tag|>" in assistant_raw
+
+    # Ensure tools field for tool-call samples
+    if sample["metadata"]["has_tool_calls"] and not sample.get("tools"):
+        if source in ("agentdojo", "agentdojo_failures", "agentdojo_resisted"):
+            sample["tools"] = "agentdojo_native"
+        elif source in ("tau2", "tau2_traces"):
+            sample["tools"] = "tau2_native"
+        elif source in ("adversarial_safe", "b4_advsafe"):
+            sample["tools"] = "b4_standard_v1"
+        else:
+            # Fallback to B4 schema when tool calls exist
+            sample["tools"] = "b4_standard_v1"
     
     return sample
 
@@ -348,20 +360,20 @@ def merge_with_ratio(
         retain_samples = sorted_retain[:target_retain]
         logger.info(f"  Using top {target_retain} retain samples by priority")
     elif n_retain < target_retain:
-        # Oversample by weight
+        # Oversample by weight to reach target ratio
         logger.warning(f"  Not enough retain samples. Have {n_retain}, need {target_retain}")
-        
-        # Calculate weighted oversampling
+
         if n_retain > 0:
-            factor = target_retain / n_retain
+            rng = random.Random(seed)
+            weights = [s.get("metadata", {}).get("weight", 1.0) for s in retain_samples]
+            # Sample with replacement to reach target size
             oversampled = []
-            
-            for s in retain_samples:
-                weight = s.get("metadata", {}).get("weight", 1.0)
-                copies = max(1, int(weight * factor))
-                oversampled.extend([s.copy() for _ in range(copies)])
-            
-            # Trim to exact target
+            while len(oversampled) < target_retain:
+                s = rng.choices(retain_samples, weights=weights, k=1)[0].copy()
+                base_id = s.get("id", "auto")
+                s["id"] = f"{base_id}_dup{len(oversampled)}"
+                oversampled.append(s)
+
             retain_samples = oversampled[:target_retain]
             logger.info(f"  Oversampled to {len(retain_samples)} retain samples")
     
