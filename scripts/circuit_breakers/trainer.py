@@ -175,11 +175,18 @@ def reroute_loss(
     attention_mask: Optional[torch.Tensor] = None,
     loss_mask: Optional[torch.Tensor] = None,
     return_metrics: bool = False,
+    objective: str = "cosine_relu",
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, float]]]:
     """
     Rerouting Loss (L_rr): Push harmful representations to be orthogonal.
 
-    Formula: L_rr = ReLU(cosine_similarity(h_model, h_frozen))
+        Objectives:
+            - cosine_relu: ReLU(cosine_similarity(h_model, h_frozen))
+            - projection_relu: ReLU( <h_model, normalize(h_frozen)> )
+
+        NOTE: cosine similarity can produce exactly-zero gradients when h_model is
+        perfectly aligned with h_frozen at initialization (common with zero-init
+        adapters). projection_relu avoids that flat-gradient pathology.
 
     This encourages the model's representation of harmful content to be
     orthogonal (cos_sim ≈ 0) or opposite (cos_sim < 0) to the frozen model's.
@@ -208,9 +215,13 @@ def reroute_loss(
         - cos_sim_positive_frac: Fraction of tokens with positive cos_sim
         - target_type: Always "frozen_baseline" to clarify what we're comparing to
     """
+    if objective not in {"cosine_relu", "projection_relu"}:
+        raise ValueError(f"Unknown reroute objective: {objective}")
+
     total_loss = 0.0
     num_layers = 0
     all_cos_sims = []
+    all_projs = []
 
     # Combine attention_mask and loss_mask
     combined_mask = attention_mask
@@ -227,12 +238,11 @@ def reroute_loss(
         h_model = model_reps[layer_idx]  # (batch, seq_len, hidden_dim)
         h_frozen = frozen_reps[layer_idx]
 
-        # Compute cosine similarity along hidden dimension
-        # Normalize along last dimension
-        h_model_norm = F.normalize(h_model, p=2, dim=-1)
+        # Normalize frozen reps once; used by both objectives
         h_frozen_norm = F.normalize(h_frozen, p=2, dim=-1)
 
-        # Cosine similarity per token
+        # Always compute cos_sim for metrics/debugging.
+        h_model_norm = F.normalize(h_model, p=2, dim=-1)
         cos_sim = (h_model_norm * h_frozen_norm).sum(dim=-1)  # (batch, seq_len)
 
         # Store raw cos_sim for metrics
@@ -243,16 +253,29 @@ def reroute_loss(
                 masked_cos_sim = cos_sim.flatten()
             all_cos_sims.append(masked_cos_sim.detach())
 
-        # Apply ReLU: only penalize positive similarity
-        relu_cos = F.relu(cos_sim)
+        # Compute per-token penalty
+        if objective == "cosine_relu":
+            penalty = F.relu(cos_sim)
+        else:
+            # Projection onto frozen direction (unit vector). This yields
+            # non-zero gradients even when h_model == h_frozen.
+            proj = (h_model * h_frozen_norm).sum(dim=-1)  # (batch, seq_len)
+            penalty = F.relu(proj)
+
+            if return_metrics:
+                if combined_mask is not None:
+                    masked_proj = proj[combined_mask.bool()]
+                else:
+                    masked_proj = proj.flatten()
+                all_projs.append(masked_proj.detach())
 
         # Apply combined mask if provided (ignore padding + non-target tokens)
         if combined_mask is not None:
-            relu_cos = relu_cos * combined_mask.float()
+            penalty = penalty * combined_mask.float()
             # Mean over masked tokens
-            loss = relu_cos.sum() / (combined_mask.sum() + 1e-8)
+            loss = penalty.sum() / (combined_mask.sum() + 1e-8)
         else:
-            loss = relu_cos.mean()
+            loss = penalty.mean()
 
         total_loss += loss
         num_layers += 1
@@ -267,13 +290,22 @@ def reroute_loss(
                 "cos_sim_std": all_cos_sims.std().item(),
                 "cos_sim_positive_frac": (all_cos_sims > 0).float().mean().item(),
                 "target_type": "frozen_baseline",  # EXPLICIT: we compare to frozen baseline
+                "objective": objective,
             }
+            if all_projs:
+                all_projs_cat = torch.cat(all_projs)
+                metrics.update({
+                    "proj_mean": all_projs_cat.mean().item(),
+                    "proj_std": all_projs_cat.std().item(),
+                    "proj_positive_frac": (all_projs_cat > 0).float().mean().item(),
+                })
         else:
             metrics = {
                 "cos_sim_mean": 0.0,
                 "cos_sim_std": 0.0,
                 "cos_sim_positive_frac": 0.0,
                 "target_type": "frozen_baseline",
+                "objective": objective,
             }
         return final_loss, metrics
     
@@ -1383,6 +1415,7 @@ class CircuitBreakerTrainer:
 
         # Compute rerouting loss with optional loss mask
         # STAGE 1 FIX: return_metrics=True for explicit logging of what we're comparing to
+        reroute_objective = getattr(self.config, 'reroute_objective', 'cosine_relu')
         loss_reroute, reroute_metrics = reroute_loss(
             harmful_model_reps,
             harmful_frozen_reps,
@@ -1390,6 +1423,7 @@ class CircuitBreakerTrainer:
             harmful_attention_mask,
             loss_mask=harmful_loss_mask,
             return_metrics=True,
+            objective=reroute_objective,
         )
 
         # === Process Benign Samples (Retain) ===
@@ -1511,7 +1545,10 @@ class CircuitBreakerTrainer:
             self.accelerator.print(
                 f"  Reroute metrics: cos_sim_mean={reroute_metrics['cos_sim_mean']:.4f}, "
                 f"positive_frac={reroute_metrics['cos_sim_positive_frac']:.2%}, "
-                f"target={reroute_metrics['target_type']}"
+                f"proj_mean={reroute_metrics.get('proj_mean', float('nan')):.4f}, "
+                f"proj_pos_frac={reroute_metrics.get('proj_positive_frac', float('nan')):.2%}, "
+                f"target={reroute_metrics['target_type']}, "
+                f"objective={reroute_metrics.get('objective', 'cosine_relu')}"
             )
 
         return metrics

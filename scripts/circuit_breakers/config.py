@@ -68,6 +68,15 @@ class CircuitBreakerConfig:
     representation_extraction: str = "hidden_states"
 
     # === Agentic Enhancements ===
+    # Reroute objective.
+    #
+    # IMPORTANT: The original cosine-based objective can yield exactly-zero
+    # gradients at initialization when the trainable and frozen representations
+    # are perfectly aligned (common when LoRA adapters are initialized to 0).
+    #
+    # "projection_relu" uses a projection onto the frozen direction and avoids
+    # the flat-gradient issue at cos_sim=1.
+    reroute_objective: str = "cosine_relu"  # "cosine_relu" | "projection_relu"
     # Loss weighting strategy:
     # - "single_alpha": L = alpha * L_rr + L_ret (original, retain weight fixed at 1.0)
     # - "dual": L = cs(t) * L_rr + cr(t) * L_ret (paper-style, both coefficients vary)
@@ -201,6 +210,9 @@ class CircuitBreakerConfigLlama3_1_8B_Stage2(CircuitBreakerConfig):
     
     # Use dual loss weighting (paper style)
     loss_weighting: str = "dual"
+
+    # CRITICAL: Avoid flat-gradient issue at init
+    reroute_objective: str = "projection_relu"
     
     # Stage 2 specific: asymmetric loss weights
     # These are applied within the loss function
