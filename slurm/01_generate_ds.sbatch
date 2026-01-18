@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=mvp_ds_gen
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=4
+#SBATCH --gpus-per-node=1
 #SBATCH --time=02:00:00
 #SBATCH --output=/scratch/memoozd/cb-scratch/logs/%x_%j.out
 #SBATCH --error=/scratch/memoozd/cb-scratch/logs/%x_%j.err
@@ -79,8 +79,8 @@ python src/data_generation/generate_ds_mvp.py \
     --tool-schema configs/tool_schemas/b4_standard_v1.json \
     --model meta-llama/Llama-3.1-8B-Instruct \
     --backend vllm \
-    --tensor-parallel 4 \
-    --batch-size 64 \
+    --tensor-parallel 1 \
+    --batch-size 32 \
     --dtype bfloat16 \
     --temperature 0.7 \
     --min-yield 0.10 \

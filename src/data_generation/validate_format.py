@@ -1,33 +1,41 @@
 #!/usr/bin/env python3
 """
-Data Format Validation Script for Stage 1 MVP
+Data Format Validation Script - Batch Format
 
-Validates that Ds and Dr data files conform to the Llama 3.1 tool format
-and the MVP data schema requirements.
+Validates that training data files conform to the batch format output by
+rebuild_training_data.py, which is expected by the training script.
+
+**Batch Format** - JSONL file where each line is:
+{
+  "id": "batch_0",
+  "harmful": [
+    {
+      "text": "<|begin_of_text|><|start_header_id|>system<|end_header_id|>...",
+      "is_agentic": true,
+      "has_tool_call_in_text": true,
+      ...other original fields...
+    }
+  ],
+  "benign": [
+    {
+      "text": "<fully rendered conversation>",
+      "is_agentic": true,
+      "has_tool_call_in_text": true,
+      ...
+    }
+  ]
+}
 
 Checks:
-1. 100% have `messages` array (not just `prompt`)
-2. 100% have `tools` definition or reference
-3. 100% `assistant_raw` starts with `<|python_tag|>`
-4. 100% ends with `<|eom_id|>` or `<|eot_id|>`
-5. 0% have markdown wrappers or prefixes
-6. Ds: 100% have `is_flip_success: true`
-7. Dr: 100% have `is_flip_success: false`
+1. Each line is a valid JSON batch with "id", "harmful", "benign" keys
+2. Each sample in harmful/benign has "text" field (pre-rendered Llama 3.1 format)
+3. Text fields contain proper Llama 3.1 special tokens
+4. No markdown wrappers or forbidden prefixes
+5. Tool call formatting is correct (for agentic samples)
 
 Usage:
-    # Validate Ds
-    python scripts/cb_data_generation/validate_format.py \
-        --data data/cb_mvp/ds_stage1.jsonl \
-        --set-type ds
-
-    # Validate Dr
-    python scripts/cb_data_generation/validate_format.py \
-        --data data/cb_mvp/dr_stage1.jsonl \
-        --set-type dr
-
-    # Strict mode (fail on any error)
-    python scripts/cb_data_generation/validate_format.py \
-        --data data/cb_mvp/ds_stage1.jsonl \
+    python src/data_generation/validate_format.py \
+        --data data/cb_mvp/cb_training_batches.jsonl \
         --strict
 """
 
@@ -37,7 +45,7 @@ import logging
 import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 logging.basicConfig(
     level=logging.INFO,
@@ -49,14 +57,27 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 
 
 # =============================================================================
-# Validation Rules
+# Llama 3.1 Format Constants
 # =============================================================================
 
-class ValidationResult:
-    """Result of validating a single sample."""
+LLAMA_BOS = "<|begin_of_text|>"
+LLAMA_HEADER_START = "<|start_header_id|>"
+LLAMA_HEADER_END = "<|end_header_id|>"
+LLAMA_EOT = "<|eot_id|>"
+LLAMA_EOM = "<|eom_id|>"
+LLAMA_PYTHON_TAG = "<|python_tag|>"
+
+
+# =============================================================================
+# Validation Result Classes
+# =============================================================================
+
+class SampleValidationResult:
+    """Result of validating a single sample within a batch."""
     
-    def __init__(self, sample_id: str):
+    def __init__(self, sample_id: str, sample_type: str):
         self.sample_id = sample_id
+        self.sample_type = sample_type  # "harmful" or "benign"
         self.errors: List[str] = []
         self.warnings: List[str] = []
     
@@ -69,240 +90,309 @@ class ValidationResult:
     @property
     def is_valid(self) -> bool:
         return len(self.errors) == 0
-    
-    def __repr__(self):
-        status = "✅" if self.is_valid else "❌"
-        return f"{status} {self.sample_id}: {len(self.errors)} errors, {len(self.warnings)} warnings"
 
 
-def validate_messages(sample: Dict[str, Any], result: ValidationResult):
-    """Validate messages array structure."""
-    messages = sample.get("messages")
+class BatchValidationResult:
+    """Result of validating a batch."""
     
-    if messages is None:
-        result.add_error("Missing 'messages' array")
-        return
+    def __init__(self, batch_id: str):
+        self.batch_id = batch_id
+        self.errors: List[str] = []
+        self.warnings: List[str] = []
+        self.sample_results: List[SampleValidationResult] = []
     
-    if not isinstance(messages, list):
-        result.add_error(f"'messages' should be a list, got {type(messages).__name__}")
-        return
+    def add_error(self, message: str):
+        self.errors.append(message)
     
-    if len(messages) < 2:
-        result.add_error(f"'messages' should have at least 2 items (system + user), got {len(messages)}")
-        return
+    def add_warning(self, message: str):
+        self.warnings.append(message)
     
-    # Check roles
-    roles = [m.get("role") for m in messages]
+    def add_sample_result(self, result: SampleValidationResult):
+        self.sample_results.append(result)
     
-    if "system" not in roles:
-        result.add_warning("No 'system' message in messages array")
+    @property
+    def is_valid(self) -> bool:
+        if len(self.errors) > 0:
+            return False
+        return all(r.is_valid for r in self.sample_results)
     
-    if "user" not in roles:
-        result.add_error("No 'user' message in messages array")
+    @property
+    def all_errors(self) -> List[str]:
+        """All errors including from samples."""
+        errors = list(self.errors)
+        for r in self.sample_results:
+            for e in r.errors:
+                errors.append(f"[{r.sample_type}:{r.sample_id}] {e}")
+        return errors
     
-    # Check each message has content
-    for i, msg in enumerate(messages):
-        if not isinstance(msg, dict):
-            result.add_error(f"Message {i} is not a dict")
-            continue
-        if "role" not in msg:
-            result.add_error(f"Message {i} missing 'role'")
-        if "content" not in msg:
-            result.add_error(f"Message {i} missing 'content'")
+    @property
+    def all_warnings(self) -> List[str]:
+        """All warnings including from samples."""
+        warnings = list(self.warnings)
+        for r in self.sample_results:
+            for w in r.warnings:
+                warnings.append(f"[{r.sample_type}:{r.sample_id}] {w}")
+        return warnings
 
 
-def validate_tools(sample: Dict[str, Any], result: ValidationResult):
-    """Validate tools definition or reference."""
-    tools = sample.get("tools")
+# =============================================================================
+# Sample Validators
+# =============================================================================
+
+def validate_sample_text(sample: Dict[str, Any], result: SampleValidationResult):
+    """Validate the pre-rendered text field of a sample."""
+    text = sample.get("text")
     
-    if tools is None:
-        result.add_error("Missing 'tools' field")
+    if text is None:
+        result.add_error("Missing 'text' field")
         return
     
-    if isinstance(tools, str):
-        # Reference to frozen schema (e.g., "b4_standard_v1")
-        if not tools.strip():
-            result.add_error("Empty 'tools' reference string")
-    elif isinstance(tools, list):
-        # Full tool definitions
-        if len(tools) == 0:
-            result.add_warning("Empty 'tools' array")
-    else:
-        result.add_error(f"'tools' should be string or list, got {type(tools).__name__}")
+    if not isinstance(text, str):
+        result.add_error(f"'text' should be string, got {type(text).__name__}")
+        return
+    
+    if not text.strip():
+        result.add_error("Empty 'text' field")
+        return
+    
+    # Check for Llama 3.1 special tokens
+    if not text.startswith(LLAMA_BOS):
+        result.add_error(f"Text should start with {LLAMA_BOS}")
+    
+    if LLAMA_HEADER_START not in text:
+        result.add_error(f"Missing {LLAMA_HEADER_START} in text")
+    
+    if LLAMA_HEADER_END not in text:
+        result.add_error(f"Missing {LLAMA_HEADER_END} in text")
+    
+    # Check for required roles
+    if "system" not in text:
+        result.add_warning("No 'system' role found in text")
+    
+    if "user" not in text:
+        result.add_error("No 'user' role found in text")
+    
+    if "assistant" not in text:
+        result.add_error("No 'assistant' role found in text")
+    
+    # Check for proper end token
+    has_eom = LLAMA_EOM in text
+    has_eot = LLAMA_EOT in text
+    
+    if not (has_eom or has_eot):
+        result.add_warning("Missing end tokens (<|eom_id|> or <|eot_id|>)")
+    
+    # Check text ends with an end token (not critical but good)
+    stripped = text.rstrip()
+    if not (stripped.endswith(LLAMA_EOM) or stripped.endswith(LLAMA_EOT)):
+        result.add_warning("Text does not end with <|eom_id|> or <|eot_id|>")
+    
+    # Forbidden patterns
+    if "```" in text:
+        # Check if it's in the content vs in tool call JSON
+        # Markdown in tool call JSON args is OK
+        before_python_tag = text.split(LLAMA_PYTHON_TAG)[0] if LLAMA_PYTHON_TAG in text else text
+        if "```" in before_python_tag:
+            result.add_error("Contains markdown code block (```) outside tool call")
+    
+    # Forbidden prefixes in assistant response
+    if f"{LLAMA_HEADER_END}\n\nAction:" in text:
+        result.add_error("Contains forbidden 'Action:' prefix in assistant response")
+    if f"{LLAMA_HEADER_END}\n\nToolCall:" in text:
+        result.add_error("Contains forbidden 'ToolCall:' prefix in assistant response")
 
 
-def validate_assistant_raw(sample: Dict[str, Any], result: ValidationResult):
-    """Validate assistant_raw follows Llama 3.1 format."""
-    assistant_raw = sample.get("assistant_raw")
+def validate_sample_agentic_flags(sample: Dict[str, Any], result: SampleValidationResult):
+    """Validate agentic-related flags on a sample."""
+    text = sample.get("text", "")
+    is_agentic = sample.get("is_agentic", False)
+    has_tool_call = sample.get("has_tool_call_in_text", False)
     
-    if assistant_raw is None:
-        result.add_error("Missing 'assistant_raw' field")
-        return
+    # Check consistency between flags and actual text
+    has_python_tag_in_text = LLAMA_PYTHON_TAG in text
     
-    if not isinstance(assistant_raw, str):
-        result.add_error(f"'assistant_raw' should be string, got {type(assistant_raw).__name__}")
-        return
+    if has_tool_call and not has_python_tag_in_text:
+        result.add_error("has_tool_call_in_text=true but no <|python_tag|> in text")
     
-    if not assistant_raw.strip():
-        result.add_error("Empty 'assistant_raw'")
-        return
+    if has_python_tag_in_text and not has_tool_call:
+        result.add_warning("Has <|python_tag|> in text but has_tool_call_in_text=false")
     
-    # Must contain <|python_tag|>
-    if "<|python_tag|>" not in assistant_raw:
-        result.add_error("Missing <|python_tag|> in assistant_raw")
-    
-    # Check for end tokens (but make it a warning, not error)
-    # vLLM may not include these even with skip_special_tokens=False
-    stripped = assistant_raw.rstrip()
-    has_valid_end = (
-        stripped.endswith("<|eom_id|>") or 
-        stripped.endswith("<|eot_id|}") or
-        stripped.endswith("<|eot_id|>")
-    )
-    
-    # Also check if end token exists anywhere (might have trailing whitespace/content)
-    has_end_token = "<|eom_id|>" in assistant_raw or "<|eot_id|>" in assistant_raw
-    
-    if not has_end_token:
-        result.add_warning("Missing <|eom_id|> or <|eot_id|> in assistant_raw (not critical for training)")
-    elif not has_valid_end:
-        result.add_warning("End token not at end of assistant_raw (trailing content)")
-    
-    # Must NOT have markdown wrappers
-    if "```" in assistant_raw:
-        result.add_error("Contains markdown code block (```) in assistant_raw")
-    
-    # Must NOT have common prefixes
-    forbidden_prefixes = ["Action:", "ToolCall:", "Function:", "Tool:"]
-    for prefix in forbidden_prefixes:
-        if assistant_raw.strip().startswith(prefix):
-            result.add_error(f"Forbidden prefix '{prefix}' in assistant_raw")
-            break
+    # If marked as agentic, should have tool call
+    if is_agentic and not has_python_tag_in_text:
+        result.add_warning("is_agentic=true but no tool call in text")
 
 
-def validate_tool_calls_structured(sample: Dict[str, Any], result: ValidationResult):
-    """Validate tool_calls_structured array."""
-    tool_calls = sample.get("tool_calls_structured")
+def validate_sample_tool_call_format(sample: Dict[str, Any], result: SampleValidationResult):
+    """Validate tool call JSON format within the text."""
+    text = sample.get("text", "")
     
-    if tool_calls is None:
-        result.add_warning("Missing 'tool_calls_structured' field")
+    if LLAMA_PYTHON_TAG not in text:
+        return  # No tool call to validate
+    
+    # Extract content after python tag
+    parts = text.split(LLAMA_PYTHON_TAG, 1)
+    if len(parts) < 2:
         return
     
-    if not isinstance(tool_calls, list):
-        result.add_error(f"'tool_calls_structured' should be list, got {type(tool_calls).__name__}")
+    after_tag = parts[1]
+    
+    # Remove end tokens to get JSON
+    for end_token in [LLAMA_EOM, LLAMA_EOT, "</s>", "<|end"]:
+        after_tag = after_tag.split(end_token)[0]
+    
+    json_content = after_tag.strip()
+    
+    if not json_content:
+        result.add_error("Empty content after <|python_tag|>")
         return
     
-    for i, tc in enumerate(tool_calls):
-        if not isinstance(tc, dict):
-            result.add_error(f"tool_call {i} is not a dict")
-            continue
-        if "name" not in tc:
-            result.add_error(f"tool_call {i} missing 'name'")
-        if "parameters" not in tc and "arguments" not in tc:
-            result.add_warning(f"tool_call {i} missing 'parameters'/'arguments'")
-
-
-def validate_labels(sample: Dict[str, Any], result: ValidationResult, set_type: str):
-    """Validate labels based on set type (ds or dr)."""
-    labels = sample.get("labels")
-    
-    if labels is None:
-        result.add_error("Missing 'labels' field")
-        return
-    
-    if not isinstance(labels, dict):
-        result.add_error(f"'labels' should be dict, got {type(labels).__name__}")
-        return
-    
-    # Check required label fields
-    required_fields = ["expected_tool", "observed_tool", "is_flip_success"]
-    for field in required_fields:
-        if field not in labels:
-            result.add_error(f"Missing 'labels.{field}'")
-    
-    # Validate is_flip_success based on set type
-    is_flip_success = labels.get("is_flip_success")
-    
-    if set_type == "ds":
-        if is_flip_success is not True:
-            result.add_error(f"Ds sample must have is_flip_success=true, got {is_flip_success}")
-    elif set_type == "dr":
-        if is_flip_success is not False:
-            result.add_error(f"Dr sample must have is_flip_success=false, got {is_flip_success}")
-
-
-def validate_metadata(sample: Dict[str, Any], result: ValidationResult):
-    """Validate metadata field."""
-    metadata = sample.get("metadata")
-    
-    if metadata is None:
-        result.add_warning("Missing 'metadata' field")
-        return
-    
-    if not isinstance(metadata, dict):
-        result.add_error(f"'metadata' should be dict, got {type(metadata).__name__}")
-        return
-    
-    # Check recommended fields
-    recommended = ["split", "source"]
-    for field in recommended:
-        if field not in metadata:
-            result.add_warning(f"Missing recommended 'metadata.{field}'")
+    # Try to parse as JSON
+    try:
+        data = json.loads(json_content)
+        
+        # Should be a dict with "name" and "parameters"
+        if not isinstance(data, dict):
+            result.add_error(f"Tool call should be dict, got {type(data).__name__}")
+            return
+        
+        if "name" not in data:
+            result.add_error("Tool call JSON missing 'name' field")
+        
+        if "parameters" not in data and "arguments" not in data:
+            result.add_warning("Tool call JSON missing 'parameters' field")
+        
+    except json.JSONDecodeError as e:
+        result.add_error(f"Invalid JSON after <|python_tag|>: {e}")
 
 
 def validate_sample(
     sample: Dict[str, Any],
-    set_type: str = "ds",
-) -> ValidationResult:
+    sample_type: str,
+    sample_idx: int,
+) -> SampleValidationResult:
     """
-    Validate a single sample against the MVP schema.
+    Validate a single sample from a batch.
     
     Args:
-        sample: The sample to validate
-        set_type: "ds" for circuit breaker set, "dr" for retain set
+        sample: The sample dict
+        sample_type: "harmful" or "benign"
+        sample_idx: Index within the array
     
     Returns:
-        ValidationResult with errors and warnings
+        SampleValidationResult
     """
-    sample_id = sample.get("id", "unknown")
-    result = ValidationResult(sample_id)
+    sample_id = sample.get("id", f"idx_{sample_idx}")
+    result = SampleValidationResult(sample_id, sample_type)
     
-    # Run all validators
-    validate_messages(sample, result)
-    validate_tools(sample, result)
-    validate_assistant_raw(sample, result)
-    validate_tool_calls_structured(sample, result)
-    validate_labels(sample, result, set_type)
-    validate_metadata(sample, result)
+    # Run validators
+    validate_sample_text(sample, result)
+    validate_sample_agentic_flags(sample, result)
+    validate_sample_tool_call_format(sample, result)
     
     return result
 
 
 # =============================================================================
-# Aggregate Validation
+# Batch Validators
+# =============================================================================
+
+def validate_batch_structure(batch: Dict[str, Any], result: BatchValidationResult):
+    """Validate basic batch structure."""
+    if "id" not in batch:
+        result.add_warning("Missing 'id' field in batch")
+    
+    if "harmful" not in batch:
+        result.add_error("Missing 'harmful' array in batch")
+    elif not isinstance(batch["harmful"], list):
+        result.add_error(f"'harmful' should be list, got {type(batch['harmful']).__name__}")
+    
+    if "benign" not in batch:
+        result.add_error("Missing 'benign' array in batch")
+    elif not isinstance(batch["benign"], list):
+        result.add_error(f"'benign' should be list, got {type(batch['benign']).__name__}")
+
+
+def validate_batch_non_empty(batch: Dict[str, Any], result: BatchValidationResult):
+    """Check batch has at least one sample."""
+    harmful = batch.get("harmful", [])
+    benign = batch.get("benign", [])
+    
+    if len(harmful) == 0 and len(benign) == 0:
+        result.add_error("Batch is empty (no harmful or benign samples)")
+    
+    if len(harmful) == 0:
+        result.add_warning("Batch has no harmful samples")
+    
+    if len(benign) == 0:
+        result.add_warning("Batch has no benign samples")
+
+
+def validate_batch(batch: Dict[str, Any], batch_idx: int) -> BatchValidationResult:
+    """
+    Validate a single batch.
+    
+    Args:
+        batch: The batch dict
+        batch_idx: Line number / index
+    
+    Returns:
+        BatchValidationResult
+    """
+    batch_id = batch.get("id", f"line_{batch_idx}")
+    result = BatchValidationResult(batch_id)
+    
+    # Validate batch structure
+    validate_batch_structure(batch, result)
+    validate_batch_non_empty(batch, result)
+    
+    # If structure is invalid, don't validate samples
+    if len(result.errors) > 0:
+        return result
+    
+    # Validate harmful samples
+    for idx, sample in enumerate(batch.get("harmful", [])):
+        if not isinstance(sample, dict):
+            result.add_error(f"harmful[{idx}] is not a dict")
+            continue
+        sample_result = validate_sample(sample, "harmful", idx)
+        result.add_sample_result(sample_result)
+    
+    # Validate benign samples
+    for idx, sample in enumerate(batch.get("benign", [])):
+        if not isinstance(sample, dict):
+            result.add_error(f"benign[{idx}] is not a dict")
+            continue
+        sample_result = validate_sample(sample, "benign", idx)
+        result.add_sample_result(sample_result)
+    
+    return result
+# =============================================================================
+# File Validation
 # =============================================================================
 
 def validate_file(
     path: Path,
-    set_type: str = "ds",
     verbose: bool = True,
     max_errors: int = 10,
 ) -> Dict[str, Any]:
     """
-    Validate all samples in a JSONL file.
+    Validate all batches in a JSONL file.
     
     Args:
         path: Path to JSONL file
-        set_type: "ds" or "dr"
         verbose: Print detailed errors
         max_errors: Maximum errors to print per type
     
     Returns:
         Dict with validation statistics
     """
-    results = []
+    results: List[BatchValidationResult] = []
     error_counts: Dict[str, int] = {}
     warning_counts: Dict[str, int] = {}
+    
+    total_harmful_samples = 0
+    total_benign_samples = 0
+    total_tool_calls = 0
     
     logger.info(f"Validating {path}...")
     
@@ -312,38 +402,50 @@ def validate_file(
                 continue
             
             try:
-                sample = json.loads(line)
+                batch = json.loads(line)
             except json.JSONDecodeError as e:
                 logger.error(f"Line {line_num}: Invalid JSON: {e}")
                 error_counts["invalid_json"] = error_counts.get("invalid_json", 0) + 1
                 continue
             
-            result = validate_sample(sample, set_type)
+            result = validate_batch(batch, line_num)
             results.append(result)
             
+            # Count samples
+            total_harmful_samples += len(batch.get("harmful", []))
+            total_benign_samples += len(batch.get("benign", []))
+            
+            # Count tool calls
+            for s in batch.get("harmful", []) + batch.get("benign", []):
+                if s.get("has_tool_call_in_text", False):
+                    total_tool_calls += 1
+            
             # Aggregate errors
-            for error in result.errors:
-                error_key = error.split(":")[0] if ":" in error else error[:50]
+            for error in result.all_errors:
+                error_key = error.split(":")[0] if ":" in error else error[:60]
                 error_counts[error_key] = error_counts.get(error_key, 0) + 1
             
-            for warning in result.warnings:
-                warning_key = warning.split(":")[0] if ":" in warning else warning[:50]
+            for warning in result.all_warnings:
+                warning_key = warning.split(":")[0] if ":" in warning else warning[:60]
                 warning_counts[warning_key] = warning_counts.get(warning_key, 0) + 1
     
     # Compute statistics
-    total = len(results)
-    valid = sum(1 for r in results if r.is_valid)
-    invalid = total - valid
-    total_errors = sum(len(r.errors) for r in results)
-    total_warnings = sum(len(r.warnings) for r in results)
+    total_batches = len(results)
+    valid_batches = sum(1 for r in results if r.is_valid)
+    invalid_batches = total_batches - valid_batches
+    total_errors = sum(len(r.all_errors) for r in results)
+    total_warnings = sum(len(r.all_warnings) for r in results)
     
     stats = {
         "file": str(path),
-        "set_type": set_type,
-        "total_samples": total,
-        "valid_samples": valid,
-        "invalid_samples": invalid,
-        "validity_rate": valid / total if total > 0 else 0,
+        "total_batches": total_batches,
+        "valid_batches": valid_batches,
+        "invalid_batches": invalid_batches,
+        "validity_rate": valid_batches / total_batches if total_batches > 0 else 0,
+        "total_harmful_samples": total_harmful_samples,
+        "total_benign_samples": total_benign_samples,
+        "total_samples": total_harmful_samples + total_benign_samples,
+        "total_tool_calls": total_tool_calls,
         "total_errors": total_errors,
         "total_warnings": total_warnings,
         "error_types": error_counts,
@@ -353,13 +455,17 @@ def validate_file(
     # Print results
     logger.info("")
     logger.info("=" * 60)
-    logger.info("VALIDATION RESULTS")
+    logger.info("VALIDATION RESULTS (Batch Format)")
     logger.info("=" * 60)
     logger.info(f"File: {path}")
-    logger.info(f"Set type: {set_type}")
-    logger.info(f"Total samples: {total}")
-    logger.info(f"Valid samples: {valid} ({stats['validity_rate']:.1%})")
-    logger.info(f"Invalid samples: {invalid}")
+    logger.info(f"Total batches: {total_batches}")
+    logger.info(f"Valid batches: {valid_batches} ({stats['validity_rate']:.1%})")
+    logger.info(f"Invalid batches: {invalid_batches}")
+    logger.info("")
+    logger.info(f"Total harmful samples: {total_harmful_samples}")
+    logger.info(f"Total benign samples: {total_benign_samples}")
+    logger.info(f"Total samples with tool calls: {total_tool_calls}")
+    logger.info("")
     logger.info(f"Total errors: {total_errors}")
     logger.info(f"Total warnings: {total_warnings}")
     
@@ -376,24 +482,24 @@ def validate_file(
             logger.info(f"  {count:4d} | {warning_type}")
     
     # Show sample errors
-    if verbose and invalid > 0:
+    if verbose and invalid_batches > 0:
         logger.info("")
-        logger.info("Sample errors (first 5 invalid samples):")
+        logger.info("Sample errors (first 5 invalid batches):")
         shown = 0
         for result in results:
             if not result.is_valid and shown < 5:
-                logger.info(f"  {result.sample_id}:")
-                for error in result.errors[:3]:
+                logger.info(f"  Batch {result.batch_id}:")
+                for error in result.all_errors[:3]:
                     logger.info(f"    - {error}")
                 shown += 1
     
     logger.info("=" * 60)
     
     # Overall pass/fail
-    if invalid == 0:
+    if invalid_batches == 0:
         logger.info("✅ ALL VALIDATION CHECKS PASSED")
     else:
-        logger.info(f"❌ VALIDATION FAILED: {invalid} invalid samples")
+        logger.info(f"❌ VALIDATION FAILED: {invalid_batches} invalid batches")
     
     return stats
 
@@ -404,7 +510,7 @@ def validate_file(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Validate data format for Stage 1 MVP",
+        description="Validate training data batch format",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -414,13 +520,6 @@ def main():
         type=Path,
         required=True,
         help="Path to JSONL data file to validate",
-    )
-    parser.add_argument(
-        "--set-type",
-        type=str,
-        choices=["ds", "dr", "auto"],
-        default="auto",
-        help="Set type: ds (circuit breaker) or dr (retain). 'auto' infers from filename.",
     )
     parser.add_argument(
         "--output",
@@ -452,23 +551,9 @@ def main():
         logger.error(f"File not found: {args.data}")
         return 1
     
-    # Infer set type if auto
-    set_type = args.set_type
-    if set_type == "auto":
-        filename = args.data.name.lower()
-        if "ds" in filename or "circuit" in filename or "harmful" in filename:
-            set_type = "ds"
-        elif "dr" in filename or "retain" in filename or "benign" in filename:
-            set_type = "dr"
-        else:
-            logger.warning("Could not infer set type from filename, defaulting to 'ds'")
-            set_type = "ds"
-        logger.info(f"Inferred set type: {set_type}")
-    
     # Validate
     stats = validate_file(
         args.data,
-        set_type=set_type,
         verbose=not args.quiet,
         max_errors=args.max_errors,
     )
@@ -481,7 +566,7 @@ def main():
         logger.info(f"Validation report saved to {args.output}")
     
     # Exit code
-    if args.strict and stats["invalid_samples"] > 0:
+    if args.strict and stats["invalid_batches"] > 0:
         return 1
     
     return 0
