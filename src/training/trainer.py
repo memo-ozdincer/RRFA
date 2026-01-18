@@ -1276,7 +1276,11 @@ class CircuitBreakerTrainer:
 
     def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
         """
-        Execute one training step - Agentic Enhanced Version.
+        Execute one training step - Single Forward Pass Version (DDP-safe).
+
+        CRITICAL FIX: To avoid reentrant backward under DDP with gradient checkpointing,
+        we now do a SINGLE forward pass for both harmful and benign samples by
+        concatenating them along the batch dimension, then splitting representations.
 
         AGENTIC ENHANCEMENTS:
         1. Uses loss masks for completion-only loss computation
@@ -1316,59 +1320,111 @@ class CircuitBreakerTrainer:
             )
             cs, cr = alpha, 1.0  # cr fixed at 1.0 for single_alpha mode
 
-        # === Process Harmful Samples (Rerouting) ===
-        if self._rep_extraction_method == "hooks":
-            self.model_extractor.clear()
-
+        # Extract batch data
         harmful_input_ids = batch['harmful_input_ids']
         harmful_attention_mask = batch['harmful_attention_mask']
         harmful_loss_mask = batch.get('harmful_loss_mask', None)
 
+        benign_input_ids = batch['benign_input_ids']
+        benign_attention_mask = batch['benign_attention_mask']
+        benign_loss_mask = batch.get('benign_loss_mask', None)
+
+        # Get batch sizes for later splitting
+        harmful_batch_size = harmful_input_ids.shape[0]
+        benign_batch_size = benign_input_ids.shape[0]
+
+        # === SINGLE FORWARD PASS: Concatenate harmful + benign ===
+        combined_input_ids = torch.cat([harmful_input_ids, benign_input_ids], dim=0)
+        combined_attention_mask = torch.cat([harmful_attention_mask, benign_attention_mask], dim=0)
+
         if self._rep_extraction_method == "hooks":
-            # Forward through trainable model (adapters enabled)
+            # Clear previous representations
+            self.model_extractor.clear()
+
+            # Single forward through trainable model
             _ = self.model(
-                input_ids=harmful_input_ids,
-                attention_mask=harmful_attention_mask,
+                input_ids=combined_input_ids,
+                attention_mask=combined_attention_mask,
                 use_cache=False,
             )
-            harmful_model_reps = self.model_extractor.get_representations()
+            combined_model_reps = self.model_extractor.get_representations()
 
-            # Forward through frozen model (no grad)
+            # Single forward through frozen model (no grad)
             self.frozen_extractor.clear()
             with torch.no_grad():
                 _ = self.frozen_model(
-                    input_ids=harmful_input_ids,
-                    attention_mask=harmful_attention_mask,
+                    input_ids=combined_input_ids,
+                    attention_mask=combined_attention_mask,
                     use_cache=False,
                 )
-            harmful_frozen_reps = self.frozen_extractor.get_representations()
+            combined_frozen_reps = self.frozen_extractor.get_representations()
+
+            # Split representations by batch size
+            harmful_model_reps = {
+                layer: reps[:harmful_batch_size]
+                for layer, reps in combined_model_reps.items()
+            }
+            benign_model_reps = {
+                layer: reps[harmful_batch_size:]
+                for layer, reps in combined_model_reps.items()
+            }
+
+            harmful_frozen_reps = {
+                layer: reps[:harmful_batch_size]
+                for layer, reps in combined_frozen_reps.items()
+            }
+            benign_frozen_reps = {
+                layer: reps[harmful_batch_size:]
+                for layer, reps in combined_frozen_reps.items()
+            }
+
         else:
+            # Single forward with hidden_states output
             outputs = self.model(
-                input_ids=harmful_input_ids,
-                attention_mask=harmful_attention_mask,
+                input_ids=combined_input_ids,
+                attention_mask=combined_attention_mask,
                 output_hidden_states=True,
                 use_cache=False,
                 return_dict=True,
             )
-            harmful_model_reps = _select_hidden_states(outputs, self.config.cb_target_layers)
+            combined_model_reps = _select_hidden_states(outputs, self.config.cb_target_layers)
             del outputs
 
-            # Get frozen representations from separate frozen model
+            # Single frozen forward
             with torch.no_grad():
                 frozen_outputs = self.frozen_model(
-                    input_ids=harmful_input_ids,
-                    attention_mask=harmful_attention_mask,
+                    input_ids=combined_input_ids,
+                    attention_mask=combined_attention_mask,
                     output_hidden_states=True,
                     use_cache=False,
                     return_dict=True,
                 )
-                harmful_frozen_reps = _select_hidden_states(
+                combined_frozen_reps = _select_hidden_states(
                     frozen_outputs, self.config.cb_target_layers
                 )
             del frozen_outputs
 
+            # Split representations by batch size
+            harmful_model_reps = {
+                layer: reps[:harmful_batch_size]
+                for layer, reps in combined_model_reps.items()
+            }
+            benign_model_reps = {
+                layer: reps[harmful_batch_size:]
+                for layer, reps in combined_model_reps.items()
+            }
+
+            harmful_frozen_reps = {
+                layer: reps[:harmful_batch_size]
+                for layer, reps in combined_frozen_reps.items()
+            }
+            benign_frozen_reps = {
+                layer: reps[harmful_batch_size:]
+                for layer, reps in combined_frozen_reps.items()
+            }
+
+        # === Compute Losses ===
         # Compute rerouting loss with optional loss mask
-        # STAGE 1 FIX: return_metrics=True for explicit logging of what we're comparing to
         loss_reroute, reroute_metrics = reroute_loss(
             harmful_model_reps,
             harmful_frozen_reps,
@@ -1377,57 +1433,6 @@ class CircuitBreakerTrainer:
             loss_mask=harmful_loss_mask,
             return_metrics=True,
         )
-
-        # === Process Benign Samples (Retain) ===
-        if self._rep_extraction_method == "hooks":
-            self.model_extractor.clear()
-
-        benign_input_ids = batch['benign_input_ids']
-        benign_attention_mask = batch['benign_attention_mask']
-        benign_loss_mask = batch.get('benign_loss_mask', None)
-
-        if self._rep_extraction_method == "hooks":
-            # Forward through trainable model (adapters enabled)
-            _ = self.model(
-                input_ids=benign_input_ids,
-                attention_mask=benign_attention_mask,
-                use_cache=False,
-            )
-            benign_model_reps = self.model_extractor.get_representations()
-
-            # Forward through frozen model (no grad)
-            self.frozen_extractor.clear()
-            with torch.no_grad():
-                _ = self.frozen_model(
-                    input_ids=benign_input_ids,
-                    attention_mask=benign_attention_mask,
-                    use_cache=False,
-                )
-            benign_frozen_reps = self.frozen_extractor.get_representations()
-        else:
-            outputs = self.model(
-                input_ids=benign_input_ids,
-                attention_mask=benign_attention_mask,
-                output_hidden_states=True,
-                use_cache=False,
-                return_dict=True,
-            )
-            benign_model_reps = _select_hidden_states(outputs, self.config.cb_target_layers)
-            del outputs
-
-            # Get frozen representations from separate frozen model
-            with torch.no_grad():
-                frozen_outputs = self.frozen_model(
-                    input_ids=benign_input_ids,
-                    attention_mask=benign_attention_mask,
-                    output_hidden_states=True,
-                    use_cache=False,
-                    return_dict=True,
-                )
-                benign_frozen_reps = _select_hidden_states(
-                    frozen_outputs, self.config.cb_target_layers
-                )
-            del frozen_outputs
 
         # Compute retain loss with optional loss mask
         loss_retain = retain_loss(
@@ -1442,7 +1447,7 @@ class CircuitBreakerTrainer:
         # L = cs * L_reroute + cr * L_retain
         total_loss = cs * loss_reroute + cr * loss_retain
 
-        # Backward pass
+        # Backward pass (SINGLE backward through combined graph)
         self.accelerator.backward(total_loss)
 
         # Gradient clipping
