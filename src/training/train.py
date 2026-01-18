@@ -35,7 +35,8 @@ import os
 from pathlib import Path
 
 # Add repo root to path for imports
-sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+# train.py is at <repo>/src/training/train.py, so parents[2] == <repo>
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 # CRITICAL FIX: Ensure HOME is redirected to cache directory
 # This protects against any libraries defaulting to ~/.cache
