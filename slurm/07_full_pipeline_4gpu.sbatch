@@ -1,15 +1,15 @@
 #!/bin/bash
-#SBATCH --job-name=cb_full_1gpu
+#SBATCH --job-name=cb_full_4gpu
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=1
-#SBATCH --time=06:00:00
+#SBATCH --gpus-per-node=4
+#SBATCH --time=04:00:00
 #SBATCH --output=/scratch/memoozd/cb-scratch/logs/%x_%j.out
 #SBATCH --error=/scratch/memoozd/cb-scratch/logs/%x_%j.err
 #SBATCH --account=def-zhijing
 
 # =============================================================================
-# Full Pipeline - 1 GPU Variant
-# Trillium 1×H100
+# Full Pipeline - 4 GPU Variant
+# Trillium 4×H100
 # =============================================================================
 #
 # Conservative hyperparameters:
@@ -20,7 +20,7 @@
 # - learning_rate: 3e-5 (gentler updates)
 #
 # Usage:
-#   sbatch slurm/00_minimal_test.sbatch
+#   sbatch slurm/07_full_pipeline_4gpu.sbatch
 # =============================================================================
 
 set -euo pipefail
@@ -46,7 +46,7 @@ fi
 source "$VENV_DIR/bin/activate"
 
 echo "========================================"
-echo "MINIMAL TEST - Job ID: $SLURM_JOB_ID"
+echo "FULL PIPELINE (4 GPU) - Job ID: $SLURM_JOB_ID"
 echo "Date: $(date)"
 echo "========================================"
 
@@ -103,7 +103,7 @@ python src/data_generation/generate_ds_mvp.py \
     --tool-schema "$TOOL_SCHEMA" \
     --model "$BASE_MODEL" \
     --backend vllm \
-    --tensor-parallel 1 \
+    --tensor-parallel 4 \
     --batch-size 64 \
     --dtype bfloat16 \
     --temperature 0.7 \
@@ -133,7 +133,7 @@ python src/data_generation/generate_dr_mvp.py \
     --tool-schema "$TOOL_SCHEMA" \
     --model "$BASE_MODEL" \
     --backend vllm \
-    --tensor-parallel 1 \
+    --tensor-parallel 4 \
     --batch-size 64 \
     --dtype bfloat16 \
     --temperature 0.3 \
@@ -207,7 +207,7 @@ echo "========================================"
 
 if [[ $BATCH_COUNT -eq 0 ]]; then
     echo "⚠ Skipping validation (0 batches)"
-    echo "ERROR: No training data generated - abliterated model may not be producing valid tool calls"
+    echo "ERROR: No training data generated"
     exit 1
 fi
 
@@ -247,7 +247,7 @@ accelerate launch --num_processes 1 \
     --lora-alpha 32 \
     --cb-target-layers 15 \
     --wandb-project "circuit-breakers" \
-    --wandb-run-name "cb_full_${SLURM_JOB_ID}"
+    --wandb-run-name "cb_full_4gpu_${SLURM_JOB_ID}"
 
 if [[ ! -d "$OUTPUT_DIR" ]]; then
     echo "ERROR: Training failed - no output directory"
