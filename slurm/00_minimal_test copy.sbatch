@@ -195,10 +195,9 @@ OUTPUT_DIR="$TEST_DIR/adapter"
 #     --output "$FORMATTED_FILE" \
 #     --tool-schema "$TOOL_SCHEMA" \
 #     --filter-tool-only
-
-# BATCH_COUNT=$(wc -l < "$FORMATTED_FILE")
-# echo "✓ Formatted $BATCH_COUNT training batches"
 FORMATTED_FILE="/scratch/memoozd/cb-scratch/test_208683/cb_training_test_llama31.jsonl"
+BATCH_COUNT=$(wc -l < "$FORMATTED_FILE")
+echo "✓ Formatted $BATCH_COUNT training batches"
 # =============================================================================
 # STAGE 5: Validate Format
 # =============================================================================
