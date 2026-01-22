@@ -50,7 +50,11 @@ VALIDATION_PASSED=true
 # Validate Ds
 if [[ -f "$DS_FILE" ]]; then
     echo "--- Validating Ds: $DS_FILE ---"
-    if python src/data_generation/validate_format.py --data "$DS_FILE" --strict; then
+    if python src/data_generation/validate_format.py \
+        --data "$DS_FILE" \
+        --strict \
+        --print-examples \
+        --n-per-error-type 3; then
         echo "Ds validation PASSED"
     else
         echo "Ds validation FAILED"
@@ -63,7 +67,11 @@ fi
 # Validate Dr
 if [[ -f "$DR_FILE" ]]; then
     echo "--- Validating Dr: $DR_FILE ---"
-    if python src/data_generation/validate_format.py --data "$DR_FILE" --strict; then
+    if python src/data_generation/validate_format.py \
+        --data "$DR_FILE" \
+        --strict \
+        --print-examples \
+        --n-per-error-type 3; then
         echo "Dr validation PASSED"
     else
         echo "Dr validation FAILED"

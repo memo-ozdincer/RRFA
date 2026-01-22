@@ -201,7 +201,9 @@ def create_eval_set(
     max_samples: int = 500,
     stratify_by: str = "subtype",
     seed: int = 42,
-) -> List[Dict[str, Any]]:
+    collect_examples: bool = False,
+    n_per_stratum: int = 3,
+) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Create held-out evaluation set from B4 records.
     
@@ -241,6 +243,24 @@ def create_eval_set(
         seed=seed,
     )
     
+    # Collect examples by stratum
+    examples = {} if collect_examples else None
+    if collect_examples:
+        strata_counts = defaultdict(list)
+        for record in eval_samples:
+            stratum = record.get("metadata", {}).get(stratify_by) or "unknown"
+            if len(strata_counts[stratum]) < n_per_stratum:
+                strata_counts[stratum].append({
+                    "id": record["id"],
+                    "stratum": stratum,
+                    "category": record.get("metadata", {}).get("category"),
+                    "expected_tool": record["expected_tool"],
+                    "simulated_tool": record["simulated_tool"],
+                    "benign_query": record["benign_query"][:200] if record.get("benign_query") else "",
+                    "combined_query": record["combined_query"][:200] if record.get("combined_query") else "",
+                })
+        examples["selected_by_stratum"] = dict(strata_counts)
+    
     # Format for eval (same schema as Ds minus assistant_raw which will be generated at eval time)
     formatted = []
     for record in eval_samples:
@@ -265,7 +285,53 @@ def create_eval_set(
             },
         })
     
-    return formatted
+    # Build stats
+    stats = {
+        "total_selected": len(formatted),
+        "target_n": target_n,
+        "stratify_by": stratify_by,
+    }
+    if collect_examples:
+        stats["examples"] = examples
+    
+    return formatted, stats
+
+
+# =============================================================================
+# Example Reporting
+# =============================================================================
+
+def print_examples_report(examples: Dict[str, Any], truncate: bool = True) -> None:
+    """Print collected examples by stratum."""
+    max_len = 200 if truncate else None
+    
+    selected_by_stratum = examples.get("selected_by_stratum", {})
+    if not selected_by_stratum:
+        return
+    
+    print(f"\n{'='*80}")
+    print("SELECTED SAMPLES BY STRATUM")
+    print('='*80)
+    
+    for stratum, items in sorted(selected_by_stratum.items()):
+        print(f"\n--- Stratum: {stratum} ({len(items)} examples) ---")
+        
+        for i, ex in enumerate(items, 1):
+            print(f"\n  Example {i}/{len(items)}:")
+            print(f"    ID: {ex.get('id', 'N/A')}")
+            print(f"    Category: {ex.get('category', 'N/A')}")
+            print(f"    Expected tool: {ex.get('expected_tool', 'N/A')}")
+            print(f"    Simulated tool: {ex.get('simulated_tool', 'N/A')}")
+            
+            benign_query = ex.get('benign_query', '')
+            if max_len and len(benign_query) > max_len:
+                benign_query = benign_query[:max_len] + '...'
+            print(f"    Benign query: {benign_query}")
+            
+            combined_query = ex.get('combined_query', '')
+            if max_len and len(combined_query) > max_len:
+                combined_query = combined_query[:max_len] + '...'
+            print(f"    Combined query: {combined_query}")
 
 
 # =============================================================================
@@ -333,6 +399,31 @@ def main():
         help="Show stats without writing",
     )
     
+    # Example collection
+    example_group = parser.add_argument_group("example collection")
+    example_group.add_argument(
+        "--print-examples",
+        action="store_true",
+        help="Print collected examples to stdout",
+    )
+    example_group.add_argument(
+        "--examples-out",
+        type=Path,
+        default=None,
+        help="Path to save examples JSON (default: <output>.examples.json)",
+    )
+    example_group.add_argument(
+        "--n-per-stratum",
+        type=int,
+        default=3,
+        help="Number of examples to collect per stratum",
+    )
+    example_group.add_argument(
+        "--no-truncate",
+        action="store_true",
+        help="Don't truncate examples when printing",
+    )
+    
     args = parser.parse_args()
     
     # Load data
@@ -347,7 +438,8 @@ def main():
     logger.info(f"Training IDs: {len(train_ids)}")
     
     # Create eval set
-    eval_samples = create_eval_set(
+    collect_examples = args.print_examples or args.examples_out is not None
+    eval_samples, stats = create_eval_set(
         b4_records=b4_records,
         train_ids=train_ids,
         holdout_fraction=args.holdout_fraction,
@@ -355,6 +447,8 @@ def main():
         max_samples=args.max_samples,
         stratify_by=args.stratify_by,
         seed=args.seed,
+        collect_examples=collect_examples,
+        n_per_stratum=args.n_per_stratum,
     )
     
     logger.info(f"Created {len(eval_samples)} eval samples")
@@ -390,15 +484,29 @@ def main():
             f.write(sample["id"] + "\n")
     logger.info(f"Wrote eval IDs to {ids_path}")
     
+    # Handle examples
+    if "examples" in stats and stats["examples"]:
+        examples = stats.pop("examples")
+        
+        if args.print_examples:
+            print("\n" + "="*80)
+            print("COLLECTED EXAMPLES")
+            print("="*80)
+            print_examples_report(examples, truncate=not args.no_truncate)
+        
+        examples_path = args.examples_out or args.output.with_suffix(".examples.json")
+        with open(examples_path, "w", encoding="utf-8") as f:
+            json.dump(examples, f, indent=2, ensure_ascii=False)
+        logger.info(f"Wrote examples to {examples_path}")
+    
     # Write stats
-    stats = {
+    stats.update({
         "total_b4_records": len(b4_records),
         "training_ids": len(train_ids),
         "eval_samples": len(eval_samples),
         "holdout_fraction": args.holdout_fraction,
-        "stratify_by": args.stratify_by,
         "subtype_distribution": dict(subtype_counts),
-    }
+    })
     stats_path = args.output.with_suffix(".stats.json")
     with open(stats_path, "w", encoding="utf-8") as f:
         json.dump(stats, f, indent=2)

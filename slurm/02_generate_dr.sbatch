@@ -69,6 +69,14 @@ python src/data_generation/generate_dr.py \
     --batch-size 32 \
     --dtype bfloat16 \
     --temperature 0.3 \
-    --output "$DATA_DIR/dr_stage1.jsonl"
+    --output "$DATA_DIR/dr_stage1.jsonl" \
+    --print-examples \
+    --n-correct 10 \
+    --n-wrong-tool 5 \
+    --n-no-tool 5 \
+    --n-format-errors 5
 
-echo "Dr generation complete! Output: $DATA_DIR/dr_stage1.jsonl"
+echo "Dr generation complete!"
+echo "  Output: $DATA_DIR/dr_stage1.jsonl"
+echo "  Stats: $DATA_DIR/dr_stage1.stats.json"
+echo "  Examples: $DATA_DIR/dr_stage1.examples.json"

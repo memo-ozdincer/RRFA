@@ -515,6 +515,12 @@ def build_ds_mvp(
     min_yield: float = 0.10,
     save_all: bool = False,
     verbose: bool = True,
+    collect_examples: bool = False,
+    n_successful: int = 10,
+    n_correct: int = 5,
+    n_no_tool: int = 5,
+    n_other_tool: int = 5,
+    n_format_errors: int = 5,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Build Ds from ONLY successful flips under actual runtime.
@@ -544,6 +550,15 @@ def build_ds_mvp(
         "other_tool": 0,
         "format_errors": 0,
     }
+    
+    # Example collection
+    examples = {
+        "successful_flips": [],
+        "correct_behavior": [],
+        "no_tool_call": [],
+        "other_tool": [],
+        "format_errors": [],
+    } if collect_examples else None
     
     iterator = tqdm(b4_records, desc="Building Ds MVP") if verbose else b4_records
     
@@ -577,15 +592,19 @@ def build_ds_mvp(
         if observed_tool is None:
             stats["no_tool_call"] += 1
             is_flip_success = False
+            category = "no_tool_call"
         elif observed_tool == simulated_tool:
             stats["successful_flips"] += 1
             is_flip_success = True
+            category = "successful_flips"
         elif observed_tool == expected_tool:
             stats["correct_behavior"] += 1
             is_flip_success = False
+            category = "correct_behavior"
         else:
             stats["other_tool"] += 1
             is_flip_success = False
+            category = "other_tool"
         
         # Fix formatting issues
         response = fix_assistant_raw_format(response)
@@ -596,6 +615,16 @@ def build_ds_mvp(
             stats["format_errors"] += 1
             if verbose and stats["format_errors"] <= 5:
                 logger.warning(f"Format error: {format_error} in {record['id']}")
+            if collect_examples and len(examples["format_errors"]) < n_format_errors:
+                examples["format_errors"].append({
+                    "id": record["id"],
+                    "combined_query": record["combined_query"],
+                    "assistant_raw": response,
+                    "expected_tool": expected_tool,
+                    "observed_tool": observed_tool,
+                    "simulated_tool": simulated_tool,
+                    "format_error": format_error,
+                })
         
         # Build sample
         sample = {
@@ -623,6 +652,25 @@ def build_ds_mvp(
         }
         
         all_samples.append(sample)
+        
+        # Collect examples
+        if collect_examples and is_valid:
+            max_counts = {
+                "successful_flips": n_successful,
+                "correct_behavior": n_correct,
+                "no_tool_call": n_no_tool,
+                "other_tool": n_other_tool,
+            }
+            if category in max_counts and len(examples[category]) < max_counts[category]:
+                examples[category].append({
+                    "id": record["id"],
+                    "combined_query": record["combined_query"],
+                    "assistant_raw": response,
+                    "expected_tool": expected_tool,
+                    "observed_tool": observed_tool,
+                    "simulated_tool": simulated_tool,
+                    "format_error": None,
+                })
         
         # ONLY include if attack succeeded
         if is_flip_success:
@@ -657,6 +705,10 @@ def build_ds_mvp(
         logger.error(error_msg)
         stats["error"] = error_msg
     
+    # Add examples to stats
+    if collect_examples:
+        stats["examples"] = examples
+    
     return (all_samples if save_all else ds_samples), stats
 
 
@@ -671,6 +723,12 @@ def build_ds_mvp_vllm(
     min_yield: float = 0.10,
     save_all: bool = False,
     verbose: bool = True,
+    collect_examples: bool = False,
+    n_successful: int = 10,
+    n_correct: int = 5,
+    n_no_tool: int = 5,
+    n_other_tool: int = 5,
+    n_format_errors: int = 5,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Build Ds using vLLM backend with batched generation.
@@ -688,6 +746,15 @@ def build_ds_mvp_vllm(
         "other_tool": 0,
         "format_errors": 0,
     }
+    
+    # Example collection
+    examples = {
+        "successful_flips": [],
+        "correct_behavior": [],
+        "no_tool_call": [],
+        "other_tool": [],
+        "format_errors": [],
+    } if collect_examples else None
     
     # Prepare all prompts first
     logger.info(f"Preparing {len(b4_records)} prompts for batched generation...")
@@ -747,15 +814,19 @@ def build_ds_mvp_vllm(
         if observed_tool is None:
             stats["no_tool_call"] += 1
             is_flip_success = False
+            category = "no_tool_call"
         elif observed_tool == simulated_tool:
             stats["successful_flips"] += 1
             is_flip_success = True
+            category = "successful_flips"
         elif observed_tool == expected_tool:
             stats["correct_behavior"] += 1
             is_flip_success = False
+            category = "correct_behavior"
         else:
             stats["other_tool"] += 1
             is_flip_success = False
+            category = "other_tool"
         
         # Validate format
         is_valid, format_error = validate_llama_format(response)
@@ -763,6 +834,16 @@ def build_ds_mvp_vllm(
             stats["format_errors"] += 1
             if verbose and stats["format_errors"] <= 5:
                 logger.warning(f"Format error: {format_error} in {record['id']}")
+            if collect_examples and len(examples["format_errors"]) < n_format_errors:
+                examples["format_errors"].append({
+                    "id": record["id"],
+                    "combined_query": record["combined_query"],
+                    "assistant_raw": response,
+                    "expected_tool": expected_tool,
+                    "observed_tool": observed_tool,
+                    "simulated_tool": simulated_tool,
+                    "format_error": format_error,
+                })
         
         # Build sample
         sample = {
@@ -790,6 +871,25 @@ def build_ds_mvp_vllm(
         }
         
         all_samples.append(sample)
+        
+        # Collect examples
+        if collect_examples and is_valid:
+            max_counts = {
+                "successful_flips": n_successful,
+                "correct_behavior": n_correct,
+                "no_tool_call": n_no_tool,
+                "other_tool": n_other_tool,
+            }
+            if category in max_counts and len(examples[category]) < max_counts[category]:
+                examples[category].append({
+                    "id": record["id"],
+                    "combined_query": record["combined_query"],
+                    "assistant_raw": response,
+                    "expected_tool": expected_tool,
+                    "observed_tool": observed_tool,
+                    "simulated_tool": simulated_tool,
+                    "format_error": None,
+                })
         
         if is_flip_success:
             ds_samples.append(sample)
@@ -821,7 +921,56 @@ def build_ds_mvp_vllm(
         logger.error(error_msg)
         stats["error"] = error_msg
     
+    # Add examples to stats
+    if collect_examples:
+        stats["examples"] = examples
+    
     return (all_samples if save_all else ds_samples), stats
+
+
+# =============================================================================
+# Example Reporting
+# =============================================================================
+
+def print_examples_report(examples: Dict[str, List[Dict[str, Any]]], truncate: bool = True) -> None:
+    """Print a formatted report of collected examples."""
+    max_len = 200 if truncate else None
+    
+    category_names = {
+        "successful_flips": "Successful Tool Flips (Ds targets)",
+        "correct_behavior": "Correct Behavior (non-successful Ds)",
+        "no_tool_call": "No Tool Call",
+        "other_tool": "Other Tool",
+        "format_errors": "Format Errors",
+    }
+    
+    for category, name in category_names.items():
+        if category not in examples or not examples[category]:
+            continue
+        
+        print("\n" + "=" * 80)
+        print(f"{name} ({len(examples[category])} examples)")
+        print("=" * 80)
+        
+        for i, ex in enumerate(examples[category], 1):
+            print(f"\n--- Example {i} ---")
+            print(f"ID: {ex['id']}")
+            print(f"Expected: {ex['expected_tool']} | Observed: {ex['observed_tool']} | Simulated: {ex['simulated_tool']}")
+            
+            query = ex['combined_query']
+            if max_len and len(query) > max_len:
+                query = query[:max_len] + "..."
+            print(f"\nQuery:\n{query}")
+            
+            response = ex['assistant_raw']
+            if max_len and len(response) > max_len:
+                response = response[:max_len] + "..."
+            print(f"\nAssistant Response:\n{response}")
+            
+            if ex.get('format_error'):
+                print(f"\nFormat Error: {ex['format_error']}")
+        
+        print("\n" + "=" * 80)
 
 
 # =============================================================================
@@ -938,6 +1087,54 @@ def main():
         help="Exit with code 1 if yield < min-yield",
     )
     
+    # Example collection
+    parser.add_argument(
+        "--print-examples",
+        action="store_true",
+        help="Print example datapoints from each category",
+    )
+    parser.add_argument(
+        "--examples-out",
+        type=Path,
+        default=None,
+        help="Output path for examples JSON (default: <output>.examples.json)",
+    )
+    parser.add_argument(
+        "--n-successful",
+        type=int,
+        default=10,
+        help="Number of successful flip examples to collect (default: 10)",
+    )
+    parser.add_argument(
+        "--n-correct",
+        type=int,
+        default=5,
+        help="Number of correct behavior examples to collect (default: 5)",
+    )
+    parser.add_argument(
+        "--n-no-tool",
+        type=int,
+        default=5,
+        help="Number of no tool call examples to collect (default: 5)",
+    )
+    parser.add_argument(
+        "--n-other-tool",
+        type=int,
+        default=5,
+        help="Number of other tool examples to collect (default: 5)",
+    )
+    parser.add_argument(
+        "--n-format-errors",
+        type=int,
+        default=5,
+        help="Number of format error examples to collect (default: 5)",
+    )
+    parser.add_argument(
+        "--no-truncate",
+        action="store_true",
+        help="Do not truncate example outputs when printing",
+    )
+    
     args = parser.parse_args()
     
     # Load tool schema
@@ -992,6 +1189,12 @@ def main():
             temperature=args.temperature,
             min_yield=args.min_yield,
             save_all=args.save_all,
+            collect_examples=args.print_examples or args.examples_out is not None,
+            n_successful=args.n_successful,
+            n_correct=args.n_correct,
+            n_no_tool=args.n_no_tool,
+            n_other_tool=args.n_other_tool,
+            n_format_errors=args.n_format_errors,
         )
     else:
         logger.info("Using transformers backend")
@@ -1011,6 +1214,12 @@ def main():
             temperature=args.temperature,
             min_yield=args.min_yield,
             save_all=args.save_all,
+            collect_examples=args.print_examples or args.examples_out is not None,
+            n_successful=args.n_successful,
+            n_correct=args.n_correct,
+            n_no_tool=args.n_no_tool,
+            n_other_tool=args.n_other_tool,
+            n_format_errors=args.n_format_errors,
         )
     
     # Write output
@@ -1030,11 +1239,26 @@ def main():
                 f.write(sample["id"] + "\n")
         logger.info(f"Wrote IDs to {ids_path}")
     
-    # Write stats
+    # Write stats (without examples to keep it clean)
+    stats_for_file = {k: v for k, v in stats.items() if k != "examples"}
     stats_path = args.output.with_suffix(".stats.json")
     with open(stats_path, "w", encoding="utf-8") as f:
-        json.dump(stats, f, indent=2)
+        json.dump(stats_for_file, f, indent=2)
     logger.info(f"Wrote stats to {stats_path}")
+    
+    # Handle examples
+    if "examples" in stats and stats["examples"]:
+        examples = stats["examples"]
+        
+        # Print examples if requested
+        if args.print_examples:
+            print_examples_report(examples, truncate=not args.no_truncate)
+        
+        # Write examples to JSON file
+        examples_path = args.examples_out or args.output.with_suffix(".examples.json")
+        with open(examples_path, "w", encoding="utf-8") as f:
+            json.dump(examples, f, indent=2, ensure_ascii=False)
+        logger.info(f"Wrote examples to {examples_path}")
     
     # Check yield threshold
     if args.fail_on_low_yield and stats.get("yield_rate", 0) < args.min_yield:

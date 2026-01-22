@@ -72,6 +72,11 @@ python src/data_generation/create_eval_set.py \
     --min-samples 100 \
     --max-samples 500 \
     --stratify-by subtype \
-    --output "$DATA_DIR/eval_stage1.jsonl"
+    --output "$DATA_DIR/eval_stage1.jsonl" \
+    --print-examples \
+    --n-per-stratum 3
 
-echo "Eval set creation complete! Output: $DATA_DIR/eval_stage1.jsonl"
+echo "Eval set creation complete!"
+echo "  Output: $DATA_DIR/eval_stage1.jsonl"
+echo "  Stats: $DATA_DIR/eval_stage1.stats.json"
+echo "  Examples: $DATA_DIR/eval_stage1.examples.json"

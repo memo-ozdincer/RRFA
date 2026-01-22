@@ -374,6 +374,8 @@ def validate_file(
     path: Path,
     verbose: bool = True,
     max_errors: int = 10,
+    collect_examples: bool = False,
+    n_per_error_type: int = 3,
 ) -> Dict[str, Any]:
     """
     Validate all batches in a JSONL file.
@@ -393,6 +395,9 @@ def validate_file(
     total_harmful_samples = 0
     total_benign_samples = 0
     total_tool_calls = 0
+    
+    # Example collection by error type
+    examples_by_error: Dict[str, List[Dict[str, Any]]] = {} if collect_examples else None
     
     logger.info(f"Validating {path}...")
     
@@ -420,10 +425,26 @@ def validate_file(
                 if s.get("has_tool_call_in_text", False):
                     total_tool_calls += 1
             
-            # Aggregate errors
+            # Aggregate errors and collect examples
             for error in result.all_errors:
                 error_key = error.split(":")[0] if ":" in error else error[:60]
                 error_counts[error_key] = error_counts.get(error_key, 0) + 1
+                
+                # Collect example
+                if collect_examples:
+                    if error_key not in examples_by_error:
+                        examples_by_error[error_key] = []
+                    if len(examples_by_error[error_key]) < n_per_error_type:
+                        examples_by_error[error_key].append({
+                            "batch_id": result.batch_id,
+                            "line_num": line_num,
+                            "error": error,
+                            "batch_preview": {
+                                "id": batch.get("id"),
+                                "n_harmful": len(batch.get("harmful", [])),
+                                "n_benign": len(batch.get("benign", [])),
+                            }
+                        })
             
             for warning in result.all_warnings:
                 warning_key = warning.split(":")[0] if ":" in warning else warning[:60]
@@ -451,6 +472,9 @@ def validate_file(
         "error_types": error_counts,
         "warning_types": warning_counts,
     }
+    
+    if collect_examples:
+        stats["examples"] = examples_by_error
     
     # Print results
     logger.info("")
@@ -505,6 +529,38 @@ def validate_file(
 
 
 # =============================================================================
+# Example Reporting
+# =============================================================================
+
+def print_examples_report(examples: Dict[str, List[Dict[str, Any]]]) -> None:
+    """Print collected error examples by error type."""
+    if not examples:
+        return
+    
+    print(f"\n{'='*80}")
+    print("ERROR EXAMPLES BY TYPE")
+    print('='*80)
+    
+    for error_type, items in sorted(examples.items()):
+        if not items:
+            continue
+        
+        print(f"\n--- Error Type: {error_type} ({len(items)} examples) ---")
+        
+        for i, ex in enumerate(items, 1):
+            print(f"\n  Example {i}/{len(items)}:")
+            print(f"    Batch ID: {ex.get('batch_id', 'N/A')}")
+            print(f"    Line: {ex.get('line_num', 'N/A')}")
+            print(f"    Error: {ex.get('error', 'N/A')}")
+            
+            batch_preview = ex.get('batch_preview', {})
+            print(f"    Batch preview:")
+            print(f"      ID: {batch_preview.get('id', 'N/A')}")
+            print(f"      Harmful samples: {batch_preview.get('n_harmful', 0)}")
+            print(f"      Benign samples: {batch_preview.get('n_benign', 0)}")
+
+
+# =============================================================================
 # CLI
 # =============================================================================
 
@@ -544,6 +600,26 @@ def main():
         help="Maximum errors to show per type",
     )
     
+    # Example collection
+    example_group = parser.add_argument_group("example collection")
+    example_group.add_argument(
+        "--print-examples",
+        action="store_true",
+        help="Print collected error examples to stdout",
+    )
+    example_group.add_argument(
+        "--examples-out",
+        type=Path,
+        default=None,
+        help="Path to save examples JSON (default: <output>.examples.json)",
+    )
+    example_group.add_argument(
+        "--n-per-error-type",
+        type=int,
+        default=3,
+        help="Number of examples to collect per error type",
+    )
+    
     args = parser.parse_args()
     
     # Check file exists
@@ -552,11 +628,29 @@ def main():
         return 1
     
     # Validate
+    collect_examples = args.print_examples or args.examples_out is not None
     stats = validate_file(
         args.data,
         verbose=not args.quiet,
         max_errors=args.max_errors,
+        collect_examples=collect_examples,
+        n_per_error_type=args.n_per_error_type,
     )
+    
+    # Handle examples
+    if "examples" in stats and stats["examples"]:
+        examples = stats.pop("examples")
+        
+        if args.print_examples:
+            print("\n" + "="*80)
+            print("COLLECTED ERROR EXAMPLES")
+            print("="*80)
+            print_examples_report(examples)
+        
+        examples_path = args.examples_out or (args.output.with_suffix(".examples.json") if args.output else args.data.with_suffix(".examples.json"))
+        with open(examples_path, "w", encoding="utf-8") as f:
+            json.dump(examples, f, indent=2, ensure_ascii=False)
+        logger.info(f"Wrote examples to {examples_path}")
     
     # Save report
     if args.output:

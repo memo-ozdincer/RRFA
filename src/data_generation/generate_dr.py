@@ -504,6 +504,11 @@ def build_dr_mvp(
     system_prompt: str,
     temperature: float = 0.3,
     verbose: bool = True,
+    collect_examples: bool = False,
+    n_correct: int = 10,
+    n_wrong_tool: int = 5,
+    n_no_tool: int = 5,
+    n_format_errors: int = 5,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Build Dr as paired benign twins of Ds samples.
@@ -534,6 +539,13 @@ def build_dr_mvp(
         "no_tool_call": 0,
         "format_errors": 0,
     }
+    
+    examples = {
+        "correct_behavior": [],
+        "wrong_tool": [],
+        "no_tool_call": [],
+        "format_errors": [],
+    } if collect_examples else None
     
     iterator = tqdm(ds_samples, desc="Building Dr MVP") if verbose else ds_samples
     
@@ -590,17 +602,41 @@ def build_dr_mvp(
         if observed_tool is None:
             stats["no_tool_call"] += 1
             is_correct = False
+            category = "no_tool_call"
         elif observed_tool == expected_tool:
             stats["correct_behavior"] += 1
             is_correct = True
+            category = "correct_behavior"
         else:
             stats["wrong_tool"] += 1
             is_correct = False
+            category = "wrong_tool"
         
         # Validate format
         is_valid, format_error = validate_llama_format(response)
         if not is_valid:
             stats["format_errors"] += 1
+            if not is_correct:
+                category = "format_errors"
+        
+        # Collect examples
+        if collect_examples and category:
+            max_counts = {
+                "correct_behavior": n_correct,
+                "wrong_tool": n_wrong_tool,
+                "no_tool_call": n_no_tool,
+                "format_errors": n_format_errors,
+            }
+            if len(examples[category]) < max_counts[category]:
+                examples[category].append({
+                    "id": ds_sample.get("id"),
+                    "paired_with": ds_sample.get("id"),
+                    "benign_query": benign_query,
+                    "expected_tool": expected_tool,
+                    "observed_tool": observed_tool,
+                    "assistant_raw": response,
+                    "format_error": format_error if not is_valid else None,
+                })
         
         # ONLY include if correct tool was called
         if is_correct:
@@ -631,6 +667,10 @@ def build_dr_mvp(
     success_rate = stats["correct_behavior"] / stats["total"] if stats["total"] > 0 else 0
     stats["success_rate"] = success_rate
     
+    # Add examples to stats
+    if collect_examples:
+        stats["examples"] = examples
+    
     # Log stats
     logger.info("")
     logger.info("=" * 60)
@@ -656,6 +696,11 @@ def build_dr_mvp_vllm(
     temperature: float = 0.3,
     max_tokens: int = 256,
     verbose: bool = True,
+    collect_examples: bool = False,
+    n_correct: int = 10,
+    n_wrong_tool: int = 5,
+    n_no_tool: int = 5,
+    n_format_errors: int = 5,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Build Dr using vLLM backend with batched generation.
@@ -668,6 +713,13 @@ def build_dr_mvp_vllm(
         "no_tool_call": 0,
         "format_errors": 0,
     }
+    
+    examples = {
+        "correct_behavior": [],
+        "wrong_tool": [],
+        "no_tool_call": [],
+        "format_errors": [],
+    } if collect_examples else None
     
     # Prepare all prompts
     logger.info(f"Preparing {len(ds_samples)} prompts for batched Dr generation...")
@@ -741,16 +793,40 @@ def build_dr_mvp_vllm(
         if observed_tool is None:
             stats["no_tool_call"] += 1
             is_correct = False
+            category = "no_tool_call"
         elif observed_tool == expected_tool:
             stats["correct_behavior"] += 1
             is_correct = True
+            category = "correct_behavior"
         else:
             stats["wrong_tool"] += 1
             is_correct = False
+            category = "wrong_tool"
         
         is_valid, format_error = validate_llama_format(response)
         if not is_valid:
             stats["format_errors"] += 1
+            if not is_correct:
+                category = "format_errors"
+        
+        # Collect examples
+        if collect_examples and category:
+            max_counts = {
+                "correct_behavior": n_correct,
+                "wrong_tool": n_wrong_tool,
+                "no_tool_call": n_no_tool,
+                "format_errors": n_format_errors,
+            }
+            if len(examples[category]) < max_counts[category]:
+                examples[category].append({
+                    "id": data["ds_sample"].get("id"),
+                    "paired_with": data["ds_sample"].get("id"),
+                    "benign_query": data["benign_query"],
+                    "expected_tool": expected_tool,
+                    "observed_tool": observed_tool,
+                    "assistant_raw": response,
+                    "format_error": format_error if not is_valid else None,
+                })
         
         if is_correct:
             sample = {
@@ -792,6 +868,44 @@ def build_dr_mvp_vllm(
     logger.info("=" * 60)
     
     return dr_samples, stats
+
+
+# =============================================================================
+# Example Reporting
+# =============================================================================
+
+def print_examples_report(examples: Dict[str, List[Dict[str, Any]]], truncate: bool = True) -> None:
+    """Print collected examples by category."""
+    max_len = 200 if truncate else None
+    
+    for category, items in examples.items():
+        if not items:
+            continue
+        
+        print(f"\n{'='*80}")
+        print(f"CATEGORY: {category.upper()} ({len(items)} examples)")
+        print('='*80)
+        
+        for i, ex in enumerate(items, 1):
+            print(f"\n--- Example {i}/{len(items)} ---")
+            print(f"ID: {ex.get('id', 'N/A')}")
+            print(f"Paired with: {ex.get('paired_with', 'N/A')}")
+            
+            benign_query = ex.get('benign_query', '')
+            if max_len and len(benign_query) > max_len:
+                benign_query = benign_query[:max_len] + '...'
+            print(f"Benign query: {benign_query}")
+            
+            print(f"Expected tool: {ex.get('expected_tool', 'N/A')}")
+            print(f"Observed tool: {ex.get('observed_tool', 'N/A')}")
+            
+            if ex.get('format_error'):
+                print(f"Format error: {ex['format_error']}")
+            
+            assistant_raw = ex.get('assistant_raw', '')
+            if max_len and len(assistant_raw) > max_len:
+                assistant_raw = assistant_raw[:max_len] + '...'
+            print(f"Assistant raw: {assistant_raw}")
 
 
 # =============================================================================
@@ -886,6 +1000,49 @@ def main():
         help="Load data and show stats without generating",
     )
     
+    # Example collection
+    example_group = parser.add_argument_group("example collection")
+    example_group.add_argument(
+        "--print-examples",
+        action="store_true",
+        help="Print collected examples to stdout",
+    )
+    example_group.add_argument(
+        "--examples-out",
+        type=Path,
+        default=None,
+        help="Path to save examples JSON (default: <output>.examples.json)",
+    )
+    example_group.add_argument(
+        "--n-correct",
+        type=int,
+        default=10,
+        help="Number of correct behavior examples to collect",
+    )
+    example_group.add_argument(
+        "--n-wrong-tool",
+        type=int,
+        default=5,
+        help="Number of wrong tool examples to collect",
+    )
+    example_group.add_argument(
+        "--n-no-tool",
+        type=int,
+        default=5,
+        help="Number of no tool call examples to collect",
+    )
+    example_group.add_argument(
+        "--n-format-errors",
+        type=int,
+        default=5,
+        help="Number of format error examples to collect",
+    )
+    example_group.add_argument(
+        "--no-truncate",
+        action="store_true",
+        help="Don't truncate examples when printing",
+    )
+    
     args = parser.parse_args()
     
     # Load tool schema
@@ -938,6 +1095,7 @@ def main():
         )
         
         # Build Dr MVP with vLLM (batched)
+        collect_examples = args.print_examples or args.examples_out is not None
         dr_samples, stats = build_dr_mvp_vllm(
             ds_samples=ds_samples,
             vllm_backend=vllm_backend,
@@ -945,6 +1103,11 @@ def main():
             system_prompt=system_prompt,
             batch_size=args.batch_size,
             temperature=args.temperature,
+            collect_examples=collect_examples,
+            n_correct=args.n_correct,
+            n_wrong_tool=args.n_wrong_tool,
+            n_no_tool=args.n_no_tool,
+            n_format_errors=args.n_format_errors,
         )
     else:
         logger.info("Using transformers backend")
@@ -955,6 +1118,7 @@ def main():
         )
         
         # Build Dr MVP with transformers
+        collect_examples = args.print_examples or args.examples_out is not None
         dr_samples, stats = build_dr_mvp(
             ds_samples=ds_samples,
             model=model,
@@ -962,6 +1126,11 @@ def main():
             tools=tools,
             system_prompt=system_prompt,
             temperature=args.temperature,
+            collect_examples=collect_examples,
+            n_correct=args.n_correct,
+            n_wrong_tool=args.n_wrong_tool,
+            n_no_tool=args.n_no_tool,
+            n_format_errors=args.n_format_errors,
         )
     
     # Write output
@@ -972,6 +1141,21 @@ def main():
             f.write(json.dumps(sample, ensure_ascii=False) + "\n")
     
     logger.info(f"Wrote {len(dr_samples)} samples to {args.output}")
+    
+    # Handle examples
+    if "examples" in stats and stats["examples"]:
+        examples = stats.pop("examples")
+        
+        if args.print_examples:
+            print("\n" + "="*80)
+            print("COLLECTED EXAMPLES")
+            print("="*80)
+            print_examples_report(examples, truncate=not args.no_truncate)
+        
+        examples_path = args.examples_out or args.output.with_suffix(".examples.json")
+        with open(examples_path, "w", encoding="utf-8") as f:
+            json.dump(examples, f, indent=2, ensure_ascii=False)
+        logger.info(f"Wrote examples to {examples_path}")
     
     # Write stats
     stats_path = args.output.with_suffix(".stats.json")

@@ -86,6 +86,17 @@ python src/data_generation/generate_ds.py \
     --min-yield 0.10 \
     --fail-on-low-yield \
     --output "$DATA_DIR/ds_stage1.jsonl" \
-    --output-ids "$DATA_DIR/ds_stage1_ids.txt"
+    --output-ids "$DATA_DIR/ds_stage1_ids.txt" \
+    --print-examples \
+    --examples-out "$DATA_DIR/ds_stage1.examples.json" \
+    --n-successful 10 \
+    --n-correct 5 \
+    --n-no-tool 5 \
+    --n-other-tool 5 \
+    --n-format-errors 5 \
+    --no-truncate
 
-echo "Ds generation complete! Output: $DATA_DIR/ds_stage1.jsonl"
+echo "Ds generation complete!"
+echo "  Output: $DATA_DIR/ds_stage1.jsonl"
+echo "  Examples: $DATA_DIR/ds_stage1.examples.json"
+echo "  Stats: $DATA_DIR/ds_stage1.stats.json"
