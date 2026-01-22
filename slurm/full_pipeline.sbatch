@@ -26,7 +26,7 @@ echo "========================================"
 bash "$SCRIPT_DIR/01_generate_ds.sbatch"
 bash "$SCRIPT_DIR/02_generate_dr.sbatch"
 bash "$SCRIPT_DIR/03_create_eval.sbatch"
-bash "$SCRIPT_DIR/04_validate.sbatch"
+bash "$SCRIPT_DIR/04_rebuild_data.sbatch"
 bash "$SCRIPT_DIR/05_train.sbatch"
 bash "$SCRIPT_DIR/06_eval.sbatch"
 

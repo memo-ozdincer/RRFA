@@ -55,57 +55,15 @@ echo "Date: $(date)"
 # Configuration
 BASE_MODEL="meta-llama/Llama-3.1-8B-Instruct"
 DATA_DIR="$CB_SCRATCH/data"
-DS_FILE="$DATA_DIR/ds_stage1.jsonl"
-DR_FILE="$DATA_DIR/dr_stage1.jsonl"
-COMBINED_FILE="$DATA_DIR/cb_training_batches.jsonl"
-RUN_DIR="$CB_SCRATCH/runs/$SLURM_JOB_ID"
-OUTPUT_DIR="$RUN_DIR/adapter"
+TRAINING_FILE="$DATA_DIR/cb_training_batches.jsonl"
 
-mkdir -p "$RUN_DIR"
+if [[ ! -f "$TRAINING_FILE" ]]; then
+    echo "ERROR: Training file not found at $TRAINING_FILE"
+    echo "Please run 04_rebuild_data.sbatch first!"
+    exit 1
+fi
 
-# Check Dependencies
-if [[ ! -f "$DS_FILE" ]]; then echo "ERROR: Ds file not found"; exit 1; fi
-if [[ ! -f "$DR_FILE" ]]; then echo "ERROR: Dr file not found"; exit 1; fi
-
-echo "Ds file: $DS_FILE ($(wc -l < "$DS_FILE") samples)"
-echo "Dr file: $DR_FILE ($(wc -l < "$DR_FILE") samples)"
-
-# Combine Ds + Dr into Training Batches
-echo "Combining Ds and Dr..."
-python -c "
-import json
-from pathlib import Path
-
-ds_samples = [json.loads(line) for line in Path('$DS_FILE').read_text().strip().split('\n') if line.strip()]
-dr_samples = [json.loads(line) for line in Path('$DR_FILE').read_text().strip().split('\n') if line.strip()]
-print(f'Loaded {len(ds_samples)} Ds, {len(dr_samples)} Dr')
-
-batches = []
-for i, ds in enumerate(ds_samples):
-    dr = None
-    for r in dr_samples:
-        if r.get('metadata', {}).get('paired_with') == ds['id']:
-            dr = r
-            break
-    if dr is None and dr_samples:
-        dr = dr_samples[i % len(dr_samples)]
-    batches.append({'id': f'batch_{i}', 'harmful': [ds], 'benign': [dr]})
-
-with open('$COMBINED_FILE', 'w') as f:
-    for b in batches:
-        f.write(json.dumps(b) + '\n')
-print(f'Wrote {len(batches)} batches')
-"
-
-# Rebuild with Llama 3.1 format
-FIXED_FILE="${COMBINED_FILE%.jsonl}_llama31.jsonl"
-python src/data_generation/rebuild_training_data.py \
-    --input "$COMBINED_FILE" \
-    --output "$FIXED_FILE" \
-    --tool-schema configs/tool_schemas/b4_standard_v1.json \
-    --filter-tool-only
-
-COMBINED_FILE="$FIXED_FILE"
+echo "Training file: $TRAINING_FILE ($(wc -l < "$TRAINING_FILE") batches)"
 
 # Resolve Model Path
 MODEL_PATH=$(python -c "from huggingface_hub import snapshot_download; print(snapshot_download(repo_id='$BASE_MODEL', local_files_only=True))")
@@ -124,7 +82,7 @@ accelerate launch --num_processes ${SLURM_GPUS_ON_NODE:-1} \
     src/training/train.py \
     --preset llama-3.1-8b-instruct \
     --base-model "$BASE_MODEL" \
-    --data-path "$COMBINED_FILE" \
+    --data-path "$TRAINING_FILE" \
     --output-dir "$OUTPUT_DIR" \
     --loss-weighting dual \
     --alpha-max 10.0 \
