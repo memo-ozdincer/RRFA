@@ -448,6 +448,32 @@ def extract_tool_call(response: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def fix_assistant_raw_format(assistant_raw: str) -> str:
+    """
+    Fix common formatting issues in assistant_raw.
+    
+    Ensures that responses with <|python_tag|> have proper end tokens.
+    This is applied to all generated responses before saving.
+    
+    Args:
+        assistant_raw: The raw assistant response
+    
+    Returns:
+        Fixed assistant_raw with proper formatting
+    """
+    if not assistant_raw:
+        return assistant_raw
+    
+    # If response has <|python_tag|> but missing end token, add it
+    if "<|python_tag|>" in assistant_raw:
+        has_end_token = "<|eom_id|>" in assistant_raw or "<|eot_id|>" in assistant_raw
+        if not has_end_token:
+            # Add <|eom_id|> at the end
+            assistant_raw = assistant_raw.rstrip() + "<|eom_id|>"
+    
+    return assistant_raw
+
+
 def validate_llama_format(assistant_raw: str) -> Tuple[bool, str]:
     """
     Validate that assistant_raw contains a parseable tool call.
@@ -572,6 +598,9 @@ def build_ds_mvp(
         else:
             stats["other_tool"] += 1
             is_flip_success = False
+        
+        # Fix formatting issues
+        response = fix_assistant_raw_format(response)
         
         # Validate format
         is_valid, format_error = validate_llama_format(response)
@@ -722,6 +751,9 @@ def build_ds_mvp_vllm(
         observed_tool = tool_call["name"] if tool_call else None
         expected_tool = record["expected_tool"]
         simulated_tool = record["simulated_tool"]
+        
+        # Fix formatting issues
+        response = fix_assistant_raw_format(response)
         
         # Determine outcome
         if observed_tool is None:
