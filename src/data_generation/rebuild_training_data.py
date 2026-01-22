@@ -451,12 +451,22 @@ def rebuild_batch(
                 stats["harmful_has_tool_call"] += 1
             
             if collect_examples and len(examples["rendered_harmful"]) < n_rendered:
+                # Determine which field had the completion
+                completion_source = "unknown"
+                if sample.get("harmful_completion"):
+                    completion_source = "harmful_completion"
+                elif "Assistant:" in sample.get("text", ""):
+                    completion_source = "text (extracted)"
+                elif sample.get("assistant_raw"):
+                    completion_source = "assistant_raw"
+                
                 examples["rendered_harmful"].append({
                     "id": sample.get("id", "unknown"),
                     "batch_id": batch.get("id"),
                     "has_tool_call": has_tool_call,
+                    "completion_source": completion_source,
                     "text_preview": text[:300],
-                    "original_completion": sample.get("harmful_completion", "")[:200],
+                    "normalized_preview": text.split("<|python_tag|>")[1][:200] if "<|python_tag|>" in text else "N/A",
                 })
         else:
             if collect_examples and len(examples["failed_harmful"]) < n_failed:
@@ -501,12 +511,22 @@ def rebuild_batch(
                 stats["benign_has_tool_call"] += 1
             
             if collect_examples and len(examples["rendered_benign"]) < n_rendered:
+                # Determine which field had the completion
+                completion_source = "unknown"
+                if sample.get("benign_completion"):
+                    completion_source = "benign_completion"
+                elif "Assistant:" in sample.get("text", ""):
+                    completion_source = "text (extracted)"
+                elif sample.get("assistant_raw"):
+                    completion_source = "assistant_raw"
+                
                 examples["rendered_benign"].append({
                     "id": sample.get("id", "unknown"),
                     "batch_id": batch.get("id"),
                     "has_tool_call": has_tool_call,
+                    "completion_source": completion_source,
                     "text_preview": text[:300],
-                    "original_completion": sample.get("benign_completion", "")[:200],
+                    "normalized_preview": text.split("<|python_tag|>")[1][:200] if "<|python_tag|>" in text else "N/A",
                 })
         else:
             if collect_examples and len(examples["failed_benign"]) < n_failed:
@@ -613,6 +633,8 @@ def print_examples_report(examples: Dict[str, List[Dict[str, Any]]]) -> None:
                 print(f"    Reason: {ex.get('reason')}")
             if 'has_tool_call' in ex:
                 print(f"    Has tool call: {ex.get('has_tool_call')}")
+            if 'completion_source' in ex:
+                print(f"    Completion source: {ex.get('completion_source')}")
             if 'has_is_agentic' in ex:
                 print(f"    is_agentic flag: {ex.get('has_is_agentic')}")
             if 'has_tool_calls' in ex:
@@ -621,8 +643,8 @@ def print_examples_report(examples: Dict[str, List[Dict[str, Any]]]) -> None:
                 print(f"    Completion preview: {ex.get('completion_preview')}")
             if 'text_preview' in ex:
                 print(f"    Rendered text preview: {ex.get('text_preview')}")
-            if 'original_completion' in ex:
-                print(f"    Original completion: {ex.get('original_completion')}")
+            if 'normalized_preview' in ex:
+                print(f"    Normalized tool call: {ex.get('normalized_preview')}")
             if 'sample_keys' in ex:
                 print(f"    Available keys: {ex.get('sample_keys')}")
 
