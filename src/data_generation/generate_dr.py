@@ -466,25 +466,37 @@ def fix_assistant_raw_format(assistant_raw: str) -> str:
 
 
 def validate_llama_format(assistant_raw: str) -> Tuple[bool, str]:
-    """Validate Llama 3.1 tool format."""
+    """
+    Validate that assistant_raw contains a parseable tool call.
+    
+    We accept multiple formats:
+    1. Llama 3.1 native: <|python_tag|>tool_name(args)<|eom_id|>
+    2. JSON format: {"name": "tool_name", "parameters": {...}}
+    3. Function call in JSON: {"function": "tool_name", "arguments": {...}}
+    
+    Returns (is_valid, error_message).
+    """
     if not assistant_raw:
         return False, "Empty assistant_raw"
     
-    if "<|python_tag|>" not in assistant_raw:
-        return False, "Missing <|python_tag|>"
+    # Check for any parseable tool call
+    tool_call = extract_tool_call(assistant_raw)
+    if tool_call is None:
+        return False, "No parseable tool call found"
     
-    has_valid_end = any(
-        assistant_raw.rstrip().endswith(end)
-        for end in ["<|eom_id|>", "<|eot_id|>"]
-    )
-    if not has_valid_end:
-        has_end_token = "<|eom_id|>" in assistant_raw or "<|eot_id|>" in assistant_raw
-        if not has_end_token:
-            return False, "Missing <|eom_id|> or <|eot_id|>"
+    # Llama 3.1 native format (preferred but not required)
+    has_python_tag = "<|python_tag|>" in assistant_raw
+    has_end_token = "<|eom_id|>" in assistant_raw or "<|eot_id|>" in assistant_raw
     
+    # Warn but don't fail if not using native format
+    if has_python_tag and not has_end_token:
+        return True, "Has <|python_tag|> but missing end token (non-fatal)"
+    
+    # Must NOT have markdown wrappers (these break training)
     if "```" in assistant_raw:
         return False, "Contains markdown code block"
     
+    # Must NOT have common prefixes (these break training)
     for prefix in ["Action:", "ToolCall:", "Function:"]:
         if assistant_raw.strip().startswith(prefix):
             return False, f"Contains forbidden prefix: {prefix}"
