@@ -269,7 +269,7 @@ def render_sample_llama31(
     is_harmful: bool,
     default_system_prompt: str,
     tools_json: Optional[str] = None,
-) -> Tuple[str, bool, str]:
+) -> Tuple[str, bool]:
     """
     Render a sample in proper Llama 3.1 chat format WITH SPECIAL TOKENS.
     
@@ -280,7 +280,7 @@ def render_sample_llama31(
     - <|python_tag|>{"name": ..., "parameters": ...} for tool calls
     
     Returns:
-        (rendered_text, has_tool_call, original_completion) tuple
+        (rendered_text, has_tool_call) tuple
     """
     parts = [LLAMA_BOS]
     
@@ -332,7 +332,7 @@ def render_sample_llama31(
     
     if not user_prompt:
         logger.warning(f"No user prompt in sample {sample.get('id', 'unknown')}")
-        return "", False, ""
+        return "", False
     
     parts.append(format_llama31_header("user"))
     parts.append(user_prompt)
@@ -352,10 +352,7 @@ def render_sample_llama31(
     
     if not completion:
         logger.warning(f"No completion in sample {sample.get('id', 'unknown')}")
-        return "", False, ""
-    
-    # Store original completion for debugging
-    original_completion = completion[:500]  # First 500 chars
+        return "", False
     
     # Normalize tool call format (convert [TOOL_CALLS] to <|python_tag|>)
     normalized_completion = normalize_tool_call_to_llama31(completion)
@@ -370,7 +367,7 @@ def render_sample_llama31(
     else:
         parts.append(LLAMA_EOT)
     
-    return "".join(parts), has_tool_call, original_completion
+    return "".join(parts), has_tool_call
 
 
 # =============================================================================
