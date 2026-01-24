@@ -84,6 +84,16 @@ class CircuitBreakerConfig:
     # - If True, format prompt+completion pairs using the tokenizer's chat template
     use_chat_template: bool = True
 
+    # Knowledge Distillation (KL divergence on benign tokens):
+    # - Weight for KL divergence loss on benign tokens (teacher -> student)
+    # - Set to 0.0 to disable KD, typical values: 0.1 - 1.0
+    beta_kl: float = 0.5
+
+    # Temperature for KL divergence (softmax smoothing)
+    # - Higher temperature = softer distributions
+    # - Typical values: 1.0 - 4.0
+    kl_temperature: float = 1.0
+
     # === Training ===
     total_steps: int = 300               # Training steps (scaled up for larger model)
     batch_size: int = 16                 # Per-GPU batch size (8 harmful + 8 benign)
@@ -138,6 +148,7 @@ class CircuitBreakerConfigLlama3_8B(CircuitBreakerConfig):
     alpha_max: float = 10.0
     total_steps: int = 150
     learning_rate: float = 5e-5
+    beta_kl: float = 0.5
 
 
 @dataclass
@@ -155,6 +166,7 @@ class CircuitBreakerConfigLlama3_1_8B_Instruct(CircuitBreakerConfig):
     alpha_max: float = 10.0
     total_steps: int = 150
     learning_rate: float = 5e-5
+    beta_kl: float = 0.5
 
 
 @dataclass
@@ -168,6 +180,7 @@ class CircuitBreakerConfigMistral_7B(CircuitBreakerConfig):
     alpha_max: float = 5.0
     total_steps: int = 150
     learning_rate: float = 5e-5
+    beta_kl: float = 0.5
 
 
 @dataclass  
@@ -207,6 +220,7 @@ class CircuitBreakerConfigLlama4Scout(CircuitBreakerConfig):
     batch_size: int = 8                  # Smaller batch due to model size
     gradient_accumulation_steps: int = 2  # Effective batch = 8 * 2 * 8 = 128
     gradient_checkpointing: bool = True  # Essential for MoE
+    beta_kl: float = 0.5
 
 
 # === Config Loading Utilities ===

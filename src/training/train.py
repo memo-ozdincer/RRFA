@@ -139,7 +139,21 @@ def parse_args():
         choices=["single_alpha", "dual"],
         help="Loss weighting strategy: 'single_alpha' (original) or 'dual' (paper-style)",
     )
-    
+
+    # Knowledge Distillation (KL divergence)
+    parser.add_argument(
+        "--beta-kl",
+        type=float,
+        default=None,
+        help="Weight for KL divergence loss on benign tokens (0.0 = disabled, typical: 0.5-1.0)",
+    )
+    parser.add_argument(
+        "--kl-temperature",
+        type=float,
+        default=None,
+        help="Temperature for KL divergence softmax (1.0-4.0, default: 1.0)",
+    )
+
     # Logging
     parser.add_argument(
         "--wandb-project",
@@ -293,7 +307,11 @@ def main():
         overrides['representation_extraction'] = args.representation_extraction
     if args.alpha_decay_multiplier is not None:
         overrides['alpha_decay_multiplier'] = args.alpha_decay_multiplier
-    
+    if args.beta_kl is not None:
+        overrides['beta_kl'] = args.beta_kl
+    if args.kl_temperature is not None:
+        overrides['kl_temperature'] = args.kl_temperature
+
     # Get config with preset and overrides
     config = get_config(args.preset, **overrides)
     
@@ -321,6 +339,8 @@ def main():
     print(f"  LoRA Alpha: {config.lora.alpha}")
     print(f"  Data Path: {config.data_path}")
     print(f"  Output Dir: {config.output_dir}")
+    print(f"  KL Beta: {config.beta_kl}")
+    print(f"  KL Temperature: {config.kl_temperature}")
     print(f"  WandB: {config.use_wandb}")
     print("=" * 60)
     

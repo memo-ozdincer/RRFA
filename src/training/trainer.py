@@ -168,6 +168,72 @@ class RepresentationExtractor:
 # Loss Functions
 # =============================================================================
 
+def kl_divergence_loss(
+    student_logits: torch.Tensor,
+    teacher_logits: torch.Tensor,
+    attention_mask: Optional[torch.Tensor] = None,
+    loss_mask: Optional[torch.Tensor] = None,
+    temperature: float = 1.0,
+) -> torch.Tensor:
+    """
+    KL Divergence Loss for Knowledge Distillation on benign tokens.
+
+    Computes token-level KL divergence between teacher and student distributions,
+    masked to benign tokens only. This helps preserve the model's original
+    behavior on benign inputs by matching its output distribution to the teacher.
+
+    Formula: D_KL(teacher || student) = sum_v p(v) * (log p(v) - log q(v))
+    where p = teacher probs, q = student probs
+
+    Args:
+        student_logits: Logits from trainable model (batch, seq_len, vocab_size)
+        teacher_logits: Logits from frozen teacher model (batch, seq_len, vocab_size)
+        attention_mask: Mask for padding tokens (batch, seq_len)
+        loss_mask: Mask for benign tokens (batch, seq_len), 1 = compute loss
+        temperature: Temperature for softmax (higher = softer distributions)
+
+    Returns:
+        Scalar KL divergence loss, masked and normalized
+    """
+    T = temperature
+
+    # Convert to log-probabilities and probabilities
+    # student: log q, teacher: p
+    student_log_probs = F.log_softmax(student_logits / T, dim=-1)  # (B, S, V)
+    teacher_probs = F.softmax(teacher_logits / T, dim=-1)          # (B, S, V)
+
+    # KL divergence per token: sum over vocabulary
+    # F.kl_div expects input=log_probs, target=probs
+    kl_per_token = F.kl_div(
+        student_log_probs,
+        teacher_probs,
+        reduction="none",  # (B, S, V)
+        log_target=False,  # teacher_probs are probabilities, not log-probs
+    ).sum(dim=-1)  # Sum over vocab -> (B, S)
+
+    # Combine attention_mask and loss_mask
+    combined_mask = attention_mask
+    if loss_mask is not None:
+        if combined_mask is not None:
+            combined_mask = combined_mask * loss_mask
+        else:
+            combined_mask = loss_mask
+
+    # Apply mask and normalize
+    if combined_mask is not None:
+        mask_float = combined_mask.float()
+        kl_masked = (kl_per_token * mask_float).sum()
+        num_tokens = mask_float.sum().clamp_min(1.0)
+        kl_loss = kl_masked / num_tokens
+    else:
+        kl_loss = kl_per_token.mean()
+
+    # Scale by T^2 (standard KD practice when using temperature)
+    kl_loss = kl_loss * (T * T)
+
+    return kl_loss
+
+
 def reroute_loss(
     model_reps: Dict[int, torch.Tensor],
     frozen_reps: Dict[int, torch.Tensor],
@@ -1304,7 +1370,7 @@ class CircuitBreakerTrainer:
         self.model.train()
 
         # Get coefficients for this step
-        use_dual = getattr(self.config, 'loss_weighting', 'single_alpha') == 'dual'
+        use_dual = getattr(self.config, 'loss_weighting', 'dual') == 'dual'
 
         if use_dual:
             # Paper-style dual coefficients: cs decays, cr increases
@@ -1352,23 +1418,27 @@ class CircuitBreakerTrainer:
             # Clear previous representations
             self.model_extractor.clear()
 
-            # Single forward through trainable model
-            _ = self.model(
+            # Single forward through trainable model (need outputs for logits)
+            student_outputs = self.model(
                 input_ids=combined_input_ids,
                 attention_mask=combined_attention_mask,
                 use_cache=False,
+                return_dict=True,
             )
             combined_model_reps = self.model_extractor.get_representations()
+            combined_student_logits = student_outputs.logits  # Save for KL
 
             # Single forward through frozen model (no grad)
             self.frozen_extractor.clear()
             with torch.no_grad():
-                _ = self.frozen_model(
+                teacher_outputs = self.frozen_model(
                     input_ids=combined_input_ids,
                     attention_mask=combined_attention_mask,
                     use_cache=False,
+                    return_dict=True,
                 )
-            combined_frozen_reps = self.frozen_extractor.get_representations()
+                combined_frozen_reps = self.frozen_extractor.get_representations()
+                combined_teacher_logits = teacher_outputs.logits  # Save for KL
 
             # Split representations by batch size
             harmful_model_reps = {
@@ -1389,6 +1459,10 @@ class CircuitBreakerTrainer:
                 for layer, reps in combined_frozen_reps.items()
             }
 
+            # Split logits for KL divergence
+            student_logits_benign = combined_student_logits[harmful_batch_size:]
+            teacher_logits_benign = combined_teacher_logits[harmful_batch_size:]
+
         else:
             # Single forward with hidden_states output
             outputs = self.model(
@@ -1399,6 +1473,7 @@ class CircuitBreakerTrainer:
                 return_dict=True,
             )
             combined_model_reps = _select_hidden_states(outputs, self.config.cb_target_layers)
+            combined_student_logits = outputs.logits  # Save logits for KL
             del outputs
 
             # Single frozen forward
@@ -1413,6 +1488,7 @@ class CircuitBreakerTrainer:
                 combined_frozen_reps = _select_hidden_states(
                     frozen_outputs, self.config.cb_target_layers
                 )
+                combined_teacher_logits = frozen_outputs.logits  # Save logits for KL
             del frozen_outputs
 
             # Split representations by batch size
@@ -1434,6 +1510,10 @@ class CircuitBreakerTrainer:
                 for layer, reps in combined_frozen_reps.items()
             }
 
+            # Split logits for KL divergence
+            student_logits_benign = combined_student_logits[harmful_batch_size:]
+            teacher_logits_benign = combined_teacher_logits[harmful_batch_size:]
+
         # === Compute Losses ===
         # Compute rerouting loss with optional loss mask
         loss_reroute, reroute_metrics = reroute_loss(
@@ -1445,7 +1525,7 @@ class CircuitBreakerTrainer:
             return_metrics=True,
         )
 
-        # Compute retain loss with optional loss mask
+        # Compute retain loss (L2 on hidden states) with optional loss mask
         loss_retain = retain_loss(
             benign_model_reps,
             benign_frozen_reps,
@@ -1454,9 +1534,24 @@ class CircuitBreakerTrainer:
             loss_mask=benign_loss_mask,
         )
 
+        # Compute KL divergence loss on benign tokens (knowledge distillation)
+        beta_kl = getattr(self.config, 'beta_kl', 0.0)
+        if beta_kl > 0:
+            kl_temp = getattr(self.config, 'kl_temperature', 1.0)
+            loss_kl = kl_divergence_loss(
+                student_logits=student_logits_benign,
+                teacher_logits=teacher_logits_benign,
+                attention_mask=benign_attention_mask,
+                loss_mask=benign_loss_mask,
+                temperature=kl_temp,
+            )
+        else:
+            loss_kl = torch.tensor(0.0, device=self.accelerator.device)
+
         # === Combined Loss ===
-        # L = cs * L_reroute + cr * L_retain
-        total_loss = cs * loss_reroute + cr * loss_retain
+        # L = cs * L_reroute + cr * (L_retain + beta_kl * L_kl)
+        # The KL loss helps preserve benign behavior via output distribution matching
+        total_loss = cs * loss_reroute + cr * (loss_retain + beta_kl * loss_kl)
 
         # Backward pass (SINGLE backward through combined graph)
         self.accelerator.backward(total_loss)
@@ -1480,6 +1575,11 @@ class CircuitBreakerTrainer:
             'alpha': alpha,
             'lr': self.scheduler.get_last_lr()[0],
         }
+
+        # Add KL divergence metrics if enabled
+        if beta_kl > 0:
+            metrics['loss_kl'] = loss_kl.item()
+            metrics['beta_kl'] = beta_kl
 
         # Add dual coefficient logging if enabled
         if use_dual:
@@ -1663,12 +1763,15 @@ class CircuitBreakerTrainer:
                 
                 # Logging
                 if self.global_step % self.config.logging_steps == 0:
-                    self.accelerator.print(
+                    log_msg = (
                         f"Step {self.global_step}: loss={metrics['loss']:.4f}, "
                         f"reroute={metrics['loss_reroute']:.4f}, "
-                        f"retain={metrics['loss_retain']:.4f}, "
-                        f"α={metrics['alpha']:.4f}"
+                        f"retain={metrics['loss_retain']:.4f}"
                     )
+                    if 'loss_kl' in metrics:
+                        log_msg += f", kl={metrics['loss_kl']:.4f}"
+                    log_msg += f", α={metrics['alpha']:.4f}"
+                    self.accelerator.print(log_msg)
                     
                     if self.config.use_wandb:
                         if self.accelerator.is_main_process:

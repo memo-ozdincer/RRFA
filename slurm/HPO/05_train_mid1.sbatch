@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=mvp_train_mid3
+#SBATCH --job-name=mvp_train_mid1
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=1
 #SBATCH --time=03:00:00
@@ -75,7 +75,7 @@ BASE_MODEL="$MODEL_PATH"
 # =============================================================================
 echo ""
 echo "========================================"
-echo "STAGE 6: Training (450 steps, mid3 config)"
+echo "STAGE 6: Training (350 steps, mid1 config)"
 echo "========================================"
 
 # Run training with conservative hyperparameters
@@ -86,17 +86,19 @@ accelerate launch --num_processes ${SLURM_GPUS_ON_NODE:-1} \
     --data-path "$TRAINING_FILE" \
     --output-dir "$OUTPUT_DIR" \
     --loss-weighting dual \
-    --alpha-max 7.5 \
+    --alpha-max 2.5 \
     --alpha-decay-multiplier 2.0 \
-    --total-steps 450 \
+    --total-steps 350 \
     --batch-size 4 \
     --gradient-accumulation-steps 4 \
-    --learning-rate 4.5e-5 \
+    --learning-rate 3.5e-5 \
     --lora-r 16 \
     --lora-alpha 32 \
-    --cb-target-layers 11 19 \
+    --cb-target-layers 12 18 \
+    --beta-kl 0.5 \
+    --kl-temperature 1.0 \
     --wandb-project "circuit-breakers" \
-    --wandb-run-name "cb_mid3_${SLURM_JOB_ID}"
+    --wandb-run-name "cb_mid1_${SLURM_JOB_ID}"
 
 if [[ ! -d "$OUTPUT_DIR" ]]; then
     echo "ERROR: Training failed - no output directory"

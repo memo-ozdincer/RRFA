@@ -95,6 +95,8 @@ accelerate launch --num_processes ${SLURM_GPUS_ON_NODE:-1} \
     --lora-r 16 \
     --lora-alpha 32 \
     --cb-target-layers 10 20 \
+    --beta-kl 0.5 \
+    --kl-temperature 1.0 \
     --wandb-project "circuit-breakers" \
     --wandb-run-name "cb_full_4gpu_${SLURM_JOB_ID}"
 
