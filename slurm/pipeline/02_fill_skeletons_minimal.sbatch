@@ -9,7 +9,7 @@
 
 # =============================================================================
 # Stage 2 MINIMAL: Fill Skeletons (generate_completions.py)
-# Test version - processes only 300 samples
+# Test version - processes only 2000 samples
 # =============================================================================
 
 set -euo pipefail
@@ -56,7 +56,7 @@ export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 export CACHE_ROOT="$CACHE_DIR"
 
 echo "========================================"
-echo "Stage 2 MINIMAL: Fill Skeletons (300 samples)"
+echo "Stage 2 MINIMAL: Fill Skeletons (2000 samples)"
 echo "========================================"
 echo "Job ID: $SLURM_JOB_ID"
 echo "Date: $(date)"
@@ -77,7 +77,20 @@ TEMPERATURE_DS="${TEMPERATURE_DS:-0.7}"
 TEMPERATURE_DR="${TEMPERATURE_DR:-0.3}"
 MAX_TOKENS="${MAX_TOKENS:-256}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
-LIMIT="${LIMIT:-300}"  # MINIMAL: Default to 300 samples
+PRINT_EXAMPLES="${PRINT_EXAMPLES:-false}"
+NO_TRUNCATE="${NO_TRUNCATE:-false}"
+NO_WRITE_IDS="${NO_WRITE_IDS:-false}"
+EXAMPLES_OUT="${EXAMPLES_OUT:-}"
+
+N_SUCCESSFUL="${N_SUCCESSFUL:-10}"
+N_CORRECT="${N_CORRECT:-5}"
+N_WRONG_TOOL="${N_WRONG_TOOL:-5}"
+N_NO_TOOL="${N_NO_TOOL:-5}"
+N_OTHER_TOOL="${N_OTHER_TOOL:-5}"
+N_FORMAT_ERRORS="${N_FORMAT_ERRORS:-5}"
+
+# MINIMAL: Default to 2000 samples (override by setting LIMIT)
+LIMIT="${LIMIT:-2000}"
 
 mkdir -p "$OUTPUT_DIR"
 
@@ -87,6 +100,16 @@ echo "  OUTPUT_DIR: $OUTPUT_DIR"
 echo "  MODE: $MODE"
 echo "  MODEL: $MODEL"
 echo "  LIMIT: $LIMIT (MINIMAL TEST)"
+echo "  PRINT_EXAMPLES: $PRINT_EXAMPLES"
+echo "  NO_TRUNCATE: $NO_TRUNCATE"
+echo "  NO_WRITE_IDS: $NO_WRITE_IDS"
+echo "  EXAMPLES_OUT: ${EXAMPLES_OUT:-<default>}"
+echo "  N_SUCCESSFUL: $N_SUCCESSFUL"
+echo "  N_CORRECT: $N_CORRECT"
+echo "  N_WRONG_TOOL: $N_WRONG_TOOL"
+echo "  N_NO_TOOL: $N_NO_TOOL"
+echo "  N_OTHER_TOOL: $N_OTHER_TOOL"
+echo "  N_FORMAT_ERRORS: $N_FORMAT_ERRORS"
 echo ""
 
 # Validate inputs
@@ -116,6 +139,31 @@ COMMON_ARGS=(
     --max-tokens "$MAX_TOKENS"
     --limit "$LIMIT"
 )
+
+# Example/debug args
+if [[ "$PRINT_EXAMPLES" == "true" ]]; then
+    COMMON_ARGS+=(--print-examples)
+fi
+if [[ "$NO_TRUNCATE" == "true" ]]; then
+    COMMON_ARGS+=(--no-truncate)
+fi
+if [[ "$NO_WRITE_IDS" == "true" ]]; then
+    COMMON_ARGS+=(--no-write-ids)
+fi
+
+COMMON_ARGS+=(
+    --n-successful "$N_SUCCESSFUL"
+    --n-correct "$N_CORRECT"
+    --n-wrong-tool "$N_WRONG_TOOL"
+    --n-no-tool "$N_NO_TOOL"
+    --n-other-tool "$N_OTHER_TOOL"
+    --n-format-errors "$N_FORMAT_ERRORS"
+)
+
+if [[ "$MODE" == "both" && -n "$EXAMPLES_OUT" ]]; then
+    echo "WARNING: EXAMPLES_OUT is ignored for MODE=both (writes per-output *.examples.json)."
+    EXAMPLES_OUT=""
+fi
 
 if [[ "$USE_VLLM" == "true" ]]; then
     COMMON_ARGS+=(
@@ -149,7 +197,8 @@ case "$MODE" in
         python src/data_generation/generate_completions.py \
             "${COMMON_ARGS[@]}" \
             --mode ds \
-            --output "$DS_OUTPUT"
+            --output "$DS_OUTPUT" \
+            ${EXAMPLES_OUT:+--examples-out "$EXAMPLES_OUT"}
         echo "DS output: $DS_OUTPUT ($(wc -l < "$DS_OUTPUT") lines)"
         ;;
 
@@ -158,7 +207,8 @@ case "$MODE" in
         python src/data_generation/generate_completions.py \
             "${COMMON_ARGS[@]}" \
             --mode dr \
-            --output "$DR_OUTPUT"
+            --output "$DR_OUTPUT" \
+            ${EXAMPLES_OUT:+--examples-out "$EXAMPLES_OUT"}
         echo "DR output: $DR_OUTPUT ($(wc -l < "$DR_OUTPUT") lines)"
         ;;
 
