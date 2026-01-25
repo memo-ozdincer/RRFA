@@ -201,7 +201,6 @@ if [[ "$USE_VLLM" == "true" ]]; then
         --use-vllm
         --tensor-parallel-size "$TENSOR_PARALLEL"
         --max-model-len "$MAX_MODEL_LEN"
-        --batch-size "$BATCH_SIZE"
     )
 fi
 
