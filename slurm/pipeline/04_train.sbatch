@@ -3,7 +3,6 @@
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=32
-#SBATCH --mem=256G
 #SBATCH --time=12:00:00
 #SBATCH --output=/scratch/memoozd/cb-scratch/logs/%x_%j.out
 #SBATCH --error=/scratch/memoozd/cb-scratch/logs/%x_%j.err
