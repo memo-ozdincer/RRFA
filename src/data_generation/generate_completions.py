@@ -809,23 +809,19 @@ def build_ds_from_skeletons(
             if strip_tool_syntax:
                 logger.info(f"  Format-agnostic content (reasoning only): {assistant_content[:100]}...")
 
-        # Determine outcome (matching generate_ds.py logic)
+        # Determine outcome (DS criterion: observed != expected)
         if observed_tool is None:
             stats["no_tool_call"] += 1
             is_flip_success = False
             category = "no_tool_call"
-        elif observed_tool == simulated_tool:
+        elif observed_tool != expected_tool:
             stats["successful_flips"] += 1
             is_flip_success = True
             category = "successful_flips"
-        elif observed_tool == expected_tool:
+        else:
             stats["correct_behavior"] += 1
             is_flip_success = False
             category = "correct_behavior"
-        else:
-            stats["other_tool"] += 1
-            is_flip_success = False
-            category = "other_tool"
 
         # DEBUG: Print final category
         if debug and debug_count < debug_limit:
