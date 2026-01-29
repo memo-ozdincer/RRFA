@@ -124,6 +124,37 @@ INCLUDE_TEXT="${INCLUDE_TEXT:-false}"
 FORCE_LLAMA="${FORCE_LLAMA:-false}"
 LMP_REGISTRY="${LMP_REGISTRY:-}"
 
+# Resolve tokenizer to absolute path if it's a repo ID to avoid offline mode issues
+# This bypasses transformers' "is_base_mistral" check which triggers network calls
+if [[ "$TOKENIZER" != /* ]]; then
+    echo "Attempting to resolve tokenizer '$TOKENIZER' to local cache path..."
+    
+    # 1. Try standard HF cache pattern: models--org--repo
+    CACHE_MODEL_NAME="models--${TOKENIZER//\//--}"
+    SNAPSHOT_ROOT="$HF_HUB_CACHE/$CACHE_MODEL_NAME/snapshots"
+    
+    # 2. Fallback: maybe the directory exists directly without models-- prefix?
+    if [[ ! -d "$SNAPSHOT_ROOT" ]]; then
+        if [[ -d "$HF_HUB_CACHE/$TOKENIZER/snapshots" ]]; then
+             SNAPSHOT_ROOT="$HF_HUB_CACHE/$TOKENIZER/snapshots"
+        fi
+    fi
+
+    if [[ -d "$SNAPSHOT_ROOT" ]]; then
+        # Get the most recent snapshot directory found
+        SNAPSHOT_PATH=$(ls -1td "$SNAPSHOT_ROOT"/* 2>/dev/null | head -n 1)
+        if [[ -n "$SNAPSHOT_PATH" ]]; then
+            echo "  Found local snapshot: $SNAPSHOT_PATH"
+            TOKENIZER="$SNAPSHOT_PATH"
+        else
+            echo "  WARNING: Snapshot directory exists but is empty: $SNAPSHOT_ROOT"
+        fi
+    else
+        echo "  WARNING: Could not find snapshots in $HF_HUB_CACHE"
+        echo "  Checked: $SNAPSHOT_ROOT"
+    fi
+fi
+
 RENDER_DIR="$OUTPUT_DIR/renders"
 LOSSMASK_DIR="$OUTPUT_DIR/lossmasks"
 
