@@ -96,7 +96,7 @@ def load_renders_and_masks(
         samples.append({
             "input_ids": render["input_ids"],
             "attention_mask": render.get("attention_mask", [1] * len(render["input_ids"])),
-            "loss_mask": mask_row["mask"],
+            "loss_mask": mask_row["loss_mask"],
             "sample_weight": mask_row.get("sample_weight", 1.0),
             "trace_id": mask_row.get("trace_id"),
             "render_id": render_id,
