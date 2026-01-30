@@ -274,25 +274,40 @@ case "$DATA_MODE" in
             fi
         done
 
-        TRAIN_ARGS+=(
-            --mode ds_dr
-            --ds-renders "$DS_RENDERS"
-            --ds-lossmasks "$DS_LOSSMASKS"
-            --dr-renders "$DR_RENDERS"
-            --dr-lossmasks "$DR_LOSSMASKS"
-        )
-
-        # If AgentDojo data also exists, add it via additional args
+        # If AgentDojo data exists, split it and use mixed mode
         if [[ -n "$AGENTDOJO_RENDERS" && -n "$AGENTDOJO_LOSSMASKS" && -n "$AGENTDOJO_TRACES" ]]; then
             echo ""
-            echo "  AgentDojo data found - adding to training:"
-            echo "    Renders: $AGENTDOJO_RENDERS"
-            echo "    Lossmasks: $AGENTDOJO_LOSSMASKS"
-            echo "    Traces: $AGENTDOJO_TRACES"
+            echo "AgentDojo data found - splitting into harmful/benign and using mixed mode..."
+
+            SPLIT_DIR="$CB_SCRATCH/data/agentdojo_split"
+            mkdir -p "$SPLIT_DIR"
+
+            # Split AgentDojo files
+            python "$REPO_DIR/scripts/split_agentdojo.py" \
+                --traces "$AGENTDOJO_TRACES" \
+                --renders "$AGENTDOJO_RENDERS" \
+                --lossmasks "$AGENTDOJO_LOSSMASKS" \
+                --output-dir "$SPLIT_DIR"
+
+            # Use mixed mode with all files
             TRAIN_ARGS+=(
-                --additional-renders "$AGENTDOJO_RENDERS"
-                --additional-lossmasks "$AGENTDOJO_LOSSMASKS"
-                --additional-traces "$AGENTDOJO_TRACES"
+                --mode mixed
+                --harmful-renders "$DS_RENDERS" "$SPLIT_DIR/agentdojo_renders_harmful.jsonl"
+                --harmful-lossmasks "$DS_LOSSMASKS" "$SPLIT_DIR/agentdojo_lossmasks_harmful.jsonl"
+                --benign-renders "$DR_RENDERS" "$SPLIT_DIR/agentdojo_renders_benign.jsonl"
+                --benign-lossmasks "$DR_LOSSMASKS" "$SPLIT_DIR/agentdojo_lossmasks_benign.jsonl"
+            )
+
+            echo "  Harmful: fujitsu_b4_ds + agentdojo_harmful"
+            echo "  Benign: fujitsu_b4_dr + agentdojo_benign"
+        else
+            # No AgentDojo, use plain ds_dr mode
+            TRAIN_ARGS+=(
+                --mode ds_dr
+                --ds-renders "$DS_RENDERS"
+                --ds-lossmasks "$DS_LOSSMASKS"
+                --dr-renders "$DR_RENDERS"
+                --dr-lossmasks "$DR_LOSSMASKS"
             )
         fi
         ;;

@@ -99,6 +99,25 @@ echo "  LOSS_WEIGHTING: ${LOSS_WEIGHTINGS[*]}"
 echo ""
 
 # =============================================================================
+# Split AgentDojo into harmful/benign (once, reused for all runs)
+# =============================================================================
+echo "Splitting AgentDojo into harmful/benign..."
+SPLIT_DIR="$SWEEP_DIR/agentdojo_split"
+mkdir -p "$SPLIT_DIR"
+
+python "$REPO_DIR/scripts/split_agentdojo.py" \
+    --traces "$AGENTDOJO_TRACES" \
+    --renders "$AGENTDOJO_RENDERS" \
+    --lossmasks "$AGENTDOJO_LOSSMASKS" \
+    --output-dir "$SPLIT_DIR"
+
+AGENTDOJO_RENDERS_HARMFUL="$SPLIT_DIR/agentdojo_renders_harmful.jsonl"
+AGENTDOJO_LOSSMASKS_HARMFUL="$SPLIT_DIR/agentdojo_lossmasks_harmful.jsonl"
+AGENTDOJO_RENDERS_BENIGN="$SPLIT_DIR/agentdojo_renders_benign.jsonl"
+AGENTDOJO_LOSSMASKS_BENIGN="$SPLIT_DIR/agentdojo_lossmasks_benign.jsonl"
+echo ""
+
+# =============================================================================
 # Run Sweep
 # =============================================================================
 run_idx=0
@@ -127,7 +146,7 @@ for alpha in "${ALPHAS[@]}"; do
             # Parse CB_LAYERS to array
             IFS=',' read -ra CB_LAYER_ARRAY <<< "$cb_layers"
 
-            # Build training arguments
+            # Build training arguments (mixed mode: fujitsu + agentdojo split)
             TRAIN_ARGS=(
                 --preset "llama-3.1-8b-instruct"
                 --output-dir "$RUN_DIR"
@@ -147,14 +166,11 @@ for alpha in "${ALPHAS[@]}"; do
                 --wandb-project "circuit-breakers-sweep"
                 --wandb-run-name "$RUN_NAME"
                 --cb-target-layers "${CB_LAYER_ARRAY[@]}"
-                --mode ds_dr
-                --ds-renders "$DS_RENDERS"
-                --ds-lossmasks "$DS_LOSSMASKS"
-                --dr-renders "$DR_RENDERS"
-                --dr-lossmasks "$DR_LOSSMASKS"
-                --additional-renders "$AGENTDOJO_RENDERS"
-                --additional-lossmasks "$AGENTDOJO_LOSSMASKS"
-                --additional-traces "$AGENTDOJO_TRACES"
+                --mode mixed
+                --harmful-renders "$DS_RENDERS" "$AGENTDOJO_RENDERS_HARMFUL"
+                --harmful-lossmasks "$DS_LOSSMASKS" "$AGENTDOJO_LOSSMASKS_HARMFUL"
+                --benign-renders "$DR_RENDERS" "$AGENTDOJO_RENDERS_BENIGN"
+                --benign-lossmasks "$DR_LOSSMASKS" "$AGENTDOJO_LOSSMASKS_BENIGN"
             )
 
             # Run training

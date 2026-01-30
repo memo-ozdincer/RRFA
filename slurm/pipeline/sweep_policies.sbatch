@@ -151,9 +151,23 @@ for policy in "${POLICIES[@]}"; do
     echo ""
 
     # =========================================================================
-    # Step 2: Train with this policy's lossmasks
+    # Step 2: Split AgentDojo into harmful/benign
     # =========================================================================
-    echo "Step 2: Training with policy=$policy"
+    echo "Step 2: Splitting AgentDojo data"
+
+    SPLIT_DIR="$POLICY_DIR/agentdojo_split"
+    mkdir -p "$SPLIT_DIR"
+
+    python "$REPO_DIR/scripts/split_agentdojo.py" \
+        --traces "$AGENTDOJO_TRACES" \
+        --renders "$RENDERS_DIR/agentdojo_complete.jsonl" \
+        --lossmasks "$LOSSMASKS_DIR/agentdojo_complete.jsonl" \
+        --output-dir "$SPLIT_DIR"
+
+    # =========================================================================
+    # Step 3: Train with this policy's lossmasks (mixed mode)
+    # =========================================================================
+    echo "Step 3: Training with policy=$policy"
 
     # Parse CB_LAYERS
     IFS=',' read -ra CB_LAYER_ARRAY <<< "$CB_LAYERS"
@@ -177,14 +191,11 @@ for policy in "${POLICIES[@]}"; do
         --wandb-project "circuit-breakers-policy-sweep"
         --wandb-run-name "policy_${policy}"
         --cb-target-layers "${CB_LAYER_ARRAY[@]}"
-        --mode ds_dr
-        --ds-renders "$RENDERS_DIR/fujitsu_b4_ds.jsonl"
-        --ds-lossmasks "$LOSSMASKS_DIR/fujitsu_b4_ds.jsonl"
-        --dr-renders "$RENDERS_DIR/fujitsu_b4_dr.jsonl"
-        --dr-lossmasks "$LOSSMASKS_DIR/fujitsu_b4_dr.jsonl"
-        --additional-renders "$RENDERS_DIR/agentdojo_complete.jsonl"
-        --additional-lossmasks "$LOSSMASKS_DIR/agentdojo_complete.jsonl"
-        --additional-traces "$AGENTDOJO_TRACES"
+        --mode mixed
+        --harmful-renders "$RENDERS_DIR/fujitsu_b4_ds.jsonl" "$SPLIT_DIR/agentdojo_renders_harmful.jsonl"
+        --harmful-lossmasks "$LOSSMASKS_DIR/fujitsu_b4_ds.jsonl" "$SPLIT_DIR/agentdojo_lossmasks_harmful.jsonl"
+        --benign-renders "$RENDERS_DIR/fujitsu_b4_dr.jsonl" "$SPLIT_DIR/agentdojo_renders_benign.jsonl"
+        --benign-lossmasks "$LOSSMASKS_DIR/fujitsu_b4_dr.jsonl" "$SPLIT_DIR/agentdojo_lossmasks_benign.jsonl"
     )
 
     python src/training/train_schema.py "${TRAIN_ARGS[@]}" 2>&1 | tee "$POLICY_DIR/train.log"
