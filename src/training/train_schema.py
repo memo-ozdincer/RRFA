@@ -342,6 +342,30 @@ def compute_retain_loss(
     return masked_loss
 
 
+def get_loss_weights(
+    config: CircuitBreakerConfig,
+    step: int,
+) -> Tuple[float, float, float]:
+    """
+    Compute loss weights (cs, cr, alpha) for the current step.
+    """
+    # Compute alpha schedule
+    # α(t) = α_max × max(0, 1 - t / (decay_multiplier × total_steps))
+    decay_horizon = config.alpha_decay_multiplier * config.total_steps
+    alpha = config.alpha_max * max(0.0, 1.0 - step / decay_horizon)
+
+    if config.loss_weighting == "dual":
+        # Dual coefficient: cs decays, cr increases
+        cs = alpha / config.alpha_max if config.alpha_max > 0 else 1.0
+        cr = 1.0 - cs * 0.5  # cr ranges from 0.5 to 1.0
+    else:
+        # Single alpha: L = alpha * L_rr + L_retain
+        cs = alpha
+        cr = 1.0
+
+    return cs, cr, alpha
+
+
 def compute_cb_loss(
     model: torch.nn.Module,
     batch: Dict[str, torch.Tensor],
@@ -350,11 +374,10 @@ def compute_cb_loss(
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """
     Compute combined Circuit Breaker loss.
-
-    L = cs(t) * L_rr + cr(t) * L_retain
-
-    Where cs(t) and cr(t) are the rerouting and retain coefficients that
-    vary over training.
+    
+    NOTE: This function computes both losses and combines them, which keeps
+    both computation graphs in memory. For memory efficiency, use sequential
+    backward passes in the training loop instead.
     """
     device = next(model.parameters()).device
 
@@ -369,10 +392,7 @@ def compute_cb_loss(
     benign_loss_mask = batch["benign_loss_mask"].to(device)
     benign_weight = batch["benign_sample_weight"].to(device)
 
-    # Compute alpha schedule
-    # α(t) = α_max × max(0, 1 - t / (decay_multiplier × total_steps))
-    decay_horizon = config.alpha_decay_multiplier * config.total_steps
-    alpha = config.alpha_max * max(0.0, 1.0 - step / decay_horizon)
+    cs, cr, alpha = get_loss_weights(config, step)
 
     # Compute losses
     rr_loss = compute_rr_loss(
@@ -390,29 +410,16 @@ def compute_cb_loss(
         benign_loss_mask * benign_weight.unsqueeze(-1),
     )
 
-    # Combine losses based on weighting strategy
-    if config.loss_weighting == "dual":
-        # Dual coefficient: cs decays, cr increases
-        cs = alpha / config.alpha_max if config.alpha_max > 0 else 1.0
-        cr = 1.0 - cs * 0.5  # cr ranges from 0.5 to 1.0
-        total_loss = cs * rr_loss + cr * retain_loss
-        metrics = {
-            "rr_loss": rr_loss.item(),
-            "retain_loss": retain_loss.item(),
-            "cs": cs,
-            "cr": cr,
-            "alpha": alpha,
-        }
-    else:
-        # Single alpha: L = alpha * L_rr + L_retain
-        total_loss = alpha * rr_loss + retain_loss
-        metrics = {
-            "rr_loss": rr_loss.item(),
-            "retain_loss": retain_loss.item(),
-            "alpha": alpha,
-        }
-
-    metrics["total_loss"] = total_loss.item()
+    total_loss = cs * rr_loss + cr * retain_loss
+    
+    metrics = {
+        "rr_loss": rr_loss.item(),
+        "retain_loss": retain_loss.item(),
+        "cs": cs,
+        "cr": cr,
+        "alpha": alpha,
+        "total_loss": total_loss.item(),
+    }
 
     return total_loss, metrics
 
@@ -547,17 +554,58 @@ def train(
             if global_step >= config.total_steps:
                 break
 
-            # Forward pass
-            loss, metrics = compute_cb_loss(
-                model.module if is_distributed else model,
-                batch,
-                config,
-                global_step,
+            # Sequential backward pass to save memory
+            train_model = model.module if is_distributed else model
+            device = next(train_model.parameters()).device
+            
+            # Get weights
+            cs, cr, alpha = get_loss_weights(config, global_step)
+            
+            # 1. Harmful pass (RR loss)
+            harmful_ids = batch["harmful_input_ids"].to(device)
+            harmful_mask = batch["harmful_attention_mask"].to(device)
+            harmful_loss_mask = batch["harmful_loss_mask"].to(device)
+            harmful_weight = batch["harmful_sample_weight"].to(device)
+            
+            rr_loss = compute_rr_loss(
+                train_model,
+                harmful_ids,
+                harmful_mask,
+                harmful_loss_mask * harmful_weight.unsqueeze(-1),
+                config.cb_target_layers,
             )
-
-            # Backward pass
-            loss = loss / config.gradient_accumulation_steps
-            loss.backward()
+            
+            # Backward RR
+            scaled_rr_loss = (cs * rr_loss) / config.gradient_accumulation_steps
+            scaled_rr_loss.backward()
+            
+            # 2. Benign pass (Retain loss)
+            benign_ids = batch["benign_input_ids"].to(device)
+            benign_mask = batch["benign_attention_mask"].to(device)
+            benign_loss_mask = batch["benign_loss_mask"].to(device)
+            benign_weight = batch["benign_sample_weight"].to(device)
+            
+            retain_loss = compute_retain_loss(
+                train_model,
+                benign_ids,
+                benign_mask,
+                benign_loss_mask * benign_weight.unsqueeze(-1),
+            )
+            
+            # Backward Retain
+            scaled_retain_loss = (cr * retain_loss) / config.gradient_accumulation_steps
+            scaled_retain_loss.backward()
+            
+            # Metrics
+            total_loss = cs * rr_loss + cr * retain_loss
+            metrics = {
+                "rr_loss": rr_loss.item(),
+                "retain_loss": retain_loss.item(),
+                "cs": cs,
+                "cr": cr,
+                "alpha": alpha,
+                "total_loss": total_loss.item(),
+            }
 
             if (global_step + 1) % config.gradient_accumulation_steps == 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm)
@@ -621,6 +669,10 @@ def train(
 
     if is_distributed:
         dist.destroy_process_group()
+        
+    # Ensure memory is released
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 # =============================================================================
