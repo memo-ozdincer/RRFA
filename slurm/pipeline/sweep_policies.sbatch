@@ -186,6 +186,7 @@ for policy in "${POLICIES[@]}"; do
 
     TRAIN_ARGS=(
         --preset "llama-3.1-8b-instruct"
+        --model "$TOKENIZER"
         --output-dir "$MODEL_DIR"
         --total-steps "$TOTAL_STEPS"
         --batch-size "$BATCH_SIZE"

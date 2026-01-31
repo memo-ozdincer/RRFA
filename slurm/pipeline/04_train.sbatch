@@ -156,6 +156,26 @@ OUTPUT_DIR="${OUTPUT_DIR:-$CB_SCRATCH/models/cb_train_$(date +%Y%m%d_%H%M%S)}"
 # Model configuration
 MODEL_PRESET="${MODEL_PRESET:-llama-3.1-8b-instruct}"
 MODEL="${MODEL:-}"
+
+# Resolve model to local cache path if not already set
+if [[ -z "$MODEL" ]]; then
+    echo "Resolving model to local cache path..."
+    MODEL_CACHE_DIR="$HF_HUB_CACHE/models--meta-llama--Llama-3.1-8B-Instruct"
+    SNAPSHOT_ROOT="$MODEL_CACHE_DIR/snapshots"
+
+    if [[ -d "$SNAPSHOT_ROOT" ]]; then
+        SNAPSHOT_PATH=$(ls -1td "$SNAPSHOT_ROOT"/* 2>/dev/null | head -n 1)
+        if [[ -n "$SNAPSHOT_PATH" ]]; then
+            echo "  Found local snapshot: $SNAPSHOT_PATH"
+            MODEL="$SNAPSHOT_PATH"
+        else
+            echo "  WARNING: Snapshot directory empty, using preset"
+        fi
+    else
+        echo "  WARNING: Model not cached, using preset"
+    fi
+fi
+
 TOTAL_STEPS="${TOTAL_STEPS:-300}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 LEARNING_RATE="${LEARNING_RATE:-5e-5}"

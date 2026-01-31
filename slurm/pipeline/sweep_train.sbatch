@@ -76,6 +76,32 @@ echo "  AgentDojo Renders: $(wc -l < "$AGENTDOJO_RENDERS") lines"
 echo ""
 
 # =============================================================================
+# Resolve model to local cache path
+# =============================================================================
+MODEL_PATH="meta-llama/Llama-3.1-8B-Instruct"
+echo "Resolving model '$MODEL_PATH' to local cache path..."
+
+MODEL_CACHE_DIR="$HF_HUB_CACHE/models--meta-llama--Llama-3.1-8B-Instruct"
+SNAPSHOT_ROOT="$MODEL_CACHE_DIR/snapshots"
+
+if [[ -d "$SNAPSHOT_ROOT" ]]; then
+    SNAPSHOT_PATH=$(ls -1td "$SNAPSHOT_ROOT"/* 2>/dev/null | head -n 1)
+    if [[ -n "$SNAPSHOT_PATH" ]]; then
+        echo "  Found local snapshot: $SNAPSHOT_PATH"
+        MODEL_PATH="$SNAPSHOT_PATH"
+    else
+        echo "  ERROR: Snapshot directory exists but is empty: $SNAPSHOT_ROOT"
+        echo "  Run slurm/cache_models.sh on login node first!"
+        exit 1
+    fi
+else
+    echo "  ERROR: Model not cached at: $MODEL_CACHE_DIR"
+    echo "  Run slurm/cache_models.sh on login node first!"
+    exit 1
+fi
+echo ""
+
+# =============================================================================
 # Sweep Configurations
 # =============================================================================
 
@@ -149,6 +175,7 @@ for alpha in "${ALPHAS[@]}"; do
             # Build training arguments (mixed mode: fujitsu + agentdojo split)
             TRAIN_ARGS=(
                 --preset "llama-3.1-8b-instruct"
+                --model "$MODEL_PATH"
                 --output-dir "$RUN_DIR"
                 --total-steps "$TOTAL_STEPS"
                 --batch-size "$BATCH_SIZE"
