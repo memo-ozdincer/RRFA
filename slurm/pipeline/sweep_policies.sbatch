@@ -201,8 +201,7 @@ for policy in "${POLICIES[@]}"; do
         --lora-dropout 0.05
         --logging-steps 10
         --save-steps 50
-        --wandb-project "circuit-breakers-policy-sweep"
-        --wandb-run-name "policy_${policy}"
+        --no-wandb
         --cb-target-layers "${CB_LAYER_ARRAY[@]}"
         --mode mixed
         --harmful-renders "$RENDERS_DIR/fujitsu_b4_ds.jsonl" "$SPLIT_DIR/agentdojo_renders_harmful.jsonl"
