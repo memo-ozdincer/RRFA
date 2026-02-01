@@ -86,9 +86,9 @@ fi
 BASELINE_MODEL="${BASELINE_MODEL:-meta-llama/Llama-3.1-8B-Instruct}"
 EVAL_DATASETS="${EVAL_DATASETS:-fujitsu,agentdojo}"
 TOOL_SCHEMA="${TOOL_SCHEMA:-$REPO_DIR/configs/tool_schemas/b4_standard_v1.json}"
-LIMIT="${LIMIT:-}"
+LIMIT="${LIMIT:-50}"  # Default to 50 samples for faster eval
 SHOW_EXAMPLES="${SHOW_EXAMPLES:-true}"
-NUM_EXAMPLES="${NUM_EXAMPLES:-5}"
+NUM_EXAMPLES="${NUM_EXAMPLES:-10}"
 DTYPE="${DTYPE:-bfloat16}"
 
 echo "Configuration:"
@@ -254,31 +254,53 @@ if 'stage1_passed' in results:
 " 2>/dev/null || echo "    (summary extraction failed)"
         fi
 
-        # Show example outputs if requested
+        # Show paired examples (baseline vs CB) if requested
         if [[ "$SHOW_EXAMPLES" == "true" ]]; then
-            DETAILS_FILE="${OUTPUT_FILE%.json}.details.jsonl"
-            if [[ -f "$DETAILS_FILE" ]]; then
+            PAIRED_FILE="${OUTPUT_FILE%.json}.paired_outputs.jsonl"
+            if [[ -f "$PAIRED_FILE" ]]; then
                 echo ""
-                echo "    Example Traces (first $NUM_EXAMPLES):"
                 python3 -c "
 import json
 
-with open('$DETAILS_FILE', 'r') as f:
-    lines = [json.loads(line) for line in f]
+with open('$PAIRED_FILE', 'r') as f:
+    pairs = [json.loads(line) for line in f if line.strip()]
 
-# Filter to tool_flip_asr cb_model results
-cb_flip = [l for l in lines if l['model'] == 'cb_model' and l['metric'] == 'tool_flip_asr']
+if not pairs:
+    print('    No paired outputs')
+    exit(0)
 
-for i, sample in enumerate(cb_flip[:$NUM_EXAMPLES]):
-    outcome = sample.get('outcome', '?')
-    emoji = {'attack_success': '❌', 'correct_behavior': '✅', 'no_tool_call': '⚠️'}.get(outcome, '❓')
-    print(f'    [{i+1}] {emoji} {outcome}')
-    print(f'        Expected: {sample.get(\"expected_tool\")} | Simulated: {sample.get(\"simulated_tool\")} | Observed: {sample.get(\"observed_tool\")}')
-    preview = sample.get('response_preview', '')[:120]
-    if preview:
-        print(f'        Response: {preview}...')
+# Check if this is tool-flip or generation comparison
+is_gen_compare = 'responses_differ' in pairs[0]
+
+if is_gen_compare:
+    # Generation comparison (AgentDojo style)
+    differ = [p for p in pairs if p.get('responses_differ')]
+    same = [p for p in pairs if not p.get('responses_differ')]
+    print(f'    Pairs: {len(pairs)} | Different: {len(differ)} ({100*len(differ)/len(pairs):.0f}%) | Same: {len(same)}')
     print()
-" 2>/dev/null || echo "    (example extraction failed)"
+    for i, p in enumerate(differ[:$NUM_EXAMPLES], 1):
+        cat = p.get('category', '?')
+        b_tool = p.get('baseline_observed_tool') or 'none'
+        c_tool = p.get('cb_observed_tool') or 'none'
+        print(f'    [{i}] {cat}: baseline={b_tool} -> cb={c_tool}')
+        b_resp = (p.get('baseline_response') or '')[:80].replace(chr(10), ' ')
+        c_resp = (p.get('cb_response') or '')[:80].replace(chr(10), ' ')
+        print(f'        B: {b_resp}...')
+        print(f'        C: {c_resp}...')
+else:
+    # Tool-flip comparison (Fujitsu style)
+    emoji = {'attack_success': '❌', 'correct_behavior': '✅', 'no_tool_call': '⚠️', 'other_tool': '❓'}
+    improvements = [p for p in pairs if p.get('baseline_outcome') == 'attack_success' and p.get('cb_outcome') != 'attack_success']
+    regressions = [p for p in pairs if p.get('baseline_outcome') != 'attack_success' and p.get('cb_outcome') == 'attack_success']
+    print(f'    Pairs: {len(pairs)} | Improved: {len(improvements)} | Regressed: {len(regressions)}')
+    print()
+    for i, p in enumerate((improvements + regressions)[:$NUM_EXAMPLES], 1):
+        b_out = p.get('baseline_outcome', '?')
+        c_out = p.get('cb_outcome', '?')
+        label = 'IMP' if b_out == 'attack_success' else 'REG'
+        print(f'    [{i}] {label}: {emoji.get(b_out,\"?\")} {b_out[:8]} -> {emoji.get(c_out,\"?\")} {c_out[:8]}')
+        print(f'        expected={p.get(\"expected_tool\",\"?\")[:20]} simulated={p.get(\"simulated_tool\",\"?\")[:20]}')
+" 2>/dev/null || echo "    (paired output failed)"
             fi
         fi
 
@@ -312,38 +334,48 @@ for f in sorted(eval_dir.glob(f'*_{dataset}_eval.json')):
         with open(f) as fp:
             data = json.load(fp)
 
+        # Get tool_flip ASR (or generation_comparison diff rate for AgentDojo)
         cb_asr = data.get('cb_model', {}).get('tool_flip_asr', {}).get('attack_success_rate', -1)
         baseline_asr = data.get('baseline', {}).get('tool_flip_asr', {}).get('attack_success_rate', -1)
-        capability = data.get('cb_model', {}).get('capability_retention', {}).get('capability_retention', -1)
         total_samples = data.get('cb_model', {}).get('tool_flip_asr', {}).get('total_samples', 0)
-        passed = data.get('stage1_passed', False)
+
+        # If no tool_flip samples, use generation_comparison diff rate
+        if total_samples == 0:
+            diff_rate = data.get('output_comparison', {}).get('difference_rate', -1)
+            gen_samples = data.get('cb_model', {}).get('generation_comparison', {}).get('total_samples', 0)
+            cb_asr = diff_rate  # Use diff rate as the metric
+            baseline_asr = -1
+            total_samples = gen_samples
 
         results.append({
             'policy': policy,
             'baseline_asr': baseline_asr,
             'cb_asr': cb_asr,
-            'capability': capability,
             'samples': total_samples,
-            'passed': passed,
+            'is_gen_compare': data.get('cb_model', {}).get('tool_flip_asr', {}).get('total_samples', 0) == 0,
         })
     except Exception as e:
-        print(f'Error loading {f}: {e}')
+        print(f'Error: {e}')
 
 if not results:
-    print('  No results found')
+    print('  No results')
 else:
-    # Sort by CB ASR (lower is better)
-    results.sort(key=lambda x: x['cb_asr'] if x['cb_asr'] >= 0 else float('inf'))
-
-    print(f\"{'Policy':<20} {'Baseline':>10} {'CB ASR':>10} {'Samples':>8} {'Capability':>12} {'Gate':>6}\")
-    print('-' * 70)
-
-    for r in results:
-        baseline = f\"{r['baseline_asr']:.1%}\" if r['baseline_asr'] >= 0 else 'N/A'
-        cb = f\"{r['cb_asr']:.1%}\" if r['cb_asr'] >= 0 else 'N/A'
-        cap = f\"{r['capability']:.1%}\" if r['capability'] >= 0 else 'N/A'
-        status = '✅' if r['passed'] else '❌'
-        print(f\"{r['policy']:<20} {baseline:>10} {cb:>10} {r['samples']:>8} {cap:>12} {status:>6}\")
+    # Check if this is generation comparison mode
+    is_gen = results[0].get('is_gen_compare', False)
+    if is_gen:
+        print(f\"{'Policy':<20} {'Diff Rate':>12} {'Samples':>8}\")
+        print('-' * 45)
+        for r in sorted(results, key=lambda x: -x['cb_asr'] if x['cb_asr'] >= 0 else float('-inf')):
+            diff = f\"{r['cb_asr']:.1%}\" if r['cb_asr'] >= 0 else 'N/A'
+            print(f\"{r['policy']:<20} {diff:>12} {r['samples']:>8}\")
+    else:
+        results.sort(key=lambda x: x['cb_asr'] if x['cb_asr'] >= 0 else float('inf'))
+        print(f\"{'Policy':<20} {'Baseline':>10} {'CB ASR':>10} {'Samples':>8}\")
+        print('-' * 55)
+        for r in results:
+            baseline = f\"{r['baseline_asr']:.1%}\" if r['baseline_asr'] >= 0 else 'N/A'
+            cb = f\"{r['cb_asr']:.1%}\" if r['cb_asr'] >= 0 else 'N/A'
+            print(f\"{r['policy']:<20} {baseline:>10} {cb:>10} {r['samples']:>8}\")
 
     print()
     print(f\"Best policy: {results[0]['policy']} ({results[0]['cb_asr']:.1%})\")
