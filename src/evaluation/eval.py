@@ -290,6 +290,192 @@ def _merge_capability_results(partials: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def _log_sample_details(sample: Dict[str, Any], sample_idx: int, verbose: bool = True):
+    """Log comprehensive details about an evaluation sample."""
+    if not verbose:
+        return
+    
+    logger.info(f"\n{'='*60}")
+    logger.info(f"SAMPLE {sample_idx} DETAILS")
+    logger.info(f"{'='*60}")
+    
+    # Basic info
+    logger.info(f"  ID: {sample.get('id', 'N/A')}")
+    
+    # Source info
+    source = sample.get('source', {})
+    if source:
+        logger.info(f"  Source Dataset: {source.get('dataset', 'N/A')}")
+        logger.info(f"  Source Subset: {source.get('subset', 'N/A')}")
+    
+    # Labels
+    labels = sample.get('labels', {})
+    if labels:
+        logger.info(f"  Category: {labels.get('category', 'N/A')}")
+        logger.info(f"  Attack Succeeded: {labels.get('attack_succeeded', 'N/A')}")
+    
+    # Tool attack info (Fujitsu-style)
+    tool_attack = sample.get('tool_attack', {})
+    if tool_attack:
+        logger.info(f"  Expected Tool: {tool_attack.get('expected_tool', 'N/A')}")
+        logger.info(f"  Observed/Simulated Tool: {tool_attack.get('observed_tool', 'N/A')}")
+    
+    # Signal hints
+    signal_hints = sample.get('signal_hints', {})
+    if signal_hints:
+        injection_span = signal_hints.get('injection_char_span')
+        if injection_span:
+            logger.info(f"  Injection Span: {injection_span}")
+    
+    # Messages summary
+    messages = sample.get('messages', [])
+    logger.info(f"\n  Messages ({len(messages)} total):")
+    for i, msg in enumerate(messages):
+        role = msg.get('role', '?')
+        content = msg.get('content', '')
+        tool_calls = msg.get('tool_calls', [])
+        
+        # Truncate content for display
+        content_preview = content[:200] + '...' if len(content) > 200 else content
+        content_preview = content_preview.replace('\n', '\\n')
+        
+        logger.info(f"    [{i}] {role}: {content_preview}")
+        if tool_calls:
+            for tc in tool_calls:
+                tc_fn = tc.get('function', {})
+                logger.info(f"        -> TOOL CALL: {tc_fn.get('name', '?')}({tc_fn.get('arguments', {})})")
+
+
+def _detect_dataset_type(eval_samples: List[Dict[str, Any]]) -> str:
+    """Detect the dataset type from samples."""
+    if not eval_samples:
+        return "unknown"
+    
+    # Check first few samples
+    for sample in eval_samples[:5]:
+        source = sample.get('source', {})
+        dataset = source.get('dataset', '').lower()
+        
+        if 'agentdojo' in dataset:
+            return 'agentdojo'
+        elif 'fujitsu' in dataset:
+            return 'fujitsu'
+        
+        # Fallback: check for tool_attack (Fujitsu-style)
+        if sample.get('tool_attack'):
+            return 'fujitsu'
+        
+        # Check messages for AgentDojo-style system prompt
+        messages = sample.get('messages', [])
+        if messages and messages[0].get('role') == 'system':
+            sys_content = messages[0].get('content', '')
+            if 'Blue Sparrow Tech' in sys_content or 'given tools' in sys_content:
+                return 'agentdojo'
+    
+    return 'unknown'
+
+
+def _extract_sample_tools_and_system(sample: Dict[str, Any]) -> Tuple[Optional[List], Optional[str]]:
+    """
+    Extract tools and system prompt from sample if available.
+    
+    AgentDojo traces have embedded system prompts in messages[0].
+    Returns (tools, system_prompt) or (None, None) if not found.
+    """
+    tools = None
+    system_prompt = None
+    
+    # Check for embedded tools in sample
+    if 'tools' in sample:
+        tools = sample['tools']
+    
+    # Check messages for system prompt
+    messages = sample.get('messages', [])
+    if messages and messages[0].get('role') == 'system':
+        system_prompt = messages[0].get('content')
+    
+    return tools, system_prompt
+
+
+def _log_eval_context(
+    eval_samples: List[Dict[str, Any]],
+    schema_tools: List[Dict[str, Any]],
+    schema_system_prompt: str,
+    verbose: bool = True,
+):
+    """Log comprehensive evaluation context at start."""
+    if not verbose:
+        return
+    
+    logger.info("\n" + "=" * 70)
+    logger.info("EVALUATION CONTEXT")
+    logger.info("=" * 70)
+    
+    # Detect dataset type
+    dataset_type = _detect_dataset_type(eval_samples)
+    logger.info(f"\nDetected Dataset Type: {dataset_type.upper()}")
+    logger.info(f"Total Samples: {len(eval_samples)}")
+    
+    # Log schema tools
+    logger.info(f"\n--- SCHEMA TOOLS ({len(schema_tools)} total) ---")
+    for t in schema_tools[:5]:  # First 5
+        fn = t.get('function', {})
+        logger.info(f"  - {fn.get('name', '?')}: {fn.get('description', '')[:60]}...")
+    if len(schema_tools) > 5:
+        logger.info(f"  ... and {len(schema_tools) - 5} more")
+    
+    # Log schema system prompt
+    logger.info(f"\n--- SCHEMA SYSTEM PROMPT ---")
+    logger.info(f"  {schema_system_prompt[:300]}...")
+    
+    # Check sample-embedded tools/system prompts
+    sample_tools, sample_sys = _extract_sample_tools_and_system(eval_samples[0] if eval_samples else {})
+    if sample_sys:
+        logger.info(f"\n--- SAMPLE-EMBEDDED SYSTEM PROMPT (from sample[0]) ---")
+        logger.info(f"  {sample_sys[:300]}...")
+        
+        if sample_sys != schema_system_prompt:
+            logger.warning("\n  ⚠️ WARNING: Sample has DIFFERENT system prompt than schema!")
+            logger.warning("     Consider using --use-sample-context to use embedded prompts.")
+    
+    # Analyze sample types
+    categories = {}
+    sources = {}
+    has_tool_attack = 0
+    has_messages = 0
+    has_injection = 0
+    
+    for s in eval_samples:
+        # Category
+        cat = s.get('labels', {}).get('category', 'unknown')
+        categories[cat] = categories.get(cat, 0) + 1
+        
+        # Source
+        src = s.get('source', {}).get('dataset', 'unknown')
+        sources[src] = sources.get(src, 0) + 1
+        
+        # Features
+        if s.get('tool_attack'):
+            has_tool_attack += 1
+        if s.get('messages'):
+            has_messages += 1
+        if s.get('signal_hints', {}).get('injection_char_span'):
+            has_injection += 1
+    
+    logger.info(f"\n--- SAMPLE STATISTICS ---")
+    logger.info(f"  Categories: {categories}")
+    logger.info(f"  Sources: {sources}")
+    logger.info(f"  With tool_attack info: {has_tool_attack}/{len(eval_samples)}")
+    logger.info(f"  With messages: {has_messages}/{len(eval_samples)}")
+    logger.info(f"  With injection spans: {has_injection}/{len(eval_samples)}")
+    
+    # Log first sample details
+    if eval_samples:
+        _log_sample_details(eval_samples[0], 0, verbose)
+    
+    logger.info("\n" + "=" * 70)
+
+
 def _evaluate_model_on_samples(
     model_path: str,
     adapter_path: Optional[str],
@@ -299,6 +485,7 @@ def _evaluate_model_on_samples(
     device: str,
     torch_dtype: torch.dtype,
     verbose: bool,
+    use_sample_context: bool = False,
 ) -> Dict[str, Any]:
     if device.startswith("cuda") and torch.cuda.is_available():
         try:
@@ -310,8 +497,25 @@ def _evaluate_model_on_samples(
         model_path, adapter_path=adapter_path, device=device, torch_dtype=torch_dtype
     )
 
+    # Log evaluation context
+    _log_eval_context(eval_samples, tools, system_prompt, verbose)
+    
+    # Determine which tools/system prompt to use
+    actual_tools = tools
+    actual_system_prompt = system_prompt
+    
+    if use_sample_context:
+        # For datasets like AgentDojo, use embedded context
+        sample_tools, sample_sys = _extract_sample_tools_and_system(eval_samples[0] if eval_samples else {})
+        if sample_sys:
+            actual_system_prompt = sample_sys
+            logger.info(f"Using sample-embedded system prompt (len={len(actual_system_prompt)})")
+        if sample_tools:
+            actual_tools = sample_tools
+            logger.info(f"Using sample-embedded tools ({len(actual_tools)} tools)")
+
     tool_flip = evaluate_tool_flip_asr(
-        model, tokenizer, eval_samples, tools, system_prompt, verbose
+        model, tokenizer, eval_samples, actual_tools, actual_system_prompt, verbose
     )
 
     # If tool-flip has no valid samples (e.g., AgentDojo without tool_attack info),
@@ -319,23 +523,36 @@ def _evaluate_model_on_samples(
     generation_comparison = None
     if tool_flip["total_samples"] == 0 and len(eval_samples) > 0:
         if verbose:
+            logger.info("\n" + "-" * 50)
             logger.info("No tool-flip samples found, running generation comparison...")
             # Debug: check if samples have messages
             samples_with_messages = sum(1 for s in eval_samples if s.get("messages"))
+            samples_with_ids = sum(1 for s in eval_samples if s.get("id"))
             logger.info(f"  Samples with messages: {samples_with_messages}/{len(eval_samples)}")
+            logger.info(f"  Samples with IDs: {samples_with_ids}/{len(eval_samples)}")
+            
+            # Show first few sample IDs
+            first_ids = [s.get('id') for s in eval_samples[:5]]
+            logger.info(f"  First 5 IDs: {first_ids}")
+        
         generation_comparison = evaluate_generation_comparison(
-            model, tokenizer, eval_samples, tools, system_prompt,
+            model, tokenizer, eval_samples, actual_tools, actual_system_prompt,
             model_name="cb_model" if adapter_path else "baseline",
             verbose=verbose
         )
         if verbose:
             logger.info(f"  Generation comparison produced {generation_comparison['total_samples']} results")
+            if generation_comparison['details']:
+                first_result = generation_comparison['details'][0]
+                logger.info(f"  First result ID: {first_result.get('id')}")
+                logger.info(f"  First result tool: {first_result.get('observed_tool')}")
+            logger.info("-" * 50)
 
     forced_call = evaluate_forced_function_call(
-        model, tokenizer, eval_samples, tools, system_prompt, verbose
+        model, tokenizer, eval_samples, actual_tools, actual_system_prompt, verbose
     )
     capability = evaluate_capability_retention(
-        model, tokenizer, eval_samples, tools, system_prompt, verbose
+        model, tokenizer, eval_samples, actual_tools, actual_system_prompt, verbose
     )
 
     del model
@@ -364,6 +581,7 @@ def _worker_eval(payload: Tuple[Any, ...]) -> Dict[str, Any]:
         device,
         torch_dtype,
         verbose,
+        use_sample_context,
     ) = payload
     return _evaluate_model_on_samples(
         model_path=model_path,
@@ -374,6 +592,7 @@ def _worker_eval(payload: Tuple[Any, ...]) -> Dict[str, Any]:
         device=device,
         torch_dtype=torch_dtype,
         verbose=verbose,
+        use_sample_context=use_sample_context,
     )
 
 
@@ -1123,6 +1342,7 @@ def run_mvp_evaluation(
     num_workers: int = 1,
     gpu_ids: Optional[List[int]] = None,
     eval_samples: Optional[List[Dict[str, Any]]] = None,
+    use_sample_context: bool = False,
 ) -> Dict[str, Any]:
     """
     Run full MVP evaluation suite.
@@ -1136,6 +1356,7 @@ def run_mvp_evaluation(
         device: Device to use
         torch_dtype: Model dtype
         verbose: Print detailed results
+        use_sample_context: If True, use system prompt/tools from samples (for AgentDojo)
     
     Returns:
         Dict with all evaluation results
@@ -1155,11 +1376,19 @@ def run_mvp_evaluation(
     
     logger.info(f"Loaded {len(eval_samples)} evaluation samples")
     
+    # Detect dataset type and auto-enable sample context for AgentDojo
+    dataset_type = _detect_dataset_type(eval_samples)
+    if dataset_type == 'agentdojo' and not use_sample_context:
+        logger.info(f"Auto-detected AgentDojo dataset - enabling sample context (embedded system prompts)")
+        use_sample_context = True
+    
     results = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "eval_data": str(eval_data_path),
         "tool_schema": str(tool_schema_path),
         "num_samples": len(eval_samples),
+        "dataset_type": dataset_type,
+        "use_sample_context": use_sample_context,
     }
     
     def _evaluate_with_workers(model_path: str, adapter_path: Optional[str]) -> Dict[str, Any]:
@@ -1173,6 +1402,7 @@ def run_mvp_evaluation(
                 device=device,
                 torch_dtype=torch_dtype,
                 verbose=verbose,
+                use_sample_context=use_sample_context,
             )
 
         if not torch.cuda.is_available():
@@ -1195,6 +1425,7 @@ def run_mvp_evaluation(
                     f"cuda:{worker_gpu_ids[idx]}",
                     torch_dtype,
                     False,
+                    use_sample_context,
                 )
             )
 
@@ -1443,6 +1674,17 @@ def main():
         action="store_true",
         help="Exit with code 1 if Stage 1 gates fail",
     )
+    parser.add_argument(
+        "--use-sample-context",
+        action="store_true",
+        help="Use system prompt and tools from samples (auto-enabled for AgentDojo)",
+    )
+    parser.add_argument(
+        "--show-sample",
+        type=int,
+        default=None,
+        help="Print detailed info for sample N (0-indexed) and exit",
+    )
     
     args = parser.parse_args()
     
@@ -1466,6 +1708,23 @@ def main():
                 eval_samples.append(json.loads(line))
                 if args.limit and len(eval_samples) >= args.limit:
                     break
+    
+    # Handle --show-sample for debugging
+    if args.show_sample is not None:
+        if args.show_sample >= len(eval_samples):
+            logger.error(f"Sample index {args.show_sample} out of range (0-{len(eval_samples)-1})")
+            return 1
+        
+        sample = eval_samples[args.show_sample]
+        print("\n" + "=" * 70)
+        print(f"SAMPLE {args.show_sample} FULL DUMP")
+        print("=" * 70)
+        print(json.dumps(sample, indent=2, default=str))
+        print("=" * 70)
+        
+        # Also show verbose log version
+        _log_sample_details(sample, args.show_sample, verbose=True)
+        return 0
     
     # Write limited data to temp file if needed
     if args.limit:
@@ -1502,6 +1761,7 @@ def main():
         num_workers=args.num_workers,
         gpu_ids=gpu_ids,
         eval_samples=eval_samples,
+        use_sample_context=args.use_sample_context,
     )
     
     # Clean up temp file
