@@ -501,6 +501,41 @@ def extract_tool_name(response: str) -> Optional[str]:
     return tool_name
 
 
+def get_tool_flip_info(sample: Dict[str, Any]) -> Tuple[str, str]:
+    """
+    Extract expected_tool and simulated_tool from a sample.
+
+    Checks multiple locations in order of priority:
+    1. labels.expected_tool / labels.simulated_tool (legacy format)
+    2. tool_attack.expected_tool / tool_attack.observed_tool (trace_v1 format)
+    3. signal_hints.expected_tool_name / signal_hints.observed_tool_name
+
+    Returns:
+        Tuple of (expected_tool, simulated_tool)
+    """
+    # Try labels first (legacy)
+    labels = sample.get("labels", {})
+    expected_tool = labels.get("expected_tool", "")
+    simulated_tool = labels.get("simulated_tool", "")
+
+    # Try tool_attack (trace_v1 format)
+    if not expected_tool or not simulated_tool:
+        tool_attack = sample.get("tool_attack", {})
+        if tool_attack:
+            expected_tool = expected_tool or tool_attack.get("expected_tool", "")
+            # observed_tool is the "bad" tool that was called (equivalent to simulated_tool)
+            simulated_tool = simulated_tool or tool_attack.get("observed_tool", "")
+
+    # Try signal_hints as fallback
+    if not expected_tool or not simulated_tool:
+        signal_hints = sample.get("signal_hints", {})
+        if signal_hints:
+            expected_tool = expected_tool or signal_hints.get("expected_tool_name", "")
+            simulated_tool = simulated_tool or signal_hints.get("observed_tool_name", "")
+
+    return expected_tool, simulated_tool
+
+
 # =============================================================================
 # Evaluation Functions
 # =============================================================================
@@ -543,10 +578,8 @@ def evaluate_tool_flip_asr(
     # A tool-flip is only valid when expected_tool != simulated_tool
     valid_samples = []
     for sample in eval_samples:
-        labels = sample.get("labels", {})
-        expected_tool = labels.get("expected_tool", "")
-        simulated_tool = labels.get("simulated_tool", "")
-        
+        expected_tool, simulated_tool = get_tool_flip_info(sample)
+
         if not expected_tool or not simulated_tool:
             filtered_out += 1
             continue
@@ -564,10 +597,8 @@ def evaluate_tool_flip_asr(
     valid_json_count = 0
     
     for sample in iterator:
-        labels = sample.get("labels", {})
-        expected_tool = labels.get("expected_tool", "")
-        simulated_tool = labels.get("simulated_tool", "")
-        
+        expected_tool, simulated_tool = get_tool_flip_info(sample)
+
         # Build messages
         messages = sample.get("messages", [])
         if not messages:
@@ -669,12 +700,11 @@ def evaluate_forced_function_call(
     iterator = tqdm(eval_samples, desc="Evaluating Forced Function Calling") if verbose else eval_samples
     
     for sample in iterator:
-        labels = sample.get("labels", {})
-        simulated_tool = labels.get("simulated_tool", "")
-        
+        _, simulated_tool = get_tool_flip_info(sample)
+
         if not simulated_tool:
             continue
-        
+
         # Build messages
         messages = sample.get("messages", [])
         if not messages:
@@ -824,9 +854,8 @@ def evaluate_capability_retention(
     iterator = tqdm(eval_samples, desc="Evaluating Capability Retention") if verbose else eval_samples
     
     for sample in iterator:
-        labels = sample.get("labels", {})
-        expected_tool = labels.get("expected_tool", "")
-        
+        expected_tool, _ = get_tool_flip_info(sample)
+
         # Get benign query (without injection)
         metadata = sample.get("metadata", {})
         benign_query = metadata.get("benign_query", "")
