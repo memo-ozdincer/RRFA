@@ -205,12 +205,15 @@ class SchemaDataset(Dataset):
         attention_mask = sample["attention_mask"][:self.max_length]
         loss_mask = sample["loss_mask"][:self.max_length]
 
-        # Pad if needed
-        pad_len = self.max_length - len(input_ids)
-        if pad_len > 0:
-            input_ids = input_ids + [self.pad_token_id] * pad_len
-            attention_mask = attention_mask + [0] * pad_len
-            loss_mask = loss_mask + [0.0] * pad_len
+        # Helper to pad list to max_length
+        def pad_to_max(lst, pad_val):
+            if len(lst) < self.max_length:
+                return lst + [pad_val] * (self.max_length - len(lst))
+            return lst
+
+        input_ids = pad_to_max(input_ids, self.pad_token_id)
+        attention_mask = pad_to_max(attention_mask, 0)
+        loss_mask = pad_to_max(loss_mask, 0.0)
 
         return {
             "input_ids": torch.tensor(input_ids, dtype=torch.long),
