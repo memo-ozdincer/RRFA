@@ -105,6 +105,39 @@ def get_injection_text(trace: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def find_injection_in_messages(trace: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Find injections in AgentDojo-style traces.
+    
+    AgentDojo injections are embedded in tool results (not user messages).
+    They typically appear as <INFORMATION>...</INFORMATION> blocks.
+    
+    Returns list of {role, content_preview, injection_text} dicts.
+    """
+    injections = []
+    messages = trace.get("messages", [])
+    
+    for i, msg in enumerate(messages):
+        content = msg.get("content", "")
+        if not content:
+            continue
+        
+        # Look for <INFORMATION> tags (AgentDojo injection marker)
+        import re
+        info_pattern = re.compile(r'<INFORMATION>(.*?)</INFORMATION>', re.DOTALL | re.IGNORECASE)
+        matches = info_pattern.findall(content)
+        
+        for match in matches:
+            injections.append({
+                "message_index": i,
+                "role": msg.get("role", "unknown"),
+                "injection_text": match.strip(),
+                "content_preview": content[:100] + "..." if len(content) > 100 else content,
+            })
+    
+    return injections
+
+
 def get_injection_span(trace: Dict[str, Any]) -> Optional[Tuple[int, int]]:
     """Get character span of injection in user query."""
     signal_hints = trace.get("signal_hints", {})
@@ -220,49 +253,71 @@ def print_sample_detail(
     YELLOW = "\033[93m" if use_color else ""
     BLUE = "\033[94m" if use_color else ""
     CYAN = "\033[96m" if use_color else ""
+    MAGENTA = "\033[95m" if use_color else ""
     RESET = "\033[0m" if use_color else ""
     
     print(f"\n{BOLD}{'='*80}{RESET}")
     print(f"{BOLD}Sample ID:{RESET} {sample.get('id', 'N/A')}")
     print(f"{'='*80}")
     
-    # Show system prompt and tools if available
-    if tool_schema:
-        system_prompt = tool_schema.get("system_prompt", "")
-        tools = tool_schema.get("tools", [])
-        if system_prompt:
-            print(f"\n{CYAN}📋 SYSTEM PROMPT:{RESET}")
-            print(f"   {truncate_text(system_prompt, max_len)}")
-        if tools:
-            print(f"\n{CYAN}🔧 AVAILABLE TOOLS:{RESET}")
-            print(f"   {format_tool_list(tools)}")
-    elif trace:
-        sys_prompt = get_system_prompt(trace)
-        if sys_prompt:
-            print(f"\n{CYAN}📋 SYSTEM PROMPT (from trace):{RESET}")
-            print(f"   {truncate_text(sys_prompt, max_len)}")
+    # Detect dataset type from trace
+    dataset_type = "unknown"
+    if trace:
+        source = trace.get("source", {})
+        dataset = source.get("dataset", "").lower()
+        if "agentdojo" in dataset:
+            dataset_type = "agentdojo"
+        elif "fujitsu" in dataset:
+            dataset_type = "fujitsu"
     
-    # Show user query and injection
+    # Show system prompt - ALWAYS prefer embedded from trace (especially for AgentDojo)
+    sys_prompt = None
+    if trace:
+        sys_prompt = get_system_prompt(trace)
+    
+    if sys_prompt:
+        print(f"\n{CYAN}📋 SYSTEM PROMPT (from trace):{RESET}")
+        print(f"   {truncate_text(sys_prompt, max_len)}")
+    elif tool_schema:
+        schema_prompt = tool_schema.get("system_prompt", "")
+        if schema_prompt:
+            print(f"\n{CYAN}📋 SYSTEM PROMPT (from schema - {YELLOW}may not match dataset{RESET}):{RESET}")
+            print(f"   {truncate_text(schema_prompt, max_len)}")
+    
+    # Show available tools
+    if tool_schema and tool_schema.get("tools"):
+        print(f"\n{CYAN}🔧 AVAILABLE TOOLS:{RESET}")
+        print(f"   {format_tool_list(tool_schema['tools'])}")
+    
+    # Show user query
     if trace:
         user_query = get_user_query(trace)
-        injection = get_injection_text(trace)
-        
         if user_query:
             print(f"\n{BLUE}💬 USER QUERY:{RESET}")
-            if injection:
-                highlighted = highlight_injection(user_query, injection, use_color)
-                print(f"   {truncate_text(highlighted, max_len * 2)}")
-            else:
-                print(f"   {truncate_text(user_query, max_len)}")
+            print(f"   {truncate_text(user_query, max_len)}")
+    
+    # Show injection - different handling for Fujitsu vs AgentDojo
+    if trace:
+        # Fujitsu-style: injection in user query via tool_attack field
+        fujitsu_injection = get_injection_text(trace)
+        if fujitsu_injection:
+            print(f"\n{RED}⚠️  INJECTION TEXT (in user query):{RESET}")
+            print(f"   {truncate_text(fujitsu_injection, max_len)}")
         
-        if injection:
-            print(f"\n{RED}⚠️  INJECTION TEXT:{RESET}")
-            print(f"   {truncate_text(injection, max_len)}")
+        # AgentDojo-style: injection in tool results
+        agentdojo_injections = find_injection_in_messages(trace)
+        if agentdojo_injections:
+            print(f"\n{RED}⚠️  INJECTIONS IN TOOL RESULTS ({len(agentdojo_injections)}):{RESET}")
+            for inj in agentdojo_injections[:3]:  # Show first 3
+                print(f"\n   {MAGENTA}[Message {inj['message_index']} - {inj['role']}]{RESET}")
+                print(f"   Context: {inj['content_preview']}")
+                print(f"   {RED}Injection: {truncate_text(inj['injection_text'], max_len)}{RESET}")
         
         # Attack info
         attack_info = get_attack_info(trace)
         if attack_info.get("category"):
             print(f"\n{YELLOW}📊 ATTACK INFO:{RESET}")
+            print(f"   Dataset: {dataset_type}")
             print(f"   Category: {attack_info.get('category', 'N/A')}")
             print(f"   Attack Type: {attack_info.get('attack_type', 'N/A')}")
             print(f"   Attack Succeeded: {attack_info.get('attack_succeeded', 'N/A')}")
