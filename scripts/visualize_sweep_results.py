@@ -132,7 +132,7 @@ def find_injection_in_messages(trace: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "message_index": i,
                 "role": msg.get("role", "unknown"),
                 "injection_text": match.strip(),
-                "content_preview": content[:100] + "..." if len(content) > 100 else content,
+                "content_preview": content,
             })
     
     return injections
@@ -191,10 +191,12 @@ def get_attack_info(trace: Dict[str, Any]) -> Dict[str, Any]:
 # Display Helpers
 # =============================================================================
 
-def truncate_text(text: str, max_length: int = 200) -> str:
-    """Truncate text with ellipsis if too long."""
+def truncate_text(text: str, max_length: Optional[int] = None) -> str:
+    """Return text without truncation unless a max_length is explicitly set."""
     if not text:
         return ""
+    if max_length is None:
+        return text
     if len(text) <= max_length:
         return text
     return text[:max_length] + "..."
@@ -215,11 +217,11 @@ def highlight_injection(text: str, injection: Optional[str], use_color: bool = T
         RESET = "\033[0m"
         before = text[:idx]
         after = text[idx + len(injection):]
-        return f"{before}{RED}[INJECTION: {truncate_text(injection, 100)}]{RESET}{after}"
+        return f"{before}{RED}[INJECTION: {truncate_text(injection)}]{RESET}{after}"
     else:
         before = text[:idx]
         after = text[idx + len(injection):]
-        return f"{before}[INJECTION: {truncate_text(injection, 100)}]{after}"
+        return f"{before}[INJECTION: {truncate_text(injection)}]{after}"
 
 
 def format_tool_list(tools: List[Dict[str, Any]]) -> str:
@@ -244,7 +246,7 @@ def print_sample_detail(
     use_color: bool = True,
 ) -> None:
     """Print detailed information about a single sample with full context."""
-    max_len = 1000 if show_full else 300
+    max_len = None
     
     # Colors
     BOLD = "\033[1m" if use_color else ""
@@ -284,12 +286,12 @@ def print_sample_detail(
             print(f"\n{CYAN}📋 SYSTEM PROMPT (from schema - {YELLOW}may not match dataset{RESET}):{RESET}")
             print(f"   {truncate_text(schema_prompt, max_len)}")
     
-    # Show available tools
-    if tool_schema and tool_schema.get("tools"):
-        print(f"\n{CYAN}🔧 AVAILABLE TOOLS:{RESET}")
-        print(f"   {format_tool_list(tool_schema['tools'])}")
-    
-    # Show user query
+                injections.append({
+                    "message_index": i,
+                    "role": msg.get("role", "unknown"),
+                    "injection_text": match.strip(),
+                    "content_preview": content,
+                })
     if trace:
         user_query = get_user_query(trace)
         if user_query:
@@ -308,7 +310,7 @@ def print_sample_detail(
         agentdojo_injections = find_injection_in_messages(trace)
         if agentdojo_injections:
             print(f"\n{RED}⚠️  INJECTIONS IN TOOL RESULTS ({len(agentdojo_injections)}):{RESET}")
-            for inj in agentdojo_injections[:3]:  # Show first 3
+            for inj in agentdojo_injections:
                 print(f"\n   {MAGENTA}[Message {inj['message_index']} - {inj['role']}]{RESET}")
                 print(f"   Context: {inj['content_preview']}")
                 print(f"   {RED}Injection: {truncate_text(inj['injection_text'], max_len)}{RESET}")
@@ -511,7 +513,7 @@ def print_summary_table(runs: List[Dict[str, Any]], use_color: bool = True) -> N
     print(f"{'-'*110}")
     
     for run in runs:
-        run_name = run.get("run_name", "?")[:33]
+        run_name = run.get("run_name", "?")
         
         fujitsu = run.get("fujitsu", {})
         if fujitsu:
