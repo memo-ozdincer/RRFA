@@ -503,6 +503,7 @@ def _evaluate_model_on_samples(
     # Determine which tools/system prompt to use
     actual_tools = tools
     actual_system_prompt = system_prompt
+    sample_tools = None
     
     if use_sample_context:
         # For datasets like AgentDojo, use embedded context
@@ -513,6 +514,23 @@ def _evaluate_model_on_samples(
         if sample_tools:
             actual_tools = sample_tools
             logger.info(f"Using sample-embedded tools ({len(actual_tools)} tools)")
+
+    # If sample context is enabled but no tools are embedded, restrict schema tools to
+    # those actually observed in the dataset to avoid spurious tool calls (e.g., search_web).
+    if use_sample_context and not sample_tools:
+        tool_names = set()
+        for s in eval_samples:
+            for m in s.get("messages", []):
+                for tc in m.get("tool_calls") or []:
+                    fn = tc.get("function") or {}
+                    name = fn.get("name")
+                    if name:
+                        tool_names.add(name)
+        if tool_names:
+            filtered = [t for t in tools if (t.get("function") or {}).get("name") in tool_names]
+            if filtered:
+                actual_tools = filtered
+                logger.info(f"Using filtered schema tools ({len(actual_tools)} tools): {sorted(tool_names)}")
 
     tool_flip = evaluate_tool_flip_asr(
         model, tokenizer, eval_samples, actual_tools, actual_system_prompt, verbose

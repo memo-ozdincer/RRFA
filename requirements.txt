@@ -50,3 +50,6 @@ protobuf>=4.25.0
 # Logging & Tracking
 wandb>=0.18.0
 tensorboard>=2.17.0
+
+# Visualization
+streamlit>=1.37.0

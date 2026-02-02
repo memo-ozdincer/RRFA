@@ -97,6 +97,7 @@ echo ""
 # =============================================================================
 POLICIES=(
     "assistant_only"
+    "assistant_and_tool"
     "cb_full_sequence"
     "tool_calls_only"
     "completion_only"

@@ -110,12 +110,28 @@ class TraceTask:
 
 @dataclass
 class TraceLabels:
-    """Outcome labels for the trace."""
-    category: Optional[Literal["harmful", "benign"]] = None
+    """
+    Outcome labels for the trace.
+
+    CB Training Categories:
+    - harmful: Attack present AND model complied (attack_succeeded=True)
+      → Use for CB/rerouting loss
+    - resisted: Attack present BUT model refused/ignored (attack_succeeded=False)
+      → Can use for retain loss (correct behavior under attack)
+    - benign: No attack present (normal operation)
+      → Use for retain loss
+
+    The `is_harmful` property computes the CB-relevant classification:
+    - True only when attack_succeeded=True (model was compromised)
+    - False for benign OR resisted traces
+    """
+    category: Optional[Literal["harmful", "benign", "resisted"]] = None
     security_outcome: Optional[Literal["safe", "unsafe", "refusal", "tool_misuse", "unknown"]] = None
     attack_type: Optional[str] = None
     attack_succeeded: Optional[bool] = None
     capability_category: Optional[str] = None
+    # Explicit flag for whether an attack/injection was present in the trace
+    attack_present: Optional[bool] = None
 
 
 @dataclass
@@ -377,9 +393,45 @@ class Trace:
         return len(self.get_tool_calls()) > 0
 
     def is_harmful(self) -> bool:
-        """Check if this is a harmful trace (for CB training)."""
-        if self.labels and self.labels.category:
-            return self.labels.category == "harmful"
+        """
+        Check if this is a harmful trace (for CB training).
+
+        A trace is harmful for CB training if:
+        1. An attack was present AND the model complied (attack_succeeded=True)
+        2. OR category is explicitly "harmful"
+
+        This ensures we only apply rerouting loss to traces where the model
+        exhibited bad behavior, not traces where it correctly resisted.
+        """
+        if self.labels:
+            # Primary check: did the attack succeed?
+            if self.labels.attack_succeeded is not None:
+                return self.labels.attack_succeeded
+            # Fallback to category (for backward compatibility)
+            if self.labels.category:
+                return self.labels.category == "harmful"
+        return False
+
+    def is_resisted(self) -> bool:
+        """
+        Check if this trace shows correct resistance to an attack.
+
+        A trace is "resisted" if:
+        - An attack was present (attack_present=True or attack_type is set)
+        - BUT the model did not comply (attack_succeeded=False)
+
+        These are valuable for retain loss as they show correct behavior.
+        """
+        if self.labels:
+            # Check if attack was present
+            attack_present = (
+                self.labels.attack_present or
+                self.labels.attack_type is not None or
+                self.labels.category == "resisted"
+            )
+            if attack_present:
+                # Attack was present but didn't succeed
+                return self.labels.attack_succeeded is False
         return False
 
     def is_skeleton(self) -> bool:
@@ -390,7 +442,36 @@ class Trace:
         """Check if this is a complete trace (has assistant messages)."""
         return self.completeness == "complete" or self.tier == "B2"
     def is_benign(self) -> bool:
-        """Check if this is a benign trace (for CB training)."""
-        if self.labels and self.labels.category:
-            return self.labels.category == "benign"
-        return False
+        """
+        Check if this is a benign trace (for retain loss in CB training).
+
+        A trace is benign/retainable if:
+        1. No attack was present (normal operation)
+        2. OR attack was present but model resisted (correct behavior)
+
+        This is the complement of is_harmful() for CB training purposes.
+        """
+        if self.labels:
+            # If attack_succeeded is explicitly set, use it
+            if self.labels.attack_succeeded is not None:
+                # Benign = attack didn't succeed (or no attack)
+                return not self.labels.attack_succeeded
+            # Fallback to category
+            if self.labels.category:
+                return self.labels.category in ("benign", "resisted")
+        return True  # Default to benign if no labels
+
+    def get_cb_category(self) -> Literal["harmful", "benign", "resisted"]:
+        """
+        Get the CB training category for this trace.
+
+        Returns:
+        - "harmful": Attack succeeded, use for CB loss
+        - "resisted": Attack present but model refused, use for retain
+        - "benign": No attack present, use for retain
+        """
+        if self.is_harmful():
+            return "harmful"
+        if self.is_resisted():
+            return "resisted"
+        return "benign"

@@ -1,163 +1,374 @@
 #!/usr/bin/env python3
-"""Split AgentDojo traces/renders/lossmasks into harmful and benign files.
+"""Split AgentDojo traces/renders/lossmasks into CB and retain sets.
 
-AgentDojo data has both harmful and benign samples in the same file,
-distinguished by labels.is_harmful. This script splits them so they
-can be used with train_schema.py's mixed mode alongside Fujitsu DS/DR.
+CB Training Split Logic:
+------------------------
+- CB Set (harmful): Attack present AND model complied (attack_succeeded=True)
+  → Use for circuit breaker / rerouting loss
 
-The traces file contains the labels.is_harmful field.
+- Retain Set: Attack not present OR model resisted (attack_succeeded=False)
+  → Use for retain loss (capability preservation)
+  → Includes: benign traces + correctly resisted attacks
+
+This ensures we only apply CB loss to traces where the model exhibited
+bad behavior, not traces where it correctly resisted the attack.
+
+The traces file contains the labels fields:
+- labels.attack_succeeded: True if model was compromised
+- labels.attack_present: True if injection/attack was in the trace
+- labels.category: "harmful" | "resisted" | "benign"
+
 Renders and lossmasks are split by looking up trace_id in the traces labels.
 """
 
 import argparse
 import json
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Literal, NamedTuple
 
 
-def load_trace_labels(traces_path: Path) -> Dict[str, bool]:
-    """Load trace_id -> is_harmful mapping from traces file."""
-    labels = {}
+class TraceInfo(NamedTuple):
+    """Information about a trace for splitting purposes."""
+    attack_succeeded: bool
+    attack_present: bool
+    category: str  # "harmful", "resisted", "benign"
+
+
+def load_trace_info(traces_path: Path) -> Dict[str, TraceInfo]:
+    """
+    Load trace_id -> TraceInfo mapping from traces file.
+
+    Handles both old format (is_harmful boolean) and new format
+    (attack_succeeded, attack_present, category).
+    """
+    info_map = {}
     with open(traces_path) as f:
         for line in f:
             if not line.strip():
                 continue
             row = json.loads(line)
             trace_id = row.get("id") or row.get("trace_id")
-            # Check both is_harmful (boolean) and category (string) for compatibility
+            if not trace_id:
+                continue
+
             trace_labels = row.get("labels", {})
-            if "is_harmful" in trace_labels:
+
+            # New format: attack_succeeded field
+            if "attack_succeeded" in trace_labels:
+                attack_succeeded = bool(trace_labels.get("attack_succeeded", False))
+                attack_present = bool(trace_labels.get("attack_present", False))
+                category = trace_labels.get("category", "benign")
+            # Backward compatibility: old is_harmful format
+            elif "is_harmful" in trace_labels:
+                # Old format: is_harmful was based on attack presence, not success
+                # Treat is_harmful=True as attack_succeeded for backward compat
                 is_harmful = trace_labels.get("is_harmful", False)
+                attack_succeeded = is_harmful
+                attack_present = is_harmful
+                category = "harmful" if is_harmful else "benign"
+            # Legacy: category-only format
+            elif "category" in trace_labels:
+                category = trace_labels.get("category", "benign")
+                attack_succeeded = category == "harmful"
+                attack_present = category in ("harmful", "resisted")
             else:
-                # AgentDojo uses labels.category = "harmful" | "benign"
-                is_harmful = trace_labels.get("category") == "harmful"
-            if trace_id:
-                labels[trace_id] = is_harmful
-    return labels
+                # No labels - assume benign
+                attack_succeeded = False
+                attack_present = False
+                category = "benign"
+
+            info_map[trace_id] = TraceInfo(
+                attack_succeeded=attack_succeeded,
+                attack_present=attack_present,
+                category=category,
+            )
+
+    return info_map
 
 
-def split_traces(input_path: Path, harmful_out: Path, benign_out: Path) -> tuple:
-    """Split traces file by labels.category or labels.is_harmful."""
-    harmful_count = 0
-    benign_count = 0
+def split_traces(
+    input_path: Path,
+    cb_out: Path,
+    retain_out: Path,
+    resisted_handling: Literal["retain", "separate", "exclude"] = "retain",
+    resisted_out: Path = None,
+) -> Dict[str, int]:
+    """
+    Split traces file by CB training logic.
+
+    Args:
+        input_path: Input traces JSONL
+        cb_out: Output for CB set (attack_succeeded=True)
+        retain_out: Output for retain set (benign + optionally resisted)
+        resisted_handling: How to handle "resisted" traces:
+            - "retain": Include in retain set (default, recommended)
+            - "separate": Write to separate file
+            - "exclude": Don't include in any output
+        resisted_out: Output for resisted traces (only if resisted_handling="separate")
+
+    Returns:
+        Dict with counts: cb, retain, resisted, total
+    """
+    counts = {"cb": 0, "retain": 0, "resisted": 0, "total": 0}
+
+    f_resisted = None
+    if resisted_handling == "separate" and resisted_out:
+        resisted_out.parent.mkdir(parents=True, exist_ok=True)
+        f_resisted = open(resisted_out, 'w')
 
     with open(input_path) as f_in, \
-         open(harmful_out, 'w') as f_harmful, \
-         open(benign_out, 'w') as f_benign:
+         open(cb_out, 'w') as f_cb, \
+         open(retain_out, 'w') as f_retain:
 
         for line in f_in:
             if not line.strip():
                 continue
 
+            counts["total"] += 1
             row = json.loads(line)
             trace_labels = row.get("labels", {})
-            # Check both is_harmful (boolean) and category (string) for compatibility
-            if "is_harmful" in trace_labels:
-                is_harmful = trace_labels.get("is_harmful", False)
+
+            # Determine attack_succeeded using new logic
+            if "attack_succeeded" in trace_labels:
+                attack_succeeded = bool(trace_labels.get("attack_succeeded", False))
+                attack_present = bool(trace_labels.get("attack_present", False))
+            elif "is_harmful" in trace_labels:
+                # Backward compat
+                attack_succeeded = trace_labels.get("is_harmful", False)
+                attack_present = attack_succeeded
             else:
-                # AgentDojo uses labels.category = "harmful" | "benign"
-                is_harmful = trace_labels.get("category") == "harmful"
+                category = trace_labels.get("category", "benign")
+                attack_succeeded = category == "harmful"
+                attack_present = category in ("harmful", "resisted")
 
-            if is_harmful:
-                f_harmful.write(line)
-                harmful_count += 1
+            # Split based on attack_succeeded
+            if attack_succeeded:
+                # CB set: model was compromised
+                f_cb.write(line)
+                counts["cb"] += 1
+            elif attack_present:
+                # Resisted: attack present but model refused
+                counts["resisted"] += 1
+                if resisted_handling == "retain":
+                    f_retain.write(line)
+                    counts["retain"] += 1
+                elif resisted_handling == "separate" and f_resisted:
+                    f_resisted.write(line)
+                # else: exclude
             else:
-                f_benign.write(line)
-                benign_count += 1
+                # Benign: no attack present
+                f_retain.write(line)
+                counts["retain"] += 1
 
-    return harmful_count, benign_count
+    if f_resisted:
+        f_resisted.close()
+
+    return counts
 
 
-def split_by_trace_id(input_path: Path, harmful_out: Path, benign_out: Path,
-                      trace_labels: Dict[str, bool]) -> tuple:
-    """Split file by looking up trace_id in labels mapping."""
-    harmful_count = 0
-    benign_count = 0
-    missing_count = 0
+def split_by_trace_id(
+    input_path: Path,
+    cb_out: Path,
+    retain_out: Path,
+    trace_info: Dict[str, TraceInfo],
+    resisted_handling: Literal["retain", "separate", "exclude"] = "retain",
+    resisted_out: Path = None,
+) -> Dict[str, int]:
+    """
+    Split file by looking up trace_id in info mapping.
+
+    Used for renders/lossmasks that reference traces by ID.
+    """
+    counts = {"cb": 0, "retain": 0, "resisted": 0, "missing": 0, "total": 0}
+
+    f_resisted = None
+    if resisted_handling == "separate" and resisted_out:
+        resisted_out.parent.mkdir(parents=True, exist_ok=True)
+        f_resisted = open(resisted_out, 'w')
 
     with open(input_path) as f_in, \
-         open(harmful_out, 'w') as f_harmful, \
-         open(benign_out, 'w') as f_benign:
+         open(cb_out, 'w') as f_cb, \
+         open(retain_out, 'w') as f_retain:
 
         for line in f_in:
             if not line.strip():
                 continue
 
+            counts["total"] += 1
             row = json.loads(line)
             trace_id = row.get("trace_id")
 
-            if trace_id is None:
-                missing_count += 1
-                # Default to benign if no trace_id
-                f_benign.write(line)
-                benign_count += 1
+            if trace_id is None or trace_id not in trace_info:
+                counts["missing"] += 1
+                # Default to retain for unknown traces
+                f_retain.write(line)
+                counts["retain"] += 1
                 continue
 
-            is_harmful = trace_labels.get(trace_id, False)
+            info = trace_info[trace_id]
 
-            if is_harmful:
-                f_harmful.write(line)
-                harmful_count += 1
+            if info.attack_succeeded:
+                f_cb.write(line)
+                counts["cb"] += 1
+            elif info.attack_present:
+                counts["resisted"] += 1
+                if resisted_handling == "retain":
+                    f_retain.write(line)
+                    counts["retain"] += 1
+                elif resisted_handling == "separate" and f_resisted:
+                    f_resisted.write(line)
             else:
-                f_benign.write(line)
-                benign_count += 1
+                f_retain.write(line)
+                counts["retain"] += 1
 
-    if missing_count > 0:
-        print(f"  WARNING: {missing_count} rows had no trace_id, defaulted to benign")
+    if f_resisted:
+        f_resisted.close()
 
-    return harmful_count, benign_count
+    if counts["missing"] > 0:
+        print(f"  WARNING: {counts['missing']} rows had no/unknown trace_id, defaulted to retain")
+
+    return counts
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Split AgentDojo data into harmful/benign")
+    parser = argparse.ArgumentParser(
+        description="Split AgentDojo data into CB and retain sets",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+CB Training Split Logic:
+  CB Set:     attack_succeeded=True (model was compromised)
+  Retain Set: attack_succeeded=False OR no attack (correct behavior)
+
+Examples:
+  # Basic split (resisted traces go to retain)
+  python split_agentdojo.py --traces data.jsonl --output-dir split/
+
+  # Separate resisted traces for analysis
+  python split_agentdojo.py --traces data.jsonl --output-dir split/ \\
+      --resisted-handling separate
+
+  # Exclude resisted traces entirely
+  python split_agentdojo.py --traces data.jsonl --output-dir split/ \\
+      --resisted-handling exclude
+        """
+    )
     parser.add_argument("--traces", type=Path, required=True, help="Input traces JSONL (required for labels)")
     parser.add_argument("--renders", type=Path, help="Input renders JSONL")
     parser.add_argument("--lossmasks", type=Path, help="Input lossmasks JSONL")
     parser.add_argument("--output-dir", type=Path, required=True, help="Output directory")
     parser.add_argument("--prefix", type=str, default="agentdojo", help="Output filename prefix")
+    parser.add_argument(
+        "--resisted-handling",
+        type=str,
+        choices=["retain", "separate", "exclude"],
+        default="retain",
+        help="How to handle traces where attack was present but model resisted: "
+             "'retain' (include in retain set, recommended), "
+             "'separate' (write to separate file), "
+             "'exclude' (don't include in any output)"
+    )
+
+    # Legacy compatibility
+    parser.add_argument(
+        "--legacy-harmful-naming",
+        action="store_true",
+        help="Use legacy naming (harmful/benign) instead of (cb/retain) for output files"
+    )
+
     args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Determine output naming
+    if args.legacy_harmful_naming:
+        cb_suffix = "harmful"
+        retain_suffix = "benign"
+        resisted_suffix = "resisted"
+    else:
+        cb_suffix = "cb"
+        retain_suffix = "retain"
+        resisted_suffix = "resisted"
+
     # First, load trace labels (this is required)
     print(f"Loading trace labels from: {args.traces}")
-    trace_labels = load_trace_labels(args.traces)
-    harmful_ids = sum(1 for v in trace_labels.values() if v)
-    benign_ids = sum(1 for v in trace_labels.values() if not v)
-    print(f"  Found {len(trace_labels)} traces: {harmful_ids} harmful, {benign_ids} benign")
+    trace_info = load_trace_info(args.traces)
+
+    # Count categories
+    cb_count = sum(1 for v in trace_info.values() if v.attack_succeeded)
+    resisted_count = sum(1 for v in trace_info.values() if v.attack_present and not v.attack_succeeded)
+    benign_count = sum(1 for v in trace_info.values() if not v.attack_present)
+
+    print(f"  Found {len(trace_info)} traces:")
+    print(f"    CB (attack succeeded): {cb_count}")
+    print(f"    Resisted (attack failed): {resisted_count}")
+    print(f"    Benign (no attack): {benign_count}")
+    print(f"  Resisted handling: {args.resisted_handling}")
 
     # Split traces
     if args.traces and args.traces.exists():
-        harmful_out = args.output_dir / f"{args.prefix}_traces_harmful.jsonl"
-        benign_out = args.output_dir / f"{args.prefix}_traces_benign.jsonl"
+        cb_out = args.output_dir / f"{args.prefix}_traces_{cb_suffix}.jsonl"
+        retain_out = args.output_dir / f"{args.prefix}_traces_{retain_suffix}.jsonl"
+        resisted_out = args.output_dir / f"{args.prefix}_traces_{resisted_suffix}.jsonl" if args.resisted_handling == "separate" else None
+
         print(f"\nSplitting traces: {args.traces}")
-        harmful, benign = split_traces(args.traces, harmful_out, benign_out)
-        print(f"  Harmful: {harmful} -> {harmful_out}")
-        print(f"  Benign: {benign} -> {benign_out}")
+        counts = split_traces(
+            args.traces, cb_out, retain_out,
+            resisted_handling=args.resisted_handling,
+            resisted_out=resisted_out,
+        )
+        print(f"  CB: {counts['cb']} -> {cb_out}")
+        print(f"  Retain: {counts['retain']} -> {retain_out}")
+        if args.resisted_handling == "separate":
+            print(f"  Resisted: {counts['resisted']} -> {resisted_out}")
 
     # Split renders using trace_id lookup
     if args.renders and args.renders.exists():
-        harmful_out = args.output_dir / f"{args.prefix}_renders_harmful.jsonl"
-        benign_out = args.output_dir / f"{args.prefix}_renders_benign.jsonl"
+        cb_out = args.output_dir / f"{args.prefix}_renders_{cb_suffix}.jsonl"
+        retain_out = args.output_dir / f"{args.prefix}_renders_{retain_suffix}.jsonl"
+        resisted_out = args.output_dir / f"{args.prefix}_renders_{resisted_suffix}.jsonl" if args.resisted_handling == "separate" else None
+
         print(f"\nSplitting renders: {args.renders}")
-        harmful, benign = split_by_trace_id(args.renders, harmful_out, benign_out, trace_labels)
-        print(f"  Harmful: {harmful} -> {harmful_out}")
-        print(f"  Benign: {benign} -> {benign_out}")
+        counts = split_by_trace_id(
+            args.renders, cb_out, retain_out, trace_info,
+            resisted_handling=args.resisted_handling,
+            resisted_out=resisted_out,
+        )
+        print(f"  CB: {counts['cb']} -> {cb_out}")
+        print(f"  Retain: {counts['retain']} -> {retain_out}")
+        if args.resisted_handling == "separate":
+            print(f"  Resisted: {counts['resisted']} -> {resisted_out}")
 
     # Split lossmasks using trace_id lookup
     if args.lossmasks and args.lossmasks.exists():
-        harmful_out = args.output_dir / f"{args.prefix}_lossmasks_harmful.jsonl"
-        benign_out = args.output_dir / f"{args.prefix}_lossmasks_benign.jsonl"
-        print(f"\nSplitting lossmasks: {args.lossmasks}")
-        harmful, benign = split_by_trace_id(args.lossmasks, harmful_out, benign_out, trace_labels)
-        print(f"  Harmful: {harmful} -> {harmful_out}")
-        print(f"  Benign: {benign} -> {benign_out}")
+        cb_out = args.output_dir / f"{args.prefix}_lossmasks_{cb_suffix}.jsonl"
+        retain_out = args.output_dir / f"{args.prefix}_lossmasks_{retain_suffix}.jsonl"
+        resisted_out = args.output_dir / f"{args.prefix}_lossmasks_{resisted_suffix}.jsonl" if args.resisted_handling == "separate" else None
 
-    print("\nDone! Use these files with --mode mixed:")
-    print(f"  --harmful-renders {args.output_dir}/{args.prefix}_renders_harmful.jsonl")
-    print(f"  --harmful-lossmasks {args.output_dir}/{args.prefix}_lossmasks_harmful.jsonl")
-    print(f"  --benign-renders {args.output_dir}/{args.prefix}_renders_benign.jsonl")
-    print(f"  --benign-lossmasks {args.output_dir}/{args.prefix}_lossmasks_benign.jsonl")
+        print(f"\nSplitting lossmasks: {args.lossmasks}")
+        counts = split_by_trace_id(
+            args.lossmasks, cb_out, retain_out, trace_info,
+            resisted_handling=args.resisted_handling,
+            resisted_out=resisted_out,
+        )
+        print(f"  CB: {counts['cb']} -> {cb_out}")
+        print(f"  Retain: {counts['retain']} -> {retain_out}")
+        if args.resisted_handling == "separate":
+            print(f"  Resisted: {counts['resisted']} -> {resisted_out}")
+
+    print("\n" + "=" * 60)
+    print("CB TRAINING DATA SPLIT COMPLETE")
+    print("=" * 60)
+    print(f"\nUse these files with --mode mixed:")
+    if args.legacy_harmful_naming:
+        print(f"  --harmful-renders {args.output_dir}/{args.prefix}_renders_harmful.jsonl")
+        print(f"  --harmful-lossmasks {args.output_dir}/{args.prefix}_lossmasks_harmful.jsonl")
+        print(f"  --benign-renders {args.output_dir}/{args.prefix}_renders_benign.jsonl")
+        print(f"  --benign-lossmasks {args.output_dir}/{args.prefix}_lossmasks_benign.jsonl")
+    else:
+        print(f"  --harmful-renders {args.output_dir}/{args.prefix}_renders_cb.jsonl")
+        print(f"  --harmful-lossmasks {args.output_dir}/{args.prefix}_lossmasks_cb.jsonl")
+        print(f"  --benign-renders {args.output_dir}/{args.prefix}_renders_retain.jsonl")
+        print(f"  --benign-lossmasks {args.output_dir}/{args.prefix}_lossmasks_retain.jsonl")
 
 
 if __name__ == "__main__":

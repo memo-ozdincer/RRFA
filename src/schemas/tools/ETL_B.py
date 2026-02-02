@@ -215,6 +215,11 @@ def _default_lmp_registry() -> LMPRegistry:
             strategy="assistant_only",
             description="Loss only on assistant messages.",
         ),
+        "assistant_and_tool": LMPPolicy(
+            name="Assistant + Tool",
+            strategy="assistant_and_tool",
+            description="Loss on assistant and tool messages.",
+        ),
         "completion_only": LMPPolicy(
             name="Completion Only",
             strategy="completion_only",
@@ -620,6 +625,15 @@ def _mask_assistant_only(render: RenderedView, mask: List[float]) -> List[float]
     return mask
 
 
+def _mask_assistant_and_tool(render: RenderedView, mask: List[float]) -> List[float]:
+    if render.alignment and render.alignment.message_spans:
+        for span in render.alignment.message_spans:
+            if span.role in {"assistant", "tool"}:
+                for i in range(span.token_start, min(span.token_end, len(mask))):
+                    mask[i] = 1.0
+    return mask
+
+
 def _mask_completion_only(render: RenderedView, mask: List[float]) -> List[float]:
     if render.alignment and render.alignment.assistant_spans:
         span = render.alignment.assistant_spans[-1]
@@ -712,6 +726,8 @@ def _apply_lmp_policy(render: RenderedView, policy: LMPPolicy) -> List[float]:
 
     if policy.strategy == "assistant_only":
         return _mask_assistant_only(render, mask)
+    if policy.strategy == "assistant_and_tool":
+        return _mask_assistant_and_tool(render, mask)
     if policy.strategy == "completion_only":
         return _mask_completion_only(render, mask)
     if policy.strategy == "full_sequence":

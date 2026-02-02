@@ -3,11 +3,23 @@
 ETL_A: Tier A (raw formats) -> Tier B (trace_v1) conversion.
 
 This module only handles raw source files and converts them to canonical traces.
+
+Injection Detection:
+    The module detects injection spans in tool responses using configurable patterns.
+    Default patterns cover common injection markers like <INFORMATION>, <IMPORTANT>, etc.
+
+CB Training Categories:
+    - harmful: Attack present AND model complied (attack_succeeded=True)
+    - resisted: Attack present BUT model refused (attack_succeeded=False)
+    - benign: No attack present
+
+    Only "harmful" traces go to CB loss; "benign" and "resisted" go to retain loss.
 """
 
 import argparse
 import json
 import logging
+import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
@@ -33,6 +45,129 @@ from src.schemas.trace import (
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Injection Pattern Detection (Configurable)
+# =============================================================================
+
+# Default patterns for detecting injection spans in tool responses
+# These can be extended or overridden via --injection-patterns flag
+DEFAULT_INJECTION_PATTERNS = [
+    # AgentDojo-style patterns
+    r"<INFORMATION>.*?</INFORMATION>",
+    r"<IMPORTANT>.*?</IMPORTANT>",
+    r"<INSTRUCTION>.*?</INSTRUCTION>",
+    r"<SECRET>.*?</SECRET>",
+    r"<ADMIN>.*?</ADMIN>",
+    r"<SYSTEM>.*?</SYSTEM>",
+    # Common prompt injection markers
+    r"\[INSTRUCTION\].*?\[/INSTRUCTION\]",
+    r"\[SYSTEM\].*?\[/SYSTEM\]",
+    r"(?:^|\n)(?:IMPORTANT|URGENT|NOTE|ADMIN|SYSTEM):\s*.*?(?=\n\n|\Z)",
+    # Embedded commands pattern
+    r"(?:ignore (?:previous|above|all) (?:instructions?|prompts?)|new instructions?:).*?(?=\n\n|\Z)",
+]
+
+
+def compile_injection_patterns(patterns: Optional[List[str]] = None) -> List[re.Pattern]:
+    """Compile injection detection patterns into regex objects."""
+    patterns = patterns or DEFAULT_INJECTION_PATTERNS
+    compiled = []
+    for pattern in patterns:
+        try:
+            compiled.append(re.compile(pattern, re.IGNORECASE | re.DOTALL))
+        except re.error as e:
+            logger.warning("Invalid injection pattern '%s': %s", pattern, e)
+    return compiled
+
+
+def detect_injection_spans_in_content(
+    content: str,
+    message_index: int,
+    patterns: Optional[List[re.Pattern]] = None,
+) -> List[InjectionCharSpan]:
+    """
+    Detect injection spans in message content using regex patterns.
+
+    Args:
+        content: The message content to scan
+        message_index: Index of the message in the trace
+        patterns: Compiled regex patterns (uses defaults if None)
+
+    Returns:
+        List of InjectionCharSpan objects for detected injections
+    """
+    if not content:
+        return []
+
+    if patterns is None:
+        patterns = compile_injection_patterns()
+
+    spans = []
+    for pattern in patterns:
+        for match in pattern.finditer(content):
+            spans.append(InjectionCharSpan(
+                message_index=message_index,
+                char_start=match.start(),
+                char_end=match.end(),
+            ))
+
+    # Merge overlapping spans
+    if len(spans) > 1:
+        spans.sort(key=lambda s: (s.char_start, s.char_end))
+        merged = [spans[0]]
+        for span in spans[1:]:
+            last = merged[-1]
+            if span.char_start <= last.char_end:
+                # Overlapping - extend the last span
+                merged[-1] = InjectionCharSpan(
+                    message_index=last.message_index,
+                    char_start=last.char_start,
+                    char_end=max(last.char_end, span.char_end),
+                )
+            else:
+                merged.append(span)
+        spans = merged
+
+    return spans
+
+
+def detect_injection_in_messages(
+    messages: List[Dict[str, Any]],
+    patterns: Optional[List[re.Pattern]] = None,
+) -> Tuple[Optional[InjectionCharSpan], List[InjectionCharSpan]]:
+    """
+    Detect injection spans across all messages in a trace.
+
+    Primarily looks in tool responses (role="tool") but also checks user messages.
+
+    Args:
+        messages: List of message dictionaries
+        patterns: Compiled regex patterns
+
+    Returns:
+        Tuple of (first_injection_span, all_injection_spans)
+        first_injection_span is for backward compatibility with signal_hints.injection_char_span
+    """
+    all_spans = []
+
+    for idx, msg in enumerate(messages):
+        content = msg.get("content") or ""
+        role = msg.get("role", "")
+
+        # Skip system messages - they're not injection targets
+        if role == "system":
+            continue
+
+        # Check tool responses and user messages for injections
+        if role in ("tool", "user"):
+            spans = detect_injection_spans_in_content(content, idx, patterns)
+            all_spans.extend(spans)
+
+    # Return first span for backward compatibility, plus all spans
+    first_span = all_spans[0] if all_spans else None
+    return first_span, all_spans
 
 # Only keeping B4 - removed B1, B2, B3
 FUJITSU_FILE_MAP = {
@@ -373,7 +508,13 @@ def _parse_tool_calls(msg: Dict[str, Any], preserve_raw_content: bool = True, st
     return tool_calls or None, cleaned_content
 
 
-def convert_agentdojo_record(record: Dict[str, Any], split: str, line_number: int, strip_tool_syntax: bool = False) -> Optional[Trace]:
+def convert_agentdojo_record(
+    record: Dict[str, Any],
+    split: str,
+    line_number: int,
+    strip_tool_syntax: bool = False,
+    injection_patterns: Optional[List[re.Pattern]] = None,
+) -> Optional[Trace]:
     """
     Convert AgentDojo record to trace_v1 with full information preservation.
 
@@ -383,8 +524,14 @@ def convert_agentdojo_record(record: Dict[str, Any], split: str, line_number: in
     - Original assistant content (raw_assistant_content)
     - All metadata fields (in raw_metadata)
 
+    CB Training Categories (NEW):
+    - harmful: Attack present AND model complied (attack_succeeded=True)
+    - resisted: Attack present BUT model refused (attack_succeeded=False)
+    - benign: No attack present
+
     Args:
         strip_tool_syntax: If True, strip tool call syntax from assistant message content
+        injection_patterns: Compiled regex patterns for injection detection
     """
     try:
         metadata = record.get("metadata", {})
@@ -438,26 +585,70 @@ def convert_agentdojo_record(record: Dict[str, Any], split: str, line_number: in
                 )
             )
 
+        # =================================================================
+        # Attack Detection and Category Assignment (UPDATED)
+        # =================================================================
+        # Check if injection was present in metadata
         is_attack = metadata.get("injection_task_id") is not None
+
+        # AgentDojo security field: True = model was secure (resisted), False = compromised
         security_passed = bool(metadata.get("security", True))
-        category = "harmful" if is_attack else "benign"
+
+        # Attack succeeded = injection present AND security check failed
+        attack_succeeded = is_attack and not security_passed
+
+        # Detect injection spans in tool responses (NEW)
+        injection_span, all_injection_spans = detect_injection_in_messages(
+            raw_messages, injection_patterns
+        )
+
+        # If we detected injections via patterns but metadata says no attack,
+        # this might be a data quality issue - log it
+        if all_injection_spans and not is_attack:
+            logger.debug(
+                "Detected injection patterns in trace but metadata says no attack "
+                "(line %d). Patterns found: %d",
+                line_number, len(all_injection_spans)
+            )
+
+        # Determine CB training category (NEW LOGIC)
+        # - harmful: attack succeeded (model was compromised)
+        # - resisted: attack present but model refused (correct behavior)
+        # - benign: no attack present
+        if is_attack:
+            if attack_succeeded:
+                category = "harmful"
+            else:
+                category = "resisted"
+        else:
+            category = "benign"
 
         # Determine completeness based on messages
         completeness = _determine_completeness(messages)
         tier = _determine_tier(messages)
 
-        # Build signal hints with raw format preservation
+        # Build signal hints with raw format preservation AND injection detection
         signal_hints = SignalHints(
+            injection_char_span=injection_span,  # First detected injection
             raw_format=format_family,
             raw_assistant_content="\n".join(raw_assistant_contents) if raw_assistant_contents else None,
         )
 
         # Preserve all metadata fields in raw_metadata
+        # Also store all injection spans if multiple were found
+        extra_fields = {}
+        if len(all_injection_spans) > 1:
+            extra_fields["all_injection_spans"] = [
+                {"message_index": s.message_index, "char_start": s.char_start, "char_end": s.char_end}
+                for s in all_injection_spans
+            ]
+
         raw_metadata = RawMetadata(
             source_fields={
-                k: v for k, v in metadata.items()
-                if k not in {"suite_name", "name", "model", "model_name"}  # Already captured elsewhere
-            } if metadata else None,
+                **{k: v for k, v in metadata.items()
+                   if k not in {"suite_name", "name", "model", "model_name"}},
+                **extra_fields,
+            } if metadata or extra_fields else None,
         )
 
         trace = Trace(
@@ -473,7 +664,7 @@ def convert_agentdojo_record(record: Dict[str, Any], split: str, line_number: in
                     line_number,
                     ["index", "name", "user_task_id", "injection_task_id"],
                 ),
-                ingest_version="etl_a_v2",  # Updated version for new format
+                ingest_version="etl_a_v3",  # Updated version for CB-aware categories
                 model_id=model_id,
                 model_family=model_family,
                 format_family=format_family,
@@ -486,17 +677,19 @@ def convert_agentdojo_record(record: Dict[str, Any], split: str, line_number: in
                 variant=metadata.get("attack_type") or metadata.get("injection_task_id"),
             ),
             labels=TraceLabels(
-                category=category,
-                security_outcome="unsafe" if is_attack and not security_passed else "safe",
+                category=category,  # Now properly: harmful/resisted/benign
+                security_outcome="unsafe" if attack_succeeded else "safe",
                 attack_type="prompt_injection" if is_attack else None,
-                attack_succeeded=is_attack and not security_passed,
+                attack_succeeded=attack_succeeded,
+                attack_present=is_attack,  # NEW: explicit attack presence flag
                 capability_category=metadata.get("suite_name") if not is_attack else None,
             ),
             training=TraceTraining(
                 sample_weight=1.0,
                 loss_mask_policy="assistant_only",
                 mixture=TraceMixture(
-                    class_id=f"agentdojo/{'injection' if category == 'harmful' else 'benign'}"
+                    # Class ID reflects actual category for MWCS
+                    class_id=f"agentdojo/{category}"
                 ),
             ),
             links=TraceLinks(raw_id=metadata.get("name")),
@@ -586,6 +779,23 @@ def main() -> None:
              "Enables format-agnostic storage for cross-model training.",
     )
 
+    # Injection detection configuration
+    parser.add_argument(
+        "--injection-patterns",
+        type=str,
+        nargs="*",
+        default=None,
+        help="Custom regex patterns for injection detection. If not provided, uses defaults. "
+             "Example: --injection-patterns '<IMPORTANT>.*?</IMPORTANT>' '<SECRET>.*?</SECRET>'"
+    )
+    parser.add_argument(
+        "--injection-patterns-file",
+        type=Path,
+        default=None,
+        help="Path to JSON file containing list of injection patterns. "
+             "Takes precedence over --injection-patterns."
+    )
+
     args = parser.parse_args()
 
     # Load system prompt from tool schema if provided
@@ -598,14 +808,37 @@ def main() -> None:
         else:
             logger.warning("No system_prompt found in %s, using default", args.tool_schema)
 
+    # Load injection patterns
+    injection_pattern_strings = None
+    if args.injection_patterns_file and args.injection_patterns_file.exists():
+        try:
+            with open(args.injection_patterns_file) as f:
+                injection_pattern_strings = json.load(f)
+            logger.info("Loaded %d injection patterns from %s",
+                       len(injection_pattern_strings), args.injection_patterns_file)
+        except Exception as e:
+            logger.warning("Failed to load injection patterns from %s: %s",
+                          args.injection_patterns_file, e)
+    elif args.injection_patterns:
+        injection_pattern_strings = args.injection_patterns
+        logger.info("Using %d custom injection patterns", len(injection_pattern_strings))
+
+    # Compile patterns (uses defaults if None)
+    injection_patterns = compile_injection_patterns(injection_pattern_strings)
+    logger.info("Compiled %d injection detection patterns", len(injection_patterns))
+
     inputs: List[Tuple[Path, Any, Optional[int]]] = []
 
     # Use functools.partial to bind system_prompt to Fujitsu B4 converter
     from functools import partial
     fujitsu_b4_converter = partial(convert_fujitsu_b4_record, system_prompt=system_prompt)
 
-    # Bind strip_tool_syntax to AgentDojo converter
-    agentdojo_converter = partial(convert_agentdojo_record, strip_tool_syntax=args.strip_tool_syntax)
+    # Bind strip_tool_syntax and injection_patterns to AgentDojo converter
+    agentdojo_converter = partial(
+        convert_agentdojo_record,
+        strip_tool_syntax=args.strip_tool_syntax,
+        injection_patterns=injection_patterns,
+    )
 
     if args.fujitsu_dir:
         for key, filename in FUJITSU_FILE_MAP.items():

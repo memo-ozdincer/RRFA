@@ -32,13 +32,15 @@
 #   SKELETON_POLICY   - LMP policy for skeletons (default: full_sequence)
 #   INCLUDE_TEXT      - Include rendered_text in output (default: false)
 #   FORCE_LLAMA       - Force Llama 3.1 tool call format (default: false)
+#   RECOMMENDED: Set POLICY=assistant_and_tool to include tool results (AgentDojo injections)
 #
 # LMP Policy Options:
-#   assistant_only    - Loss only on assistant messages (default for most)
-#   completion_only   - Loss only on final assistant message
-#   full_sequence     - Loss on all tokens
-#   cb_full_sequence  - Loss on all non-system tokens (CB default)
-#   tool_calls_only   - Loss only on tool call spans
+#   assistant_only     - Loss only on assistant messages (default for most)
+#   assistant_and_tool - Loss on assistant + tool messages (includes tool results)
+#   completion_only    - Loss only on final assistant message
+#   full_sequence      - Loss on all tokens
+#   cb_full_sequence   - Loss on all non-system tokens (CB default)
+#   tool_calls_only    - Loss only on tool call spans
 #   action_prefix_only - Loss up to tool name in tool call
 #   action_commitment  - Loss on action commitment tokens
 #

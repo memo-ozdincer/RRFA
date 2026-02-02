@@ -101,7 +101,7 @@ else
     DEFAULT_STEPS=200
     DEFAULT_ALPHAS="5.0,10.0,15.0"
     DEFAULT_LAYER_CONFIGS="10,20|8,16,24|12,18|6,12,18,24"
-    DEFAULT_POLICIES="assistant_only,cb_full_sequence,tool_calls_only,completion_only"
+    DEFAULT_POLICIES="assistant_only,assistant_and_tool,cb_full_sequence,tool_calls_only,completion_only"
     DEFAULT_LIMIT_EVAL=100
     DEFAULT_NUM_EXAMPLES=50
 fi

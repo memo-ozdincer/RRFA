@@ -13,7 +13,7 @@
 # 
 # Tests 3 diverse configurations:
 #   1. Alpha=5.0,  Layers=10,20,     Policy=assistant_only (baseline)
-#   2. Alpha=10.0, Layers=8,16,24,   Policy=cb_full_sequence (more layers)
+#   2. Alpha=10.0, Layers=8,16,24,   Policy=assistant_and_tool (includes tool results)
 #   3. Alpha=15.0, Layers=12,18,     Policy=tool_calls_only (high alpha)
 #
 # Each config: ETL_B + 200 steps training + eval with 50 examples
@@ -76,7 +76,7 @@ DTYPE="bfloat16"
 # Define 3 configs as: "alpha|layers|policy"
 CONFIGS=(
     "5.0|10,20|assistant_only"
-    "10.0|8,16,24|cb_full_sequence"
+    "10.0|8,16,24|assistant_and_tool"
     "15.0|12,18|tool_calls_only"
 )
 

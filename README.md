@@ -72,6 +72,21 @@ See `requirements.txt` for Python dependencies. Key requirements:
 - PEFT (for LoRA)
 - vLLM (for data generation)
 - Accelerate (for distributed training)
+- Streamlit (for sweep visualization UI)
+
+## Sweep Visualization UI
+
+Use the Streamlit viewer to browse sweep metrics, filter by lossmask policy and hparams, and inspect sample traces.
+
+```bash
+streamlit run scripts/visualize_sweep_streamlit.py -- --sweep-dir /path/to/sweep_dir
+```
+
+Optional trace context:
+
+```bash
+streamlit run scripts/visualize_sweep_streamlit.py -- --sweep-dir /path/to/sweep_dir --traces-dir /path/to/traces
+```
 
 ## Stage 1 Gates
 

@@ -1,0 +1,58 @@
+{
+  "_comment": "Injection detection patterns for CB training pipeline",
+  "_description": "These regex patterns detect injection text in tool responses and user messages. Add new patterns when onboarding new datasets.",
+
+  "version": "1.0.0",
+
+  "patterns": {
+    "agentdojo": {
+      "description": "AgentDojo benchmark injection patterns",
+      "patterns": [
+        "<INFORMATION>.*?</INFORMATION>",
+        "<IMPORTANT>.*?</IMPORTANT>",
+        "<INSTRUCTION>.*?</INSTRUCTION>",
+        "<SECRET>.*?</SECRET>",
+        "<ADMIN>.*?</ADMIN>",
+        "<SYSTEM>.*?</SYSTEM>"
+      ]
+    },
+
+    "common": {
+      "description": "Common prompt injection patterns across datasets",
+      "patterns": [
+        "\\[INSTRUCTION\\].*?\\[/INSTRUCTION\\]",
+        "\\[SYSTEM\\].*?\\[/SYSTEM\\]",
+        "(?:^|\\n)(?:IMPORTANT|URGENT|NOTE|ADMIN|SYSTEM):\\s*.*?(?=\\n\\n|\\Z)",
+        "(?:ignore (?:previous|above|all) (?:instructions?|prompts?)|new instructions?:).*?(?=\\n\\n|\\Z)"
+      ]
+    },
+
+    "xml_style": {
+      "description": "XML-style injection markers",
+      "patterns": [
+        "<(?:cmd|command|exec|execute|run)>.*?</(?:cmd|command|exec|execute|run)>",
+        "<(?:override|ignore|bypass)>.*?</(?:override|ignore|bypass)>"
+      ]
+    },
+
+    "markdown_style": {
+      "description": "Markdown-style injection markers",
+      "patterns": [
+        "```(?:system|admin|instruction|override)[\\s\\S]*?```",
+        "\\*\\*(?:SYSTEM|ADMIN|OVERRIDE)\\*\\*:.*?(?=\\n\\n|\\Z)"
+      ]
+    }
+  },
+
+  "presets": {
+    "default": ["agentdojo", "common"],
+    "comprehensive": ["agentdojo", "common", "xml_style", "markdown_style"],
+    "agentdojo_only": ["agentdojo"],
+    "minimal": ["common"]
+  },
+
+  "_usage": {
+    "cli_example": "python src/schemas/tools/ETL_A.py --agentdojo data.jsonl --output out.jsonl --injection-patterns-file configs/injection_patterns.json",
+    "custom_patterns": "python src/schemas/tools/ETL_A.py --agentdojo data.jsonl --output out.jsonl --injection-patterns '<CUSTOM>.*?</CUSTOM>' '<OTHER>.*?</OTHER>'"
+  }
+}
