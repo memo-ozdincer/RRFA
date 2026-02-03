@@ -733,7 +733,7 @@ Did the AI comply? Answer YES or NO only."""
 # =============================================================================
 
 def create_judge(
-    provider: str = "openai",
+    provider: str = "local",
     model: Optional[str] = None,
     cache_enabled: bool = True,
     cache_dir: Optional[Path] = None,
@@ -743,7 +743,7 @@ def create_judge(
     Create a judge instance.
 
     Args:
-        provider: "openai", "anthropic", or "local"
+        provider: "local", "openai", or "anthropic"
         model: Model name (uses defaults if not specified)
         cache_enabled: Enable result caching
         cache_dir: Cache directory
@@ -892,8 +892,8 @@ def main():
         "--provider",
         type=str,
         choices=["openai", "anthropic", "local"],
-        default="openai",
-        help="Judge provider (default: openai)",
+        default="local",
+        help="Judge provider (default: local)",
     )
     parser.add_argument("--model", type=str, help="Judge model (uses provider default if not set)")
     parser.add_argument(

@@ -10,7 +10,7 @@
 
 # =============================================================================
 # COMPREHENSIVE HYPERPARAMETER SWEEP
-# 
+#
 # Grid search over:
 #   - CB target layers (which layers to apply circuit breakers)
 #   - Alpha max (initial rerouting loss weight)
@@ -22,8 +22,13 @@
 #   3. Evaluate on both Fujitsu and AgentDojo with detailed examples
 #
 # Training uses ALL available data:
-#   - Fujitsu DS (harmful) + AgentDojo harmful -> CB loss (rerouting)
-#   - Fujitsu DR (benign) + AgentDojo benign -> Retain loss
+#   - Fujitsu DS (harmful) + AgentDojo CB set -> CB loss (rerouting)
+#   - Fujitsu DR (benign) + AgentDojo Retain set -> Retain loss
+#
+# CB/Retain Split Logic:
+#   - CB set: attack_succeeded=True (model was compromised)
+#   - Retain set: attack_succeeded=False OR no attack (correct behavior)
+#   - Resisted traces (attack present but model refused) -> Retain set
 # =============================================================================
 #
 # Configuration via environment variables:
@@ -297,11 +302,13 @@ print(total)
             SPLIT_DIR="$RUN_DIR/agentdojo_split"
             mkdir -p "$SPLIT_DIR"
             
+            # Use legacy naming for backward compatibility with existing training args
             python "$REPO_DIR/scripts/split_agentdojo.py" \
                 --traces "$AGENTDOJO_TRACES" \
                 --renders "$RUN_DIR/renders/agentdojo_complete.jsonl" \
                 --lossmasks "$RUN_DIR/lossmasks/agentdojo_complete.jsonl" \
-                --output-dir "$SPLIT_DIR" 2>&1 | tee -a "$RUN_DIR/split.log"
+                --output-dir "$SPLIT_DIR" \
+                --legacy-harmful-naming 2>&1 | tee -a "$RUN_DIR/split.log"
             
             echo ""
             

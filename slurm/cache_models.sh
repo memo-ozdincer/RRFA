@@ -14,6 +14,7 @@ CACHE_DIR="$CB_SCRATCH/cache"
 # Models to cache
 MODELS=(
     "meta-llama/Llama-3.1-8B-Instruct"
+    "meta-llama/Llama-3.1-8B-Instruct"
 )
 
 echo "========================================"
@@ -76,3 +77,4 @@ echo "Cached models:"
 ls -la "$CACHE_DIR/hf/hub/" | grep "models--"
 echo ""
 echo "You can now run SLURM jobs with HF_HUB_OFFLINE=1"
+
