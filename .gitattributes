@@ -1,5 +1,7 @@
 # Only track raw Tier A data with LFS
 data/fujitsu/*.jsonl filter=lfs diff=lfs merge=lfs -text
-
+# LLMail-Inject large data files (Tier A raw)
+data/llmail_inject/*.jsonl filter=lfs diff=lfs merge=lfs -text
+data/llmail_inject/labelled_unique_submissions_*.json filter=lfs diff=lfs merge=lfs -text
 # Generated outputs (traces, renders, lossmasks) should NOT be tracked
 # They are in .gitignore - reproducible from pipeline

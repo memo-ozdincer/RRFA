@@ -3,6 +3,12 @@ data/webarena/llm_trajectories_v2
 .DS_Store
 related_repos/
 
+# External cloned repositories (not part of this project)
+llmail-inject-challenge/
+
+# PDF papers (available on arXiv)
+*.pdf
+
 # ============================================================
 # GENERATED DATA (reproducible from pipeline - do not track)
 # ============================================================

@@ -1,0 +1,28 @@
+{
+  "phase1": {
+    "a": "Phi-3 with Prompt Shield",
+    "b": "GPT with Prompt Shield",
+    "c": "Phi-3 with TaskTracker Phi3",
+    "d": "GPT with TaskTracker Phi3",
+    "e": "Phi-3 with Spotlight",
+    "f": "GPT with Spotlight",
+    "g": "Phi-3 with LLM Judge",
+    "h": "GPT with LLM Judge",
+    "i": "Phi-3 with all",
+    "j": "GPT with all"
+  },
+  "phase2": {
+    "k": "Phi-3 with Prompt Shield v2",
+    "l": "GPT with Prompt Shield v2",
+    "m": "Phi-3 with TaskTracker Phi3",
+    "n": "GPT with TaskTracker Phi3",
+    "o": "Phi-3 with TaskTracker Phi3.5 MoE",
+    "p": "GPT with TaskTracker Phi3.5 MoE",
+    "q": "Phi-3 with TaskTracker Phi4",
+    "r": "GPT with TaskTracker Phi4",
+    "s": "Phi-3 with LLM Judge",
+    "t": "GPT with LLM Judge",
+    "u": "Phi-3 with all (Phi4 + Prompt Shield v2 + LLM Judge)",
+    "v": "GPT with all (Phi4 + Prompt Shield v2 + LLM Judge)"
+  }
+}
