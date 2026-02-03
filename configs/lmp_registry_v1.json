@@ -32,6 +32,12 @@
       "description": "Loss only on tool call spans within assistant messages.",
       "compatible_with": ["harmful"]
     },
+    "assistant_and_tool": {
+      "name": "Assistant and Tool",
+      "strategy": "assistant_and_tool",
+      "description": "Loss on assistant messages AND tool output messages. Useful for training on tool-use traces where the tool response content is important.",
+      "compatible_with": ["harmful", "benign"]
+    },
     "action_prefix_only": {
       "name": "Action Prefix Only",
       "strategy": "action_prefix_only",
