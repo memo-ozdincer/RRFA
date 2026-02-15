@@ -63,6 +63,8 @@ export NUM_EXAMPLES="${NUM_EXAMPLES:-50}"
 export SHOW_EXAMPLES="${SHOW_EXAMPLES:-true}"
 export BATCH_SIZE="${BATCH_SIZE:-1}"
 export GRAD_ACCUM="${GRAD_ACCUM:-4}"
+export MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
+export LLMAIL_LIMIT="${LLMAIL_LIMIT:-}"  # e.g. LLMAIL_LIMIT=3000 to cap LLMail samples
 
 echo "Starting sweep_hparams_simple.sbatch..."
 echo "  ALPHAS: ${ALPHAS}"
@@ -146,11 +148,16 @@ generate_data() {
             
             # Special handling for LLMail vs generic
             if [[ "$name" == "LLMail-Inject" ]]; then
+                LIMIT_ARGS=()
+                if [[ -n "$LLMAIL_LIMIT" ]]; then
+                    LIMIT_ARGS+=(--llmail-inject-limit "$LLMAIL_LIMIT")
+                fi
                 python src/schemas/tools/ETL_A.py \
                     --llmail-inject "$raw_source" \
                     --output "$skeleton" \
                     --split train \
-                    --tool-schema "$schema"
+                    --tool-schema "$schema" \
+                    "${LIMIT_ARGS[@]}"
             else
                 echo "WARNING: No ETL_A logic defined for $name in simple script."
             fi
@@ -172,6 +179,7 @@ generate_data() {
                     --tool-schema "$schema" \
                     --mode ds \
                     --temperature-ds 0.7 \
+                    --max-model-len "$MAX_MODEL_LEN" \
                     --use-vllm
             fi
             
@@ -185,6 +193,7 @@ generate_data() {
                     --tool-schema "$schema" \
                     --mode dr \
                     --temperature-dr 0.3 \
+                    --max-model-len "$MAX_MODEL_LEN" \
                     --use-vllm
             fi
         else

@@ -178,6 +178,7 @@ TRIPLET_MIX_COS_WEIGHT="${TRIPLET_MIX_COS_WEIGHT:-0.5}"
 CB_LAYERS="${CB_LAYERS:-10,20}"
 LMP_POLICY="${LMP_POLICY:-assistant_only}"
 MAX_SEQ_LENGTH="${MAX_SEQ_LENGTH:-2048}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
 DTYPE="${DTYPE:-bfloat16}"
 LORA_R="${LORA_R:-16}"
 LORA_ALPHA="${LORA_ALPHA:-32}"
@@ -354,6 +355,7 @@ if [[ "$SKIP_GENERATE" != "true" ]]; then
                 --tool-schema "$dataset_tool_schema" \
                 --mode ds \
                 --temperature-ds "$TEMPERATURE_DS" \
+                --max-model-len "$MAX_MODEL_LEN" \
                 "${VLLM_ARGS[@]}"
             echo "  DS output: $ds_output ($(wc -l < "$ds_output") lines)"
         fi
@@ -367,6 +369,7 @@ if [[ "$SKIP_GENERATE" != "true" ]]; then
                 --tool-schema "$dataset_tool_schema" \
                 --mode dr \
                 --temperature-dr "$TEMPERATURE_DR" \
+                --max-model-len "$MAX_MODEL_LEN" \
                 "${VLLM_ARGS[@]}"
             echo "  DR output: $dr_output ($(wc -l < "$dr_output") lines)"
         fi

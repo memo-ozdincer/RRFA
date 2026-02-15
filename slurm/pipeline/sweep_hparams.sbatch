@@ -51,9 +51,12 @@
 # Eval/logging:
 #   LIMIT_EVAL, NUM_EXAMPLES, SHOW_EXAMPLES
 #
+# Data limits:
+#   LLMAIL_LIMIT (cap number of LLMail samples, e.g. 3000)
+#
 # Core training:
 #   LOSS_MODE, LOSS_WEIGHTING, BATCH_SIZE, LEARNING_RATE, WARMUP_STEPS,
-#   MAX_SEQ_LENGTH, DTYPE, LORA_R, LORA_ALPHA
+#   MAX_SEQ_LENGTH, MAX_MODEL_LEN, DTYPE, LORA_R, LORA_ALPHA
 #
 # Triplet parameters:
 #   TRIPLET_ALPHA_BENIGN, TRIPLET_BETA_HARMFUL, TRIPLET_GAMMA_KL,
@@ -141,6 +144,8 @@ WARMUP_STEPS="${WARMUP_STEPS:-20}"
 LORA_R="${LORA_R:-16}"
 LORA_ALPHA="${LORA_ALPHA:-32}"
 MAX_SEQ_LENGTH="${MAX_SEQ_LENGTH:-4096}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
+LLMAIL_LIMIT="${LLMAIL_LIMIT:-}"  # empty = no limit; e.g. 3000
 DTYPE="${DTYPE:-bfloat16}"
 LLMAIL_TOOL_SCHEMA="${LLMAIL_TOOL_SCHEMA:-$REPO_DIR/configs/tool_schemas/llmail_inject_v1.json}"
 LOSS_MODE="${LOSS_MODE:-triplet_full}"
@@ -315,7 +320,13 @@ for alpha in "${ALPHA_ARRAY[@]}"; do
                 basename=$(basename "$trace_file" .jsonl)
                 render_out="$RUN_DIR/renders/${basename}.jsonl"
                 lossmask_out="$RUN_DIR/lossmasks/${basename}.jsonl"
-                
+
+                # Apply LLMAIL_LIMIT to LLMail traces only
+                ETL_B_LIMIT_ARGS=()
+                if [[ -n "$LLMAIL_LIMIT" && "$basename" == llmail_inject_* ]]; then
+                    ETL_B_LIMIT_ARGS+=(--limit "$LLMAIL_LIMIT")
+                fi
+
                 echo "  Processing: $basename"
                 python src/schemas/tools/ETL_B.py \
                     --traces "$trace_file" \
@@ -323,7 +334,8 @@ for alpha in "${ALPHA_ARRAY[@]}"; do
                     --lossmask-out "$lossmask_out" \
                     --tokenizer "$TOKENIZER" \
                     --max-length 4096 \
-                    --policy-override "$policy" 2>&1 | tee -a "$RUN_DIR/etl_b.log"
+                    --policy-override "$policy" \
+                    "${ETL_B_LIMIT_ARGS[@]}" 2>&1 | tee -a "$RUN_DIR/etl_b.log"
             done
             etl_end=$(date +%s)
             echo "  ETL_B completed in $((etl_end - etl_start))s"
