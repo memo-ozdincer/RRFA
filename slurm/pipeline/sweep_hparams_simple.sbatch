@@ -71,6 +71,41 @@ echo "  Datasets: Fujitsu, AgentDojo, LLMail (auto-detected)"
 echo "  Logging: Compatible with scripts/visualize_sweep_results.py"
 
 # =============================================================================
+# Cache Setup (Offline Mode)
+# =============================================================================
+CB_SCRATCH="/scratch/memoozd/cb-scratch"
+CACHE_DIR="$CB_SCRATCH/cache"
+mkdir -p "$CACHE_DIR"/{hf/hub,hf/datasets,torch,wandb}
+
+export HF_HOME="$CACHE_DIR/hf"
+export HF_HUB_CACHE="$CACHE_DIR/hf/hub"
+export HF_DATASETS_CACHE="$CACHE_DIR/hf/datasets"
+export TORCH_HOME="$CACHE_DIR/torch"
+export WANDB_DIR="$CACHE_DIR/wandb"
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+
+# Resolve Tokenizer to Local Cache (for generate_completions.py)
+MODEL_NAME="meta-llama/Llama-3.1-8B-Instruct"
+MODEL_CACHE_DIR="$HF_HUB_CACHE/models--meta-llama--Llama-3.1-8B-Instruct"
+SNAPSHOT_ROOT="$MODEL_git/snapshots"
+
+if [[ -d "$SNAPSHOT_ROOT" ]]; then
+    SNAPSHOT_PATH=$(ls -1td "$SNAPSHOT_ROOT"/* 2>/dev/null | head -n 1)
+    if [[ -n "$SNAPSHOT_PATH" ]]; then
+        echo "Found local snapshot: $SNAPSHOT_PATH"
+        MODEL="$SNAPSHOT_PATH"
+    else
+        echo "WARNING: Snapshot directory exists but is empty: $SNAPSHOT_ROOT"
+        # Fallback to name, will fail if offline
+        MODEL="$MODEL_NAME"
+    fi
+else
+    echo "WARNING: Model not cached at: $MODEL_CACHE_DIR"
+    MODEL="$MODEL_NAME"
+fi
+
+# =============================================================================
 # Auto-Generation of Missing Data
 # =============================================================================
 # Check if Fujitsu DS/DR traces exist. If not, generate them.
@@ -81,7 +116,7 @@ FUJITSU_SKELETON="$TRACES_DIR/fujitsu_b4_skeletons.jsonl"
 FUJITSU_DS="$TRACES_DIR/fujitsu_b4_ds.jsonl"
 FUJITSU_DR="$TRACES_DIR/fujitsu_b4_dr.jsonl"
 TOOL_SCHEMA="configs/tool_schemas/b4_standard_v1.json"
-MODEL="meta-llama/Llama-3.1-8B-Instruct"
+# MODEL is now set above via cache resolution
 
 # LLMail paths
 LLMAIL_SKELETON="$TRACES_DIR/llmail_inject_skeleton.jsonl"

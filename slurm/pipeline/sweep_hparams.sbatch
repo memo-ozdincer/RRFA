@@ -133,14 +133,15 @@ LIMIT_EVAL="${LIMIT_EVAL:-$DEFAULT_LIMIT_EVAL}"
 NUM_EXAMPLES="${NUM_EXAMPLES:-$DEFAULT_NUM_EXAMPLES}"
 SHOW_EXAMPLES="${SHOW_EXAMPLES:-true}"
 
-# Fixed training params (matching sweep_policies.sbatch)
-BATCH_SIZE=1
-LEARNING_RATE="5e-5"
-WARMUP_STEPS=20
-LORA_R=16
-LORA_ALPHA=32
-MAX_SEQ_LENGTH=4096
-DTYPE="bfloat16"
+# Training params (configurable via env vars, safe defaults for single GPU)
+BATCH_SIZE="${BATCH_SIZE:-1}"
+GRAD_ACCUM="${GRAD_ACCUM:-4}"
+LEARNING_RATE="${LEARNING_RATE:-5e-5}"
+WARMUP_STEPS="${WARMUP_STEPS:-20}"
+LORA_R="${LORA_R:-16}"
+LORA_ALPHA="${LORA_ALPHA:-32}"
+MAX_SEQ_LENGTH="${MAX_SEQ_LENGTH:-4096}"
+DTYPE="${DTYPE:-bfloat16}"
 LLMAIL_TOOL_SCHEMA="${LLMAIL_TOOL_SCHEMA:-$REPO_DIR/configs/tool_schemas/llmail_inject_v1.json}"
 LOSS_MODE="${LOSS_MODE:-triplet_full}"
 LOSS_WEIGHTING="${LOSS_WEIGHTING:-dual}"
@@ -162,6 +163,7 @@ echo "  ALPHAS: $ALPHAS"
 echo "  LAYER_CONFIGS: $LAYER_CONFIGS"
 echo "  POLICIES: $POLICIES"
 echo "  BATCH_SIZE: $BATCH_SIZE"
+echo "  GRAD_ACCUM: $GRAD_ACCUM"
 echo "  LEARNING_RATE: $LEARNING_RATE"
 echo "  LOSS_MODE: $LOSS_MODE"
 echo "  LIMIT_EVAL: $LIMIT_EVAL"
@@ -401,7 +403,7 @@ print(total)
                 --warmup-steps "$WARMUP_STEPS"
                 --alpha-max "$alpha"
                 --max-seq-length "$MAX_SEQ_LENGTH"
-                --gradient-accumulation-steps 1
+                --gradient-accumulation-steps "$GRAD_ACCUM"
                 --loss-mode "$LOSS_MODE"
                 --loss-weighting "$LOSS_WEIGHTING"
                 --triplet-alpha-benign "$TRIPLET_ALPHA_BENIGN"
@@ -522,6 +524,43 @@ PYEOF
                             --output "$LLMAIL_OUTPUT" \
                             --limit "$LIMIT_EVAL" \
                             --dtype "$DTYPE" 2>&1 | tee -a "$RUN_DIR/eval/llmail.log"
+
+                        # Print LLMail examples
+                        if [[ "$SHOW_EXAMPLES" == "true" ]]; then
+                            PAIRED_FILE="${LLMAIL_OUTPUT%.json}.paired_outputs.jsonl"
+                            if [[ -f "$PAIRED_FILE" ]]; then
+                                echo ""
+                                echo "    ========================================"
+                                echo "    LLMAIL EXAMPLES: $RUN_NAME"
+                                echo "    ========================================"
+                                python3 << PYEOF
+import json
+
+with open('$PAIRED_FILE', 'r') as f:
+    pairs = [json.loads(line) for line in f if line.strip()]
+
+if not pairs:
+    print('    No paired outputs')
+    exit(0)
+
+print(f'    Pairs: {len(pairs)}')
+print()
+
+for i, p in enumerate(pairs[:$NUM_EXAMPLES], 1):
+    b_out = p.get('baseline_outcome', '?')
+    c_out = p.get('cb_outcome', '?')
+    b_tool = p.get('baseline_observed_tool') or 'none'
+    c_tool = p.get('cb_observed_tool') or 'none'
+    label = 'IMP' if b_tool == 'send_email' and c_tool != 'send_email' else ('REG' if b_tool != 'send_email' and c_tool == 'send_email' else 'SAME')
+    print(f'    [{i}] {label}: baseline_tool={b_tool} -> cb_tool={c_tool}')
+    print(f'    --- BASELINE RESPONSE ---')
+    print(p.get('baseline_response') or '(empty)')
+    print(f'    --- CB MODEL RESPONSE ---')
+    print(p.get('cb_response') or '(empty)')
+    print()
+PYEOF
+                            fi
+                        fi
                     fi
                     
                     # ---------------------------------------------------------
@@ -618,6 +657,25 @@ if 'output_comparison' in r:
     print(f'  AgentDojo Diff Rate:  {diff:.1%}')
 " 2>/dev/null || echo "  AgentDojo: (parse error)"
             fi
+            if [[ -f "$RUN_DIR/eval/llmail_eval.json" ]]; then
+                python3 -c "
+import json
+with open('$RUN_DIR/eval/llmail_eval.json') as f:
+    r = json.load(f)
+for key in ['baseline', 'cb_model']:
+    if key in r and 'llmail_attack' in r[key]:
+        la = r[key]['llmail_attack']
+        label = 'Baseline' if key == 'baseline' else 'CB'
+        print(f'  LLMail {label} ASR:    {la[\"attack_success_rate\"]:.1%}  (refusal: {la[\"refusal_rate\"]:.1%})')
+    if key in r and 'llmail_usefulness' in r[key]:
+        lu = r[key]['llmail_usefulness']
+        label = 'Baseline' if key == 'baseline' else 'CB'
+        print(f'  LLMail {label} Useful: {lu[\"usefulness_rate\"]:.1%}')
+if 'delta' in r:
+    if 'llmail_attack_asr' in r['delta']:
+        print(f'  LLMail Delta ASR:     {r[\"delta\"][\"llmail_attack_asr\"]:+.1%}')
+" 2>/dev/null || echo "  LLMail: (parse error)"
+            fi
             echo ""
             
         done
@@ -641,25 +699,29 @@ echo ""
 
 # Generate summary CSV
 SUMMARY_CSV="$SWEEP_DIR/summary.csv"
-echo "alpha,layers,policy,fujitsu_baseline_asr,fujitsu_cb_asr,fujitsu_delta,agentdojo_diff,status" > "$SUMMARY_CSV"
+echo "alpha,layers,policy,fujitsu_baseline_asr,fujitsu_cb_asr,fujitsu_delta,agentdojo_diff,llmail_baseline_asr,llmail_cb_asr,llmail_delta,llmail_usefulness,status" > "$SUMMARY_CSV"
 
 for run_dir in "$SWEEP_DIR"/a*; do
     if [[ -d "$run_dir" ]]; then
         run_name=$(basename "$run_dir")
-        
+
         # Parse run name to extract params
         # Format: a${alpha}_l${layers}_${policy}
         alpha=$(echo "$run_name" | sed -n 's/^a\([0-9.]*\)_.*/\1/p')
         layers=$(echo "$run_name" | sed -n 's/.*_l\([0-9_]*\)_.*/\1/p' | tr '_' ',')
         policy=$(echo "$run_name" | sed -n 's/.*_l[0-9_]*_\(.*\)/\1/p')
-        
+
         # Get metrics
         fujitsu_baseline="N/A"
         fujitsu_cb="N/A"
         fujitsu_delta="N/A"
         agentdojo_diff="N/A"
+        llmail_baseline="N/A"
+        llmail_cb="N/A"
+        llmail_delta="N/A"
+        llmail_useful="N/A"
         status="unknown"
-        
+
         if [[ -f "$run_dir/eval/fujitsu_eval.json" ]]; then
             read fujitsu_baseline fujitsu_cb fujitsu_delta < <(python3 -c "
 import json
@@ -672,7 +734,7 @@ print(baseline, cb, delta)
 " 2>/dev/null || echo "N/A N/A N/A")
             status="success"
         fi
-        
+
         if [[ -f "$run_dir/eval/agentdojo_eval.json" ]]; then
             agentdojo_diff=$(python3 -c "
 import json
@@ -681,8 +743,21 @@ with open('$run_dir/eval/agentdojo_eval.json') as f:
 print(r.get('output_comparison', {}).get('difference_rate', 'N/A'))
 " 2>/dev/null || echo "N/A")
         fi
-        
-        echo "$alpha,$layers,$policy,$fujitsu_baseline,$fujitsu_cb,$fujitsu_delta,$agentdojo_diff,$status" >> "$SUMMARY_CSV"
+
+        if [[ -f "$run_dir/eval/llmail_eval.json" ]]; then
+            read llmail_baseline llmail_cb llmail_delta llmail_useful < <(python3 -c "
+import json
+with open('$run_dir/eval/llmail_eval.json') as f:
+    r = json.load(f)
+bl = r.get('baseline', {}).get('llmail_attack', {}).get('attack_success_rate', 'N/A')
+cb = r.get('cb_model', {}).get('llmail_attack', {}).get('attack_success_rate', 'N/A')
+d = r.get('delta', {}).get('llmail_attack_asr', 'N/A')
+u = r.get('cb_model', {}).get('llmail_usefulness', {}).get('usefulness_rate', 'N/A')
+print(bl, cb, d, u)
+" 2>/dev/null || echo "N/A N/A N/A N/A")
+        fi
+
+        echo "$alpha,$layers,$policy,$fujitsu_baseline,$fujitsu_cb,$fujitsu_delta,$agentdojo_diff,$llmail_baseline,$llmail_cb,$llmail_delta,$llmail_useful,$status" >> "$SUMMARY_CSV"
     fi
 done
 
@@ -703,7 +778,7 @@ try:
     with open('$SUMMARY_CSV', 'r') as f:
         reader = csv.DictReader(f)
         rows = list(reader)
-    
+
     # Filter valid results and sort by CB ASR
     valid = []
     for r in rows:
@@ -712,7 +787,7 @@ try:
             valid.append((cb_asr, r))
         except:
             pass
-    
+
     if valid:
         valid.sort(key=lambda x: x[0])
         best = valid[0]
@@ -723,9 +798,22 @@ try:
         print(f'  Baseline ASR: {best[1][\"fujitsu_baseline_asr\"]}')
         print(f'  Delta: {best[1][\"fujitsu_delta\"]}')
         print(f'  AgentDojo Diff: {best[1][\"agentdojo_diff\"]}')
+        llmail_cb = best[1].get('llmail_cb_asr', 'N/A')
+        llmail_useful = best[1].get('llmail_usefulness', 'N/A')
+        if llmail_cb != 'N/A':
+            print(f'  LLMail CB ASR: {llmail_cb}')
+        if llmail_useful != 'N/A':
+            print(f'  LLMail Usefulness: {llmail_useful}')
 except Exception as e:
     print(f'Could not analyze results: {e}')
 " 2>/dev/null || echo "(analysis failed)"
+
+# =============================================================================
+# Tradeoff Visualization
+# =============================================================================
+echo ""
+echo "Generating tradeoff visualizations..."
+python "$REPO_DIR/scripts/plot_tradeoff.py" --sweep-dir "$SWEEP_DIR" --output "$SWEEP_DIR/plots" 2>&1 || echo "(plot generation skipped - install matplotlib for plots)"
 
 echo ""
 echo "Finished at: $(date)"

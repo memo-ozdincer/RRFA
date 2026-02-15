@@ -324,13 +324,7 @@ def print_sample_detail(
         if schema_prompt:
             print(f"\n{CYAN}📋 SYSTEM PROMPT (from schema - {YELLOW}may not match dataset{RESET}):{RESET}")
             print(f"   {truncate_text(schema_prompt, max_len)}")
-    
-            injections.append({
-                "message_index": i,
-                "role": msg.get("role", "unknown"),
-                "injection_text": match.strip(),
-                "content_preview": content,
-            })
+
     if trace:
         user_query = get_user_query(trace)
         if user_query:
@@ -510,103 +504,90 @@ def analyze_run(
     if llmail_eval_json.exists():
         eval_data = load_json(llmail_eval_json)
         paired = load_jsonl(llmail_paired)
-        
-        baseline = eval_data.get("baseline", {}).get("tool_flip_asr", {})
-        cb = eval_data.get("cb_model", {}).get("tool_flip_asr", {})
+
+        # Use new llmail_attack metrics (preferred) with fallback to tool_flip_asr
+        baseline_la = eval_data.get("baseline", {}).get("llmail_attack", {})
+        cb_la = eval_data.get("cb_model", {}).get("llmail_attack", {})
+        cb_lu = eval_data.get("cb_model", {}).get("llmail_usefulness", {})
         delta = eval_data.get("delta", {})
-        
-        results["llmail"] = {
-            "baseline_asr": baseline.get("attack_success_rate", 0) * 100,
-            "cb_asr": cb.get("attack_success_rate", 0) * 100,
-            "delta": delta.get("tool_flip_asr", 0) * 100,
-            "total": len(paired),
-            "improvements": sum(1 for p in paired if p.get("baseline_outcome") == "attack_success" and p.get("cb_outcome") != "attack_success"),
-            "regressions": sum(1 for p in paired if p.get("baseline_outcome") != "attack_success" and p.get("cb_outcome") == "attack_success"),
-        }
-        
+
+        if baseline_la:
+            results["llmail"] = {
+                "baseline_asr": baseline_la.get("attack_success_rate", 0) * 100,
+                "cb_asr": cb_la.get("attack_success_rate", 0) * 100,
+                "delta": delta.get("llmail_attack_asr", 0) * 100,
+                "refusal_rate": cb_la.get("refusal_rate", 0) * 100,
+                "usefulness": cb_lu.get("usefulness_rate", 0) * 100,
+                "total": len(paired),
+                "improvements": sum(1 for p in paired if p.get("baseline_outcome") == "attack_success" and p.get("cb_outcome") != "attack_success"),
+                "regressions": sum(1 for p in paired if p.get("baseline_outcome") != "attack_success" and p.get("cb_outcome") == "attack_success"),
+            }
+        else:
+            # Fallback to old tool_flip_asr (for sweeps run before this update)
+            baseline = eval_data.get("baseline", {}).get("tool_flip_asr", {})
+            cb = eval_data.get("cb_model", {}).get("tool_flip_asr", {})
+            results["llmail"] = {
+                "baseline_asr": baseline.get("attack_success_rate", 0) * 100,
+                "cb_asr": cb.get("attack_success_rate", 0) * 100,
+                "delta": delta.get("tool_flip_asr", 0) * 100,
+                "total": len(paired),
+                "improvements": sum(1 for p in paired if p.get("baseline_outcome") == "attack_success" and p.get("cb_outcome") != "attack_success"),
+                "regressions": sum(1 for p in paired if p.get("baseline_outcome") != "attack_success" and p.get("cb_outcome") == "attack_success"),
+            }
+
         # Show sample details if requested
         if show_samples > 0 and paired:
             print(f"\n{'#'*80}")
             print(f"# LLMAIL-INJECT SAMPLES: {run_dir.name}")
             print(f"{'#'*80}")
-            
-            # Filter samples
+
             if filter_success:
                 samples_to_show = [
-                    p for p in paired 
+                    p for p in paired
                     if p.get("baseline_outcome") == "attack_success" and p.get("cb_outcome") != "attack_success"
                 ][:show_samples]
             elif filter_failure:
                 samples_to_show = [
-                    p for p in paired 
+                    p for p in paired
                     if p.get("cb_outcome") == "attack_success"
                 ][:show_samples]
             else:
                 samples_to_show = paired[:show_samples]
-            
+
             for sample in samples_to_show:
                 sample_id = sample.get("id", "")
                 trace = traces_index.get(sample_id)
                 print_sample_detail(sample, trace, tool_schema, show_full, use_color)
-    
-    return results
-    if agentdojo_eval_json.exists():
-        eval_data = load_json(agentdojo_eval_json)
-        paired = load_jsonl(agentdojo_paired)
-        
-        output_comparison = eval_data.get("output_comparison", {})
-        
-        results["agentdojo"] = {
-            "total": output_comparison.get("total_compared", 0),
-            "different": output_comparison.get("different", 0),
-            "diff_rate": output_comparison.get("difference_rate", 0) * 100,
-        }
-        
-        # Show sample details if requested
-        if show_samples > 0 and paired:
-            print(f"\n{'#'*80}")
-            print(f"# AGENTDOJO SAMPLES: {run_dir.name}")
-            print(f"{'#'*80}")
-            
-            # Filter to samples with different responses
-            different = [p for p in paired if p.get("responses_differ")]
-            samples_to_show = different[:show_samples] if different else paired[:show_samples]
-            
-            for sample in samples_to_show:
-                sample_id = sample.get("id", "")
-                trace = traces_index.get(sample_id)
-                print_sample_detail(sample, trace, tool_schema, show_full, use_color)
-    
+
     # ---------------------------------------------------------
     # AgentDojo Analysis
     # ---------------------------------------------------------
     if agentdojo_eval_json.exists():
         eval_data = load_json(agentdojo_eval_json)
         paired = load_jsonl(agentdojo_paired)
-        
+
         output_comparison = eval_data.get("output_comparison", {})
-        
+
         results["agentdojo"] = {
             "total": output_comparison.get("total_compared", 0),
             "different": output_comparison.get("different", 0),
             "diff_rate": output_comparison.get("difference_rate", 0) * 100,
         }
-        
+
         # Show sample details if requested
         if show_samples > 0 and paired:
             print(f"\n{'#'*80}")
             print(f"# AGENTDOJO SAMPLES: {run_dir.name}")
             print(f"{'#'*80}")
-            
-            # Filter to samples with different responses
+
             different = [p for p in paired if p.get("responses_differ")]
             samples_to_show = different[:show_samples] if different else paired[:show_samples]
-            
+
             for sample in samples_to_show:
                 sample_id = sample.get("id", "")
                 trace = traces_index.get(sample_id)
                 print_sample_detail(sample, trace, tool_schema, show_full, use_color)
-    
+
     return results
 
 
