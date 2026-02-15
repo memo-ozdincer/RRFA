@@ -1341,8 +1341,15 @@ class CircuitBreakerTrainer:
 
             if needs_frozen:
                 with torch.no_grad():
-                    # 1. Harmful
-                    frozen_outputs_h = self.frozen_model(
+                    # 1. Harmful - OPTIMIZED: Skip LM Head
+                    # Call .model directly to avoid computing logits (saves memory)
+                    # Check for PEFT/base model structure
+                    if hasattr(self.frozen_model, "model"):
+                        frozen_base = self.frozen_model.model
+                    else:
+                        frozen_base = self.frozen_model
+
+                    frozen_outputs_h = frozen_base(
                         input_ids=harmful_input_ids,
                         attention_mask=harmful_attention_mask,
                         output_hidden_states=True,
@@ -1353,8 +1360,9 @@ class CircuitBreakerTrainer:
                         frozen_outputs_h, self.config.cb_target_layers
                     )
                     del frozen_outputs_h
+                    torch.cuda.empty_cache()
 
-                    # 2. Benign
+                    # 2. Benign - Needs Logits (Keep full forward)
                     frozen_outputs_b = self.frozen_model(
                         input_ids=benign_input_ids,
                         attention_mask=benign_attention_mask,
@@ -1367,6 +1375,7 @@ class CircuitBreakerTrainer:
                     )
                     teacher_logits_benign = frozen_outputs_b.logits
                     del frozen_outputs_b
+                    torch.cuda.empty_cache()
             else:
                 harmful_frozen_reps = {}
                 benign_frozen_reps = {}
