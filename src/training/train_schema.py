@@ -156,7 +156,7 @@ class SchemaDataset(Dataset):
         def _pad(values: List[Any], value: Any) -> List[Any]:
             if len(values) < self.max_length:
                 return values + [value] * (self.max_length - len(values))
-            return values
+            return values[:self.max_length]
 
         input_ids = _pad(input_ids, self.pad_token_id)
         attention_mask = _pad(attention_mask, 0)
