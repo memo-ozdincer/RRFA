@@ -91,6 +91,32 @@ datasets:
       simulated_tool_field: "tool_attack.observed_tool"
 
   # ---------------------------------------------------------------------------
+  # LLMail-Inject - Email Prompt Injection Challenge (Skeleton)
+  # ---------------------------------------------------------------------------
+  llmail_inject:
+    description: "LLMail-Inject email prompt injection challenge traces"
+    type: skeleton
+
+    split:
+      method: generate_ds_dr
+      generation:
+        ds_temperature: 0.7
+        dr_temperature: 0.3
+
+    labels:
+      attack_present_check: "always_true"
+      attack_succeeded_field: "labels.attack_succeeded"
+
+    injection_patterns:
+      preset: "common"
+
+    evaluation:
+      use_sample_context: false
+      eval_mode: "tool_flip"
+      expected_tool_field: "tool_attack.expected_tool"
+      simulated_tool_field: "tool_attack.observed_tool"
+
+  # ---------------------------------------------------------------------------
   # Template for new datasets requiring judge evaluation
   # ---------------------------------------------------------------------------
   _template_judge_eval:

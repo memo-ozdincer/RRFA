@@ -128,7 +128,7 @@ Raw JSONL              ETL_A.py           generate_completions.py      ETL_B.py 
 # Convert Phase 1 to B1 skeleton traces
 python src/schemas/tools/ETL_A.py \
     --llmail-inject data/llmail_inject/raw_submissions_phase1.jsonl \
-    --output $CB_SCRATCH/data/traces/llmail_inject_skeletons.jsonl \
+    --output $CB_SCRATCH/data/traces/llmail_inject_skeleton.jsonl \
     --split train
 
 # Test with limit
@@ -183,13 +183,9 @@ Fill skeleton traces with model-generated assistant responses:
 
 ```bash
 # Generate DS (attack-following) and DR (attack-resisting) traces
-sbatch slurm/pipeline/02_fill_skeletons.sbatch
-
-# Or run directly:
-INPUT_TRACES=$CB_SCRATCH/data/traces/llmail_inject_skeletons.jsonl \
-TOOL_SCHEMA=configs/tool_schemas/llmail_inject_v1.json \
-MODE=both \
-sbatch slurm/pipeline/02_fill_skeletons.sbatch
+# (via canonical pipeline entrypoint)
+SKIP_ETL_A=true SKIP_ETL_B=true SKIP_SPLIT=true SKIP_TRAIN=true SKIP_EVAL=true \
+sbatch slurm/pipeline/unified_pipeline.sbatch
 ```
 
 **DS Generation** (follows_injection):
@@ -229,12 +225,12 @@ python src/schemas/tools/ETL_B.py \
 Use the standard sweep to test all configurations:
 
 ```bash
-# Add LLMail-Inject to sweep_hparams_simple.sbatch input traces:
+# Add LLMail-Inject to sweep_hparams.sbatch input traces:
 # TRACES_DIR="$CB_SCRATCH/data/traces"
 # LLMAIL_DS_TRACES="$TRACES_DIR/llmail_inject_ds.jsonl"
 # LLMAIL_DR_TRACES="$TRACES_DIR/llmail_inject_dr.jsonl"
 
-sbatch slurm/pipeline/sweep_hparams_simple.sbatch
+sbatch slurm/pipeline/sweep_hparams.sbatch
 ```
 
 The sweep tests all combinations of:
@@ -262,7 +258,7 @@ The sweep tests all combinations of:
 ```python
 import json
 
-traces = [json.loads(l) for l in open("data/traces/llmail_inject_skeletons.jsonl")]
+traces = [json.loads(l) for l in open("data/traces/llmail_inject_skeleton.jsonl")]
 
 # Filter by defense type
 prompt_shield = [t for t in traces 
@@ -337,18 +333,16 @@ The tool schema at `configs/tool_schemas/llmail_inject_v1.json` defines:
 python src/schemas/tools/ETL_A.py \
     --llmail-inject data/llmail_inject/raw_submissions_phase1.jsonl \
     --llmail-inject-limit 10000 \
-    --output data/traces/llmail_inject_skeletons.jsonl \
+    --output data/traces/llmail_inject_skeleton.jsonl \
     --split train
 
 # 2. Generate completions (requires GPU)
-INPUT_TRACES=data/traces/llmail_inject_skeletons.jsonl \
-TOOL_SCHEMA=configs/tool_schemas/llmail_inject_v1.json \
-MODE=both \
-sbatch slurm/pipeline/02_fill_skeletons.sbatch
+SKIP_ETL_A=true SKIP_ETL_B=true SKIP_SPLIT=true SKIP_TRAIN=true SKIP_EVAL=true \
+sbatch slurm/pipeline/unified_pipeline.sbatch
 
 # 3. ETL_B + Training (via sweep)
 # Add to sweep input traces and run
-sbatch slurm/pipeline/sweep_hparams_simple.sbatch
+sbatch slurm/pipeline/sweep_hparams.sbatch
 ```
 
 ---

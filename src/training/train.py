@@ -51,6 +51,7 @@ if os.path.exists(cache_root):
 
 from src.training.config import get_config, CONFIG_PRESETS
 from src.training.trainer import CircuitBreakerTrainer
+from src.training.losses import SUPPORTED_LOSS_MODES, SUPPORTED_DISTANCES
 
 
 def parse_args():
@@ -133,11 +134,65 @@ def parse_args():
 
     # Loss weighting
     parser.add_argument(
+        "--loss-mode",
+        type=str,
+        default=None,
+        choices=list(SUPPORTED_LOSS_MODES),
+        help="Core loss objective: triplet_full, legacy_schema, or legacy_cb",
+    )
+    parser.add_argument(
         "--loss-weighting",
         type=str,
         default=None,
         choices=["single_alpha", "dual"],
         help="Loss weighting strategy: 'single_alpha' (original) or 'dual' (paper-style)",
+    )
+
+    # Triplet loss parameters
+    parser.add_argument("--triplet-alpha-benign", type=float, default=None, help="Triplet benign weight (alpha)")
+    parser.add_argument("--triplet-beta-harmful", type=float, default=None, help="Triplet harmful weight (beta)")
+    parser.add_argument("--triplet-gamma-kl", type=float, default=None, help="Triplet KL weight (gamma)")
+    parser.add_argument("--triplet-margin-benign", type=float, default=None, help="Triplet benign margin (m_b)")
+    parser.add_argument("--triplet-margin-harmful", type=float, default=None, help="Triplet harmful margin (m_h)")
+    parser.add_argument(
+        "--triplet-benign-positive-distance",
+        type=str,
+        default=None,
+        choices=list(SUPPORTED_DISTANCES),
+        help="Distance for d_bp in benign triplet term",
+    )
+    parser.add_argument(
+        "--triplet-benign-negative-distance",
+        type=str,
+        default=None,
+        choices=list(SUPPORTED_DISTANCES),
+        help="Distance for d_bn in benign triplet term",
+    )
+    parser.add_argument(
+        "--triplet-harmful-positive-distance",
+        type=str,
+        default=None,
+        choices=list(SUPPORTED_DISTANCES),
+        help="Distance for d_hp in harmful triplet term",
+    )
+    parser.add_argument(
+        "--triplet-harmful-negative-distance",
+        type=str,
+        default=None,
+        choices=list(SUPPORTED_DISTANCES),
+        help="Distance for d_hn in harmful triplet term",
+    )
+    parser.add_argument(
+        "--triplet-mix-l2-weight",
+        type=float,
+        default=None,
+        help="L2 coefficient for dmix distance",
+    )
+    parser.add_argument(
+        "--triplet-mix-cos-weight",
+        type=float,
+        default=None,
+        help="Cosine coefficient for dmix distance",
     )
 
     # Knowledge Distillation (KL divergence)
@@ -281,6 +336,8 @@ def main():
         overrides['output_dir'] = args.output_dir
     if args.loss_weighting:
         overrides['loss_weighting'] = args.loss_weighting
+    if args.loss_mode:
+        overrides['loss_mode'] = args.loss_mode
     if args.wandb_project:
         overrides['wandb_project'] = args.wandb_project
     if args.wandb_entity:
@@ -311,6 +368,28 @@ def main():
         overrides['beta_kl'] = args.beta_kl
     if args.kl_temperature is not None:
         overrides['kl_temperature'] = args.kl_temperature
+    if args.triplet_alpha_benign is not None:
+        overrides['triplet_alpha_benign'] = args.triplet_alpha_benign
+    if args.triplet_beta_harmful is not None:
+        overrides['triplet_beta_harmful'] = args.triplet_beta_harmful
+    if args.triplet_gamma_kl is not None:
+        overrides['triplet_gamma_kl'] = args.triplet_gamma_kl
+    if args.triplet_margin_benign is not None:
+        overrides['triplet_margin_benign'] = args.triplet_margin_benign
+    if args.triplet_margin_harmful is not None:
+        overrides['triplet_margin_harmful'] = args.triplet_margin_harmful
+    if args.triplet_benign_positive_distance:
+        overrides['triplet_benign_positive_distance'] = args.triplet_benign_positive_distance
+    if args.triplet_benign_negative_distance:
+        overrides['triplet_benign_negative_distance'] = args.triplet_benign_negative_distance
+    if args.triplet_harmful_positive_distance:
+        overrides['triplet_harmful_positive_distance'] = args.triplet_harmful_positive_distance
+    if args.triplet_harmful_negative_distance:
+        overrides['triplet_harmful_negative_distance'] = args.triplet_harmful_negative_distance
+    if args.triplet_mix_l2_weight is not None:
+        overrides['triplet_mix_l2_weight'] = args.triplet_mix_l2_weight
+    if args.triplet_mix_cos_weight is not None:
+        overrides['triplet_mix_cos_weight'] = args.triplet_mix_cos_weight
 
     # Get config with preset and overrides
     config = get_config(args.preset, **overrides)
@@ -334,6 +413,7 @@ def main():
     print(f"  Batch Size: {config.batch_size}")
     print(f"  Gradient Accumulation: {config.gradient_accumulation_steps}")
     print(f"  CB Target Layers: {config.cb_target_layers}")
+    print(f"  Loss Mode: {config.loss_mode}")
     print(f"  Representation Extraction: {config.representation_extraction}")
     print(f"  LoRA Rank: {config.lora.r}")
     print(f"  LoRA Alpha: {config.lora.alpha}")
@@ -341,6 +421,8 @@ def main():
     print(f"  Output Dir: {config.output_dir}")
     print(f"  KL Beta: {config.beta_kl}")
     print(f"  KL Temperature: {config.kl_temperature}")
+    print(f"  Triplet Weights: alpha={config.triplet_alpha_benign}, beta={config.triplet_beta_harmful}, gamma={config.triplet_gamma_kl}")
+    print(f"  Triplet Margins: mb={config.triplet_margin_benign}, mh={config.triplet_margin_harmful}")
     print(f"  WandB: {config.use_wandb}")
     print("=" * 60)
     

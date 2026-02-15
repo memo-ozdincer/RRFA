@@ -388,6 +388,12 @@ def _extract_sample_tools_and_system(sample: Dict[str, Any]) -> Tuple[Optional[L
     # Check for embedded tools in sample
     if 'tools' in sample:
         tools = sample['tools']
+    elif 'raw_metadata' in sample:
+        # Check raw_metadata for tools (AgentDojo often stores them here)
+        raw_meta = sample.get('raw_metadata', {})
+        source_fields = raw_meta.get('source_fields', {})
+        if 'tools' in source_fields:
+            tools = source_fields['tools']
     
     # Check messages for system prompt
     messages = sample.get('messages', [])
@@ -518,6 +524,9 @@ def _evaluate_model_on_samples(
     # If sample context is enabled but no tools are embedded, restrict schema tools to
     # those actually observed in the dataset to avoid spurious tool calls (e.g., search_web).
     if use_sample_context and not sample_tools:
+        # WARNING: Fallback to schema tools is dangerous if schema doesn't match dataset
+        logger.warning("Using sample context but NO tools found in sample! Falling back to schema tools.")
+        
         tool_names = set()
         for s in eval_samples:
             for m in s.get("messages", []):
@@ -526,11 +535,21 @@ def _evaluate_model_on_samples(
                     name = fn.get("name")
                     if name:
                         tool_names.add(name)
+        
         if tool_names:
+            logger.info(f"Observed tools in dataset: {sorted(tool_names)}")
+            # Only filter if we have observed tools
             filtered = [t for t in tools if (t.get("function") or {}).get("name") in tool_names]
             if filtered:
                 actual_tools = filtered
-                logger.info(f"Using filtered schema tools ({len(actual_tools)} tools): {sorted(tool_names)}")
+                logger.info(f"Filtered schema tools to match observed ({len(actual_tools)} tools)")
+            else:
+                logger.warning("CRITICAL: No schema tools match observed tools! Model will see WRONG tools.")
+                # We keep actual_tools as full schema, but warn heavily
+    elif use_sample_context and sample_tools:
+        # We found tools in the sample, use them
+        actual_tools = sample_tools
+        logger.info(f"Using sample-embedded tools ({len(actual_tools)} tools)")
 
     tool_flip = evaluate_tool_flip_asr(
         model, tokenizer, eval_samples, actual_tools, actual_system_prompt, verbose

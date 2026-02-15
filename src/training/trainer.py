@@ -48,6 +48,19 @@ from accelerate.utils import set_seed, DistributedDataParallelKwargs
 
 from .config import CircuitBreakerConfig
 from .hf_utils import resolve_hf_token, resolve_local_model_path
+from .losses import (
+    LOSS_MODE_LEGACY_CB,
+    LOSS_MODE_LEGACY_SCHEMA,
+    LOSS_MODE_TRIPLET_FULL,
+    SUPPORTED_LOSS_MODES,
+    kl_divergence_loss as core_kl_divergence_loss,
+    pooled_representations,
+    random_reroute_loss,
+    reroute_loss_relu_cos,
+    retain_ce_loss,
+    retain_loss_l2,
+    triplet_full_loss,
+)
 from src.utils.wandb_logging import (
     build_wandb_init_kwargs,
     config_to_dict_for_wandb,
@@ -175,63 +188,13 @@ def kl_divergence_loss(
     loss_mask: Optional[torch.Tensor] = None,
     temperature: float = 1.0,
 ) -> torch.Tensor:
-    """
-    KL Divergence Loss for Knowledge Distillation on benign tokens.
-
-    Computes token-level KL divergence between teacher and student distributions,
-    masked to benign tokens only. This helps preserve the model's original
-    behavior on benign inputs by matching its output distribution to the teacher.
-
-    Formula: D_KL(teacher || student) = sum_v p(v) * (log p(v) - log q(v))
-    where p = teacher probs, q = student probs
-
-    Args:
-        student_logits: Logits from trainable model (batch, seq_len, vocab_size)
-        teacher_logits: Logits from frozen teacher model (batch, seq_len, vocab_size)
-        attention_mask: Mask for padding tokens (batch, seq_len)
-        loss_mask: Mask for benign tokens (batch, seq_len), 1 = compute loss
-        temperature: Temperature for softmax (higher = softer distributions)
-
-    Returns:
-        Scalar KL divergence loss, masked and normalized
-    """
-    T = temperature
-
-    # Convert to log-probabilities and probabilities
-    # student: log q, teacher: p
-    student_log_probs = F.log_softmax(student_logits / T, dim=-1)  # (B, S, V)
-    teacher_probs = F.softmax(teacher_logits / T, dim=-1)          # (B, S, V)
-
-    # KL divergence per token: sum over vocabulary
-    # F.kl_div expects input=log_probs, target=probs
-    kl_per_token = F.kl_div(
-        student_log_probs,
-        teacher_probs,
-        reduction="none",  # (B, S, V)
-        log_target=False,  # teacher_probs are probabilities, not log-probs
-    ).sum(dim=-1)  # Sum over vocab -> (B, S)
-
-    # Combine attention_mask and loss_mask
-    combined_mask = attention_mask
-    if loss_mask is not None:
-        if combined_mask is not None:
-            combined_mask = combined_mask * loss_mask
-        else:
-            combined_mask = loss_mask
-
-    # Apply mask and normalize
-    if combined_mask is not None:
-        mask_float = combined_mask.float()
-        kl_masked = (kl_per_token * mask_float).sum()
-        num_tokens = mask_float.sum().clamp_min(1.0)
-        kl_loss = kl_masked / num_tokens
-    else:
-        kl_loss = kl_per_token.mean()
-
-    # Scale by T^2 (standard KD practice when using temperature)
-    kl_loss = kl_loss * (T * T)
-
-    return kl_loss
+    return core_kl_divergence_loss(
+        student_logits=student_logits,
+        teacher_logits=teacher_logits,
+        attention_mask=attention_mask,
+        loss_mask=loss_mask,
+        temperature=temperature,
+    )
 
 
 def reroute_loss(
@@ -242,108 +205,17 @@ def reroute_loss(
     loss_mask: Optional[torch.Tensor] = None,
     return_metrics: bool = False,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, float]]]:
-    """
-    Rerouting Loss (L_rr): Push harmful representations to be orthogonal.
-
-    Formula: L_rr = ReLU(cosine_similarity(h_model, h_frozen))
-
-    This encourages the model's representation of harmful content to be
-    orthogonal (cos_sim ≈ 0) or opposite (cos_sim < 0) to the frozen model's.
-
-    AGENTIC ENHANCEMENT: loss_mask allows applying loss only on specific tokens
-    (e.g., assistant completion tokens, tool call arguments) rather than the
-    full sequence. This is critical for completion-based training.
-
-    STAGE 1 FIX: Now returns explicit metrics about what cos_sim is computed
-    against (model vs frozen baseline) for debugging reroute effectiveness.
-
-    Args:
-        model_reps: Hidden states from trainable model {layer_idx: tensor}
-        frozen_reps: Hidden states from frozen reference model (BASELINE)
-        target_layers: Which layers to compute loss on
-        attention_mask: Optional mask to ignore padding tokens
-        loss_mask: Optional mask for targeted loss (e.g., completion tokens only)
-            If provided, loss is computed only on tokens where loss_mask=1
-        return_metrics: If True, return (loss, metrics_dict) for logging
-
-    Returns:
-        Scalar loss tensor, or (loss, metrics) if return_metrics=True
-        
-    Metrics dict contains:
-        - cos_sim_mean: Mean cosine similarity BEFORE ReLU (should decrease during training)
-        - cos_sim_positive_frac: Fraction of tokens with positive cos_sim
-        - target_type: Always "frozen_baseline" to clarify what we're comparing to
-    """
-    total_loss = 0.0
-    num_layers = 0
-    all_cos_sims = []
-
-    # Combine attention_mask and loss_mask
-    combined_mask = attention_mask
-    if loss_mask is not None:
-        if combined_mask is not None:
-            combined_mask = combined_mask * loss_mask
-        else:
-            combined_mask = loss_mask
-
-    for layer_idx in target_layers:
-        if layer_idx not in model_reps or layer_idx not in frozen_reps:
-            continue
-
-        h_model = model_reps[layer_idx]  # (batch, seq_len, hidden_dim)
-        h_frozen = frozen_reps[layer_idx]
-
-        # Compute cosine similarity along hidden dimension
-        # Normalize along last dimension
-        h_model_norm = F.normalize(h_model, p=2, dim=-1)
-        h_frozen_norm = F.normalize(h_frozen, p=2, dim=-1)
-
-        # Cosine similarity per token
-        cos_sim = (h_model_norm * h_frozen_norm).sum(dim=-1)  # (batch, seq_len)
-
-        # Store raw cos_sim for metrics
-        if return_metrics:
-            if combined_mask is not None:
-                masked_cos_sim = cos_sim[combined_mask.bool()]
-            else:
-                masked_cos_sim = cos_sim.flatten()
-            all_cos_sims.append(masked_cos_sim.detach())
-
-        # Apply ReLU: only penalize positive similarity
-        relu_cos = F.relu(cos_sim)
-
-        # Apply combined mask if provided (ignore padding + non-target tokens)
-        if combined_mask is not None:
-            relu_cos = relu_cos * combined_mask.float()
-            # Mean over masked tokens
-            loss = relu_cos.sum() / (combined_mask.sum() + 1e-8)
-        else:
-            loss = relu_cos.mean()
-
-        total_loss += loss
-        num_layers += 1
-
-    final_loss = total_loss / max(num_layers, 1)
-
+    loss, metrics = reroute_loss_relu_cos(
+        model_reps=model_reps,
+        frozen_reps=frozen_reps,
+        target_layers=target_layers,
+        attention_mask=attention_mask,
+        loss_mask=loss_mask,
+        return_metrics=return_metrics,
+    )
     if return_metrics:
-        if all_cos_sims:
-            all_cos_sims = torch.cat(all_cos_sims)
-            metrics = {
-                "cos_sim_mean": all_cos_sims.mean().item(),
-                "cos_sim_std": all_cos_sims.std().item(),
-                "cos_sim_positive_frac": (all_cos_sims > 0).float().mean().item(),
-                "target_type": "frozen_baseline",  # EXPLICIT: we compare to frozen baseline
-            }
-        else:
-            metrics = {
-                "cos_sim_mean": 0.0,
-                "cos_sim_std": 0.0,
-                "cos_sim_positive_frac": 0.0,
-                "target_type": "frozen_baseline",
-            }
-        return final_loss, metrics
-    
-    return final_loss
+        return loss, metrics or {}
+    return loss
 
 
 def retain_loss(
@@ -353,59 +225,13 @@ def retain_loss(
     attention_mask: Optional[torch.Tensor] = None,
     loss_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """
-    Retain Loss (L_ret): Preserve benign representations.
-
-    Formula: L_ret = ||h_model - h_frozen||_2
-
-    This encourages the model to keep benign representations close to the
-    original frozen model's representations.
-
-    AGENTIC ENHANCEMENT: loss_mask allows applying loss only on specific tokens
-    (e.g., assistant completion tokens) rather than the full sequence.
-
-    Args:
-        model_reps: Hidden states from trainable model {layer_idx: tensor}
-        frozen_reps: Hidden states from frozen reference model
-        target_layers: Which layers to compute loss on
-        attention_mask: Optional mask to ignore padding tokens
-        loss_mask: Optional mask for targeted loss (e.g., completion tokens only)
-
-    Returns:
-        Scalar loss tensor
-    """
-    total_loss = 0.0
-    num_layers = 0
-
-    # Combine attention_mask and loss_mask
-    combined_mask = attention_mask
-    if loss_mask is not None:
-        if combined_mask is not None:
-            combined_mask = combined_mask * loss_mask
-        else:
-            combined_mask = loss_mask
-
-    for layer_idx in target_layers:
-        if layer_idx not in model_reps or layer_idx not in frozen_reps:
-            continue
-
-        h_model = model_reps[layer_idx]  # (batch, seq_len, hidden_dim)
-        h_frozen = frozen_reps[layer_idx]
-
-        # L2 distance per token
-        l2_dist = torch.norm(h_model - h_frozen, p=2, dim=-1)  # (batch, seq_len)
-
-        # Apply combined mask if provided
-        if combined_mask is not None:
-            l2_dist = l2_dist * combined_mask.float()
-            loss = l2_dist.sum() / (combined_mask.sum() + 1e-8)
-        else:
-            loss = l2_dist.mean()
-
-        total_loss += loss
-        num_layers += 1
-
-    return total_loss / max(num_layers, 1)
+    return retain_loss_l2(
+        model_reps=model_reps,
+        frozen_reps=frozen_reps,
+        target_layers=target_layers,
+        attention_mask=attention_mask,
+        loss_mask=loss_mask,
+    )
 
 
 # =============================================================================
@@ -1025,8 +851,14 @@ class CircuitBreakerTrainer:
     7. Backward pass and optimizer step
     """
     
-    def __init__(self, config: CircuitBreakerConfig):
+    def __init__(
+        self,
+        config: CircuitBreakerConfig,
+        dataloader: Optional[DataLoader] = None,
+        tokenizer: Optional[AutoTokenizer] = None,
+    ):
         self.config = config
+        self._external_dataloader = dataloader
 
         # Resolve whether W&B is actually usable (package present).
         if self.config.use_wandb and not wandb_is_available():
@@ -1089,23 +921,26 @@ class CircuitBreakerTrainer:
 
             write_wandb_run_ref(Path(self.config.output_dir))
         
-        # Load tokenizer (HF gated models require an auth token)
-        hf_token = resolve_hf_token()
-        
-        # In offline mode, resolve model ID to local cache path to avoid API calls
-        offline_mode = os.environ.get("HF_HUB_OFFLINE", "0") == "1"
-        model_path = config.base_model
-        if offline_mode:
-            model_path = resolve_local_model_path(config.base_model, hf_token)
-            if model_path != config.base_model:
-                print(f"  Resolved to local path: {model_path}")
-        
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            model_path,
-            token=hf_token,
-            trust_remote_code=True,
-            local_files_only=offline_mode,
-        )
+        if tokenizer is None:
+            # Load tokenizer (HF gated models require an auth token)
+            hf_token = resolve_hf_token()
+
+            # In offline mode, resolve model ID to local cache path to avoid API calls
+            offline_mode = os.environ.get("HF_HUB_OFFLINE", "0") == "1"
+            model_path = config.base_model
+            if offline_mode:
+                model_path = resolve_local_model_path(config.base_model, hf_token)
+                if model_path != config.base_model:
+                    print(f"  Resolved to local path: {model_path}")
+
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_path,
+                token=hf_token,
+                trust_remote_code=True,
+                local_files_only=offline_mode,
+            )
+
+        self.tokenizer = tokenizer
         # Right padding is typical for causal LM training.
         if getattr(self.tokenizer, "padding_side", None) != "right":
             self.tokenizer.padding_side = "right"
@@ -1215,6 +1050,12 @@ class CircuitBreakerTrainer:
     
     def _setup_data(self):
         """Setup dataset and dataloader."""
+        if self._external_dataloader is not None:
+            self.dataloader = self._external_dataloader
+            self.dataset = getattr(self.dataloader, "dataset", None)
+            self.accelerator.print("Using externally provided training dataloader")
+            return
+
         # Get config options for completion-based training
         mask_prompt_tokens = getattr(self.config, 'mask_prompt_tokens', True)
         use_chat_template = getattr(self.config, 'use_chat_template', True)
@@ -1369,38 +1210,53 @@ class CircuitBreakerTrainer:
         """
         self.model.train()
 
-        # Get coefficients for this step
-        use_dual = getattr(self.config, 'loss_weighting', 'dual') == 'dual'
+        loss_mode = getattr(self.config, "loss_mode", LOSS_MODE_TRIPLET_FULL)
+        if loss_mode not in SUPPORTED_LOSS_MODES:
+            raise ValueError(
+                f"Unsupported loss_mode={loss_mode}. Expected one of {SUPPORTED_LOSS_MODES}"
+            )
 
-        if use_dual:
-            # Paper-style dual coefficients: cs decays, cr increases
-            cs, cr = get_dual_coefficients(
-                self.global_step,
-                self.config.total_steps,
-                self.config.alpha_max,
-                self.config.alpha_decay_multiplier,
-                self.config.alpha_decay_strategy,
-            )
-            alpha = cs  # For logging compatibility
+        # Legacy modes keep schedule-based weighting; triplet uses explicit alpha/beta/gamma.
+        use_dual = False
+        if loss_mode in (LOSS_MODE_LEGACY_CB, LOSS_MODE_LEGACY_SCHEMA):
+            use_dual = getattr(self.config, "loss_weighting", "dual") == "dual"
+            if use_dual:
+                cs, cr = get_dual_coefficients(
+                    self.global_step,
+                    self.config.total_steps,
+                    self.config.alpha_max,
+                    self.config.alpha_decay_multiplier,
+                    self.config.alpha_decay_strategy,
+                )
+                alpha = cs
+            else:
+                alpha = get_alpha(
+                    self.global_step,
+                    self.config.alpha_max,
+                    self.config.total_steps,
+                    self.config.alpha_decay_strategy,
+                    self.config.alpha_decay_multiplier,
+                )
+                cs, cr = alpha, 1.0
         else:
-            # Original single alpha schedule
-            alpha = get_alpha(
-                self.global_step,
-                self.config.alpha_max,
-                self.config.total_steps,
-                self.config.alpha_decay_strategy,
-                self.config.alpha_decay_multiplier,
-            )
-            cs, cr = alpha, 1.0  # cr fixed at 1.0 for single_alpha mode
+            cs, cr = 1.0, 1.0
+            alpha = float(getattr(self.config, "triplet_beta_harmful", 0.4))
 
         # Extract batch data
         harmful_input_ids = batch['harmful_input_ids']
         harmful_attention_mask = batch['harmful_attention_mask']
         harmful_loss_mask = batch.get('harmful_loss_mask', None)
+        harmful_sample_weight = batch.get('harmful_sample_weight', None)
 
         benign_input_ids = batch['benign_input_ids']
         benign_attention_mask = batch['benign_attention_mask']
         benign_loss_mask = batch.get('benign_loss_mask', None)
+        benign_sample_weight = batch.get('benign_sample_weight', None)
+
+        if harmful_loss_mask is not None and harmful_sample_weight is not None:
+            harmful_loss_mask = harmful_loss_mask * harmful_sample_weight.unsqueeze(-1)
+        if benign_loss_mask is not None and benign_sample_weight is not None:
+            benign_loss_mask = benign_loss_mask * benign_sample_weight.unsqueeze(-1)
 
         # Get batch sizes for later splitting
         harmful_batch_size = harmful_input_ids.shape[0]
@@ -1413,6 +1269,9 @@ class CircuitBreakerTrainer:
 
         combined_input_ids = torch.cat([harmful_input_ids, benign_input_ids], dim=0)
         combined_attention_mask = torch.cat([harmful_attention_mask, benign_attention_mask], dim=0)
+        needs_frozen = loss_mode in (LOSS_MODE_TRIPLET_FULL, LOSS_MODE_LEGACY_CB)
+        combined_frozen_reps = {}
+        combined_teacher_logits = None
 
         if self._rep_extraction_method == "hooks":
             # Clear previous representations
@@ -1428,17 +1287,21 @@ class CircuitBreakerTrainer:
             combined_model_reps = self.model_extractor.get_representations()
             combined_student_logits = student_outputs.logits  # Save for KL
 
-            # Single forward through frozen model (no grad)
-            self.frozen_extractor.clear()
-            with torch.no_grad():
-                teacher_outputs = self.frozen_model(
-                    input_ids=combined_input_ids,
-                    attention_mask=combined_attention_mask,
-                    use_cache=False,
-                    return_dict=True,
-                )
-                combined_frozen_reps = self.frozen_extractor.get_representations()
-                combined_teacher_logits = teacher_outputs.logits  # Save for KL
+            if needs_frozen:
+                # Single forward through frozen model (no grad)
+                self.frozen_extractor.clear()
+                with torch.no_grad():
+                    teacher_outputs = self.frozen_model(
+                        input_ids=combined_input_ids,
+                        attention_mask=combined_attention_mask,
+                        use_cache=False,
+                        return_dict=True,
+                    )
+                    combined_frozen_reps = self.frozen_extractor.get_representations()
+                    combined_teacher_logits = teacher_outputs.logits
+            else:
+                combined_frozen_reps = {}
+                combined_teacher_logits = None
 
             # Split representations by batch size
             harmful_model_reps = {
@@ -1459,9 +1322,13 @@ class CircuitBreakerTrainer:
                 for layer, reps in combined_frozen_reps.items()
             }
 
-            # Split logits for KL divergence
+            # Split logits
             student_logits_benign = combined_student_logits[harmful_batch_size:]
-            teacher_logits_benign = combined_teacher_logits[harmful_batch_size:]
+            teacher_logits_benign = (
+                combined_teacher_logits[harmful_batch_size:]
+                if combined_teacher_logits is not None
+                else None
+            )
 
         else:
             # Single forward with hidden_states output
@@ -1476,20 +1343,20 @@ class CircuitBreakerTrainer:
             combined_student_logits = outputs.logits  # Save logits for KL
             del outputs
 
-            # Single frozen forward
-            with torch.no_grad():
-                frozen_outputs = self.frozen_model(
-                    input_ids=combined_input_ids,
-                    attention_mask=combined_attention_mask,
-                    output_hidden_states=True,
-                    use_cache=False,
-                    return_dict=True,
-                )
-                combined_frozen_reps = _select_hidden_states(
-                    frozen_outputs, self.config.cb_target_layers
-                )
-                combined_teacher_logits = frozen_outputs.logits  # Save logits for KL
-            del frozen_outputs
+            if needs_frozen:
+                with torch.no_grad():
+                    frozen_outputs = self.frozen_model(
+                        input_ids=combined_input_ids,
+                        attention_mask=combined_attention_mask,
+                        output_hidden_states=True,
+                        use_cache=False,
+                        return_dict=True,
+                    )
+                    combined_frozen_reps = _select_hidden_states(
+                        frozen_outputs, self.config.cb_target_layers
+                    )
+                    combined_teacher_logits = frozen_outputs.logits
+                del frozen_outputs
 
             # Split representations by batch size
             harmful_model_reps = {
@@ -1510,56 +1377,153 @@ class CircuitBreakerTrainer:
                 for layer, reps in combined_frozen_reps.items()
             }
 
-            # Split logits for KL divergence
+            # Split logits
             student_logits_benign = combined_student_logits[harmful_batch_size:]
-            teacher_logits_benign = combined_teacher_logits[harmful_batch_size:]
+            teacher_logits_benign = (
+                combined_teacher_logits[harmful_batch_size:]
+                if combined_teacher_logits is not None
+                else None
+            )
 
         # === Compute Losses ===
-        # Compute rerouting loss with optional loss mask
-        loss_reroute, reroute_metrics = reroute_loss(
-            harmful_model_reps,
-            harmful_frozen_reps,
-            self.config.cb_target_layers,
-            harmful_attention_mask,
-            loss_mask=harmful_loss_mask,
-            return_metrics=True,
-        )
+        reroute_metrics: Optional[Dict[str, float]] = None
+        beta_kl = float(getattr(self.config, "beta_kl", 0.0))
+        kl_temp = float(getattr(self.config, "kl_temperature", 1.0))
 
-        # Compute retain loss (L2 on hidden states) with optional loss mask
-        loss_retain = retain_loss(
-            benign_model_reps,
-            benign_frozen_reps,
-            self.config.cb_target_layers,
-            benign_attention_mask,
-            loss_mask=benign_loss_mask,
-        )
+        if loss_mode == LOSS_MODE_TRIPLET_FULL:
+            if teacher_logits_benign is None:
+                raise RuntimeError("triplet_full requires frozen-model logits")
 
-        # Compute KL divergence loss on benign tokens (knowledge distillation)
-        beta_kl = getattr(self.config, 'beta_kl', 0.0)
-        if beta_kl > 0:
-            kl_temp = getattr(self.config, 'kl_temperature', 1.0)
-            loss_kl = kl_divergence_loss(
-                student_logits=student_logits_benign,
-                teacher_logits=teacher_logits_benign,
-                attention_mask=benign_attention_mask,
-                loss_mask=benign_loss_mask,
-                temperature=kl_temp,
+            harmful_new = pooled_representations(
+                reps_by_layer=harmful_model_reps,
+                target_layers=self.config.cb_target_layers,
+                token_mask=harmful_loss_mask if harmful_loss_mask is not None else harmful_attention_mask,
             )
-        else:
-            loss_kl = torch.tensor(0.0, device=self.accelerator.device)
+            harmful_old = pooled_representations(
+                reps_by_layer=harmful_frozen_reps,
+                target_layers=self.config.cb_target_layers,
+                token_mask=harmful_loss_mask if harmful_loss_mask is not None else harmful_attention_mask,
+            )
+            benign_new = pooled_representations(
+                reps_by_layer=benign_model_reps,
+                target_layers=self.config.cb_target_layers,
+                token_mask=benign_loss_mask if benign_loss_mask is not None else benign_attention_mask,
+            )
+            benign_old = pooled_representations(
+                reps_by_layer=benign_frozen_reps,
+                target_layers=self.config.cb_target_layers,
+                token_mask=benign_loss_mask if benign_loss_mask is not None else benign_attention_mask,
+            )
 
-        # === Combined Loss ===
-        # L = cs * L_reroute + cr * (L_retain + beta_kl * L_kl)
-        # The KL loss helps preserve benign behavior via output distribution matching
-        total_loss = cs * loss_reroute + cr * (loss_retain + beta_kl * loss_kl)
+            total_loss, triplet_metrics = triplet_full_loss(
+                harmful_new=harmful_new,
+                harmful_old=harmful_old,
+                benign_new=benign_new,
+                benign_old=benign_old,
+                benign_student_logits=student_logits_benign,
+                benign_teacher_logits=teacher_logits_benign,
+                benign_attention_mask=benign_attention_mask,
+                benign_loss_mask=benign_loss_mask,
+                alpha_benign=float(getattr(self.config, "triplet_alpha_benign", 0.5)),
+                beta_harmful=float(getattr(self.config, "triplet_beta_harmful", 0.4)),
+                gamma_kl=float(getattr(self.config, "triplet_gamma_kl", 0.9)),
+                margin_benign=float(getattr(self.config, "triplet_margin_benign", 500.0)),
+                margin_harmful=float(getattr(self.config, "triplet_margin_harmful", 1500.0)),
+                benign_positive_distance=getattr(self.config, "triplet_benign_positive_distance", "dmix"),
+                benign_negative_distance=getattr(self.config, "triplet_benign_negative_distance", "dmix"),
+                harmful_positive_distance=getattr(self.config, "triplet_harmful_positive_distance", "dmix"),
+                harmful_negative_distance=getattr(self.config, "triplet_harmful_negative_distance", "dmix"),
+                mix_l2_weight=float(getattr(self.config, "triplet_mix_l2_weight", 0.5)),
+                mix_cos_weight=float(getattr(self.config, "triplet_mix_cos_weight", 0.5)),
+                kl_temperature=kl_temp,
+            )
+
+            metrics = {
+                "loss": total_loss.item(),
+                "loss_triplet_benign": triplet_metrics["triplet_benign_loss"],
+                "loss_triplet_harmful": triplet_metrics["triplet_harmful_loss"],
+                "loss_triplet_kl": triplet_metrics["triplet_kl_loss"],
+                "triplet_alpha": triplet_metrics["triplet_alpha"],
+                "triplet_beta": triplet_metrics["triplet_beta"],
+                "triplet_gamma": triplet_metrics["triplet_gamma"],
+                "alpha": alpha,
+            }
+        elif loss_mode == LOSS_MODE_LEGACY_CB:
+            loss_reroute, reroute_metrics = reroute_loss(
+                harmful_model_reps,
+                harmful_frozen_reps,
+                self.config.cb_target_layers,
+                harmful_attention_mask,
+                loss_mask=harmful_loss_mask,
+                return_metrics=True,
+            )
+            loss_retain = retain_loss(
+                benign_model_reps,
+                benign_frozen_reps,
+                self.config.cb_target_layers,
+                benign_attention_mask,
+                loss_mask=benign_loss_mask,
+            )
+            if beta_kl > 0:
+                if teacher_logits_benign is None:
+                    raise RuntimeError("legacy_cb with KL requires frozen-model logits")
+                loss_kl = kl_divergence_loss(
+                    student_logits=student_logits_benign,
+                    teacher_logits=teacher_logits_benign,
+                    attention_mask=benign_attention_mask,
+                    loss_mask=benign_loss_mask,
+                    temperature=kl_temp,
+                )
+            else:
+                loss_kl = torch.tensor(0.0, device=self.accelerator.device)
+
+            total_loss = cs * loss_reroute + cr * (loss_retain + beta_kl * loss_kl)
+            metrics = {
+                "loss": total_loss.item(),
+                "loss_reroute": loss_reroute.item(),
+                "loss_retain": loss_retain.item(),
+                "alpha": alpha,
+            }
+            if beta_kl > 0:
+                metrics["loss_kl"] = loss_kl.item()
+                metrics["beta_kl"] = beta_kl
+        elif loss_mode == LOSS_MODE_LEGACY_SCHEMA:
+            loss_reroute = random_reroute_loss(
+                model_reps=harmful_model_reps,
+                target_layers=self.config.cb_target_layers,
+                loss_mask=harmful_loss_mask,
+            )
+            loss_retain = retain_ce_loss(
+                logits=student_logits_benign,
+                labels=benign_input_ids,
+                loss_mask=benign_loss_mask,
+            )
+            total_loss = cs * loss_reroute + cr * loss_retain
+            metrics = {
+                "loss": total_loss.item(),
+                "loss_reroute": loss_reroute.item(),
+                "loss_retain": loss_retain.item(),
+                "alpha": alpha,
+            }
+        else:
+            raise ValueError(f"Unexpected loss mode: {loss_mode}")
 
         # === Diagnostic Logging ===
         if self.global_step % 50 == 0:
-            self.accelerator.print(
-                f"[Step {self.global_step}] cs={cs:.3f} cr={cr:.3f} | "
-                f"cos_sim={reroute_metrics['cos_sim_mean']:.4f} | "
-                f"L_rr={loss_reroute.item():.4f} L_ret={loss_retain.item():.4f}"
-            )
+            if loss_mode == LOSS_MODE_TRIPLET_FULL:
+                self.accelerator.print(
+                    f"[Step {self.global_step}] mode={loss_mode} | "
+                    f"L_b={metrics['loss_triplet_benign']:.4f} "
+                    f"L_h={metrics['loss_triplet_harmful']:.4f} "
+                    f"L_kl={metrics['loss_triplet_kl']:.4f}"
+                )
+            else:
+                cos_sim = reroute_metrics["cos_sim_mean"] if reroute_metrics is not None else 0.0
+                self.accelerator.print(
+                    f"[Step {self.global_step}] mode={loss_mode} cs={cs:.3f} cr={cr:.3f} | "
+                    f"cos_sim={cos_sim:.4f} | "
+                    f"L_rr={metrics['loss_reroute']:.4f} L_ret={metrics['loss_retain']:.4f}"
+                )
 
         # Backward pass (SINGLE backward through combined graph)
         self.accelerator.backward(total_loss)
@@ -1576,33 +1540,21 @@ class CircuitBreakerTrainer:
         self.scheduler.step()
         self.optimizer.zero_grad()
 
-        metrics = {
-            'loss': total_loss.item(),
-            'loss_reroute': loss_reroute.item(),
-            'loss_retain': loss_retain.item(),
-            'alpha': alpha,
-            'lr': self.scheduler.get_last_lr()[0],
-        }
-
-        # Add KL divergence metrics if enabled
-        if beta_kl > 0:
-            metrics['loss_kl'] = loss_kl.item()
-            metrics['beta_kl'] = beta_kl
+        metrics["lr"] = self.scheduler.get_last_lr()[0]
+        metrics["loss_mode"] = loss_mode
 
         # Add dual coefficient logging if enabled
         if use_dual:
             metrics['cs'] = cs
             metrics['cr'] = cr
 
-        # STAGE 1 FIX: Add explicit reroute metrics for debugging
-        # These show what the cosine similarity is computed against
-        metrics['reroute_cos_sim_mean'] = reroute_metrics['cos_sim_mean']
-        metrics['reroute_cos_sim_positive_frac'] = reroute_metrics['cos_sim_positive_frac']
-        # Note: target_type should always be "frozen_baseline" - if not, there's a bug
-        if reroute_metrics.get('target_type') != 'frozen_baseline':
-            self.accelerator.print(
-                f"  WARNING: Unexpected reroute target type: {reroute_metrics.get('target_type')}"
-            )
+        if reroute_metrics is not None:
+            metrics['reroute_cos_sim_mean'] = reroute_metrics['cos_sim_mean']
+            metrics['reroute_cos_sim_positive_frac'] = reroute_metrics['cos_sim_positive_frac']
+            if reroute_metrics.get('target_type') != 'frozen_baseline':
+                self.accelerator.print(
+                    f"  WARNING: Unexpected reroute target type: {reroute_metrics.get('target_type')}"
+                )
 
         # Gradient diagnostics (every 50 steps on main process)
         if self.global_step % 50 == 1 and self.accelerator.is_main_process:
@@ -1613,12 +1565,12 @@ class CircuitBreakerTrainer:
                     f"  WARNING: Very small gradients detected! "
                     f"grad_norm={grad_stats.get('grad_norm_total', 0):.2e}"
                 )
-            # STAGE 1 FIX: Log explicit reroute info periodically
-            self.accelerator.print(
-                f"  Reroute metrics: cos_sim_mean={reroute_metrics['cos_sim_mean']:.4f}, "
-                f"positive_frac={reroute_metrics['cos_sim_positive_frac']:.2%}, "
-                f"target={reroute_metrics['target_type']}"
-            )
+            if reroute_metrics is not None:
+                self.accelerator.print(
+                    f"  Reroute metrics: cos_sim_mean={reroute_metrics['cos_sim_mean']:.4f}, "
+                    f"positive_frac={reroute_metrics['cos_sim_positive_frac']:.2%}, "
+                    f"target={reroute_metrics['target_type']}"
+                )
 
         return metrics
     
@@ -1737,13 +1689,17 @@ class CircuitBreakerTrainer:
         self.accelerator.print(f"  Model: {self.config.base_model}")
         self.accelerator.print(f"  Total Steps: {self.config.total_steps}")
         self.accelerator.print(f"  Alpha Max: {self.config.alpha_max}")
+        self.accelerator.print(f"  Loss Mode: {getattr(self.config, 'loss_mode', LOSS_MODE_TRIPLET_FULL)}")
         self.accelerator.print(f"  CB Target Layers: {self.config.cb_target_layers}")
         self.accelerator.print("=" * 60)
         
         # =================================================================
         # DEBUG: Validate completion masking at training start
         # =================================================================
-        self._validate_completion_masking()
+        if isinstance(self.dataset, CircuitBreakerDataset):
+            self._validate_completion_masking()
+        else:
+            self.accelerator.print("Skipping completion-mask validation (external pre-tokenized dataset)")
         
         progress_bar = tqdm(
             total=self.config.total_steps,
@@ -1771,13 +1727,19 @@ class CircuitBreakerTrainer:
                 
                 # Logging
                 if self.global_step % self.config.logging_steps == 0:
-                    log_msg = (
-                        f"Step {self.global_step}: loss={metrics['loss']:.4f}, "
-                        f"reroute={metrics['loss_reroute']:.4f}, "
-                        f"retain={metrics['loss_retain']:.4f}"
-                    )
+                    log_msg = f"Step {self.global_step}: mode={metrics.get('loss_mode')}, loss={metrics['loss']:.4f}"
+                    if 'loss_reroute' in metrics:
+                        log_msg += f", reroute={metrics['loss_reroute']:.4f}"
+                    if 'loss_retain' in metrics:
+                        log_msg += f", retain={metrics['loss_retain']:.4f}"
+                    if 'loss_triplet_benign' in metrics:
+                        log_msg += f", triplet_b={metrics['loss_triplet_benign']:.4f}"
+                    if 'loss_triplet_harmful' in metrics:
+                        log_msg += f", triplet_h={metrics['loss_triplet_harmful']:.4f}"
                     if 'loss_kl' in metrics:
                         log_msg += f", kl={metrics['loss_kl']:.4f}"
+                    if 'loss_triplet_kl' in metrics:
+                        log_msg += f", triplet_kl={metrics['loss_triplet_kl']:.4f}"
                     log_msg += f", α={metrics['alpha']:.4f}"
                     self.accelerator.print(log_msg)
                     

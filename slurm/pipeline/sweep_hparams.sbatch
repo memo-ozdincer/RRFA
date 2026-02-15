@@ -9,47 +9,58 @@
 #SBATCH --account=def-zhijing
 
 # =============================================================================
-# COMPREHENSIVE HYPERPARAMETER SWEEP
-#
-# Grid search over:
-#   - CB target layers (which layers to apply circuit breakers)
-#   - Alpha max (initial rerouting loss weight)
-#   - Loss mask policies (which tokens to apply loss on)
-#
-# For each configuration:
-#   1. Run ETL_B with the appropriate LMP policy
-#   2. Train for 200 steps
-#   3. Evaluate on both Fujitsu and AgentDojo with detailed examples
-#
-# Training uses ALL available data:
-#   - Fujitsu DS (harmful) + AgentDojo CB set -> CB loss (rerouting)
-#   - Fujitsu DR (benign) + AgentDojo Retain set -> Retain loss
-#
-# CB/Retain Split Logic:
-#   - CB set: attack_succeeded=True (model was compromised)
-#   - Retain set: attack_succeeded=False OR no attack (correct behavior)
-#   - Resisted traces (attack present but model refused) -> Retain set
+# CANONICAL PIPELINE ENTRYPOINT (2/2): HPARAM SWEEP
 # =============================================================================
 #
-# Configuration via environment variables:
-#   QUICK_TEST      - If "true", use reduced steps/configs for testing
-#   TOTAL_STEPS     - Override training steps (default: 200)
-#   ALPHAS          - Override alpha values (default: "5.0,10.0,15.0")
-#   LAYER_CONFIGS   - Override layer configs (default: "10,20|8,16,24|12,18|6,12,18,24")
-#   POLICIES        - Override policies (default: all 4 policies)
-#   LIMIT_EVAL      - Samples per eval dataset (default: 100)
-#   NUM_EXAMPLES    - Examples to print per dataset (default: 50)
+# This is the only sweep script. It sweeps:
+#   - `POLICIES` (lossmask policy)
+#   - `LAYER_CONFIGS` (CB target layers)
+#   - `ALPHAS` (alpha_max for legacy schedules)
 #
-# Usage:
-#   # Full sweep (default) - runs overnight
-#   sbatch slurm/pipeline/sweep_hparams.sbatch
+# For each configuration: ETL_B (policy) -> train -> eval.
+# LLMail-Inject DS/DR traces are auto-included if present in $CB_SCRATCH/data/traces.
 #
-#   # Quick test mode
-#   QUICK_TEST=true sbatch slurm/pipeline/sweep_hparams.sbatch
+# -----------------------------------------------------------------------------
+# Common run recipes
+# -----------------------------------------------------------------------------
+# 1) Full sweep:
+#    sbatch slurm/pipeline/sweep_hparams.sbatch
 #
-#   # More examples
-#   NUM_EXAMPLES=100 sbatch slurm/pipeline/sweep_hparams.sbatch
+# 2) Quick sanity sweep:
+#    QUICK_TEST=true sbatch slurm/pipeline/sweep_hparams.sbatch
 #
+# 3) One configuration only:
+#    ALPHAS=10.0 LAYER_CONFIGS=10,20 POLICIES=assistant_only \
+#    sbatch slurm/pipeline/sweep_hparams.sbatch
+#
+# 4) Policy-only sweep (fixed layers/alpha):
+#    ALPHAS=10.0 LAYER_CONFIGS=10,20 \
+#    POLICIES=assistant_only,assistant_and_tool,cb_full_sequence,tool_calls_only,completion_only \
+#    sbatch slurm/pipeline/sweep_hparams.sbatch
+#
+# 5) Legacy loss sweep:
+#    LOSS_MODE=legacy_cb LOSS_WEIGHTING=dual \
+#    sbatch slurm/pipeline/sweep_hparams.sbatch
+#
+# -----------------------------------------------------------------------------
+# Config knobs (pass with `VAR=value sbatch ...`)
+# -----------------------------------------------------------------------------
+# Sweep controls:
+#   QUICK_TEST, TOTAL_STEPS, ALPHAS, LAYER_CONFIGS, POLICIES
+#
+# Eval/logging:
+#   LIMIT_EVAL, NUM_EXAMPLES, SHOW_EXAMPLES
+#
+# Core training:
+#   LOSS_MODE, LOSS_WEIGHTING, BATCH_SIZE, LEARNING_RATE, WARMUP_STEPS,
+#   MAX_SEQ_LENGTH, DTYPE, LORA_R, LORA_ALPHA
+#
+# Triplet parameters:
+#   TRIPLET_ALPHA_BENIGN, TRIPLET_BETA_HARMFUL, TRIPLET_GAMMA_KL,
+#   TRIPLET_MARGIN_BENIGN, TRIPLET_MARGIN_HARMFUL,
+#   TRIPLET_BENIGN_POS_DISTANCE, TRIPLET_BENIGN_NEG_DISTANCE,
+#   TRIPLET_HARMFUL_POS_DISTANCE, TRIPLET_HARMFUL_NEG_DISTANCE,
+#   TRIPLET_MIX_L2_WEIGHT, TRIPLET_MIX_COS_WEIGHT
 # =============================================================================
 
 set -euo pipefail
@@ -127,6 +138,20 @@ LORA_R=16
 LORA_ALPHA=32
 MAX_SEQ_LENGTH=2048
 DTYPE="bfloat16"
+LLMAIL_TOOL_SCHEMA="${LLMAIL_TOOL_SCHEMA:-$REPO_DIR/configs/tool_schemas/llmail_inject_v1.json}"
+LOSS_MODE="${LOSS_MODE:-triplet_full}"
+LOSS_WEIGHTING="${LOSS_WEIGHTING:-dual}"
+TRIPLET_ALPHA_BENIGN="${TRIPLET_ALPHA_BENIGN:-0.5}"
+TRIPLET_BETA_HARMFUL="${TRIPLET_BETA_HARMFUL:-0.4}"
+TRIPLET_GAMMA_KL="${TRIPLET_GAMMA_KL:-0.9}"
+TRIPLET_MARGIN_BENIGN="${TRIPLET_MARGIN_BENIGN:-500.0}"
+TRIPLET_MARGIN_HARMFUL="${TRIPLET_MARGIN_HARMFUL:-1500.0}"
+TRIPLET_BENIGN_POS_DISTANCE="${TRIPLET_BENIGN_POS_DISTANCE:-dmix}"
+TRIPLET_BENIGN_NEG_DISTANCE="${TRIPLET_BENIGN_NEG_DISTANCE:-dmix}"
+TRIPLET_HARMFUL_POS_DISTANCE="${TRIPLET_HARMFUL_POS_DISTANCE:-dmix}"
+TRIPLET_HARMFUL_NEG_DISTANCE="${TRIPLET_HARMFUL_NEG_DISTANCE:-dmix}"
+TRIPLET_MIX_L2_WEIGHT="${TRIPLET_MIX_L2_WEIGHT:-0.5}"
+TRIPLET_MIX_COS_WEIGHT="${TRIPLET_MIX_COS_WEIGHT:-0.5}"
 
 echo "Configuration:"
 echo "  TOTAL_STEPS: $TOTAL_STEPS"
@@ -135,6 +160,7 @@ echo "  LAYER_CONFIGS: $LAYER_CONFIGS"
 echo "  POLICIES: $POLICIES"
 echo "  BATCH_SIZE: $BATCH_SIZE"
 echo "  LEARNING_RATE: $LEARNING_RATE"
+echo "  LOSS_MODE: $LOSS_MODE"
 echo "  LIMIT_EVAL: $LIMIT_EVAL"
 echo "  NUM_EXAMPLES: $NUM_EXAMPLES"
 echo "  SHOW_EXAMPLES: $SHOW_EXAMPLES"
@@ -148,6 +174,8 @@ TRACES_DIR="$CB_SCRATCH/data/traces"
 DS_TRACES="$TRACES_DIR/fujitsu_b4_ds.jsonl"
 DR_TRACES="$TRACES_DIR/fujitsu_b4_dr.jsonl"
 AGENTDOJO_TRACES="$TRACES_DIR/agentdojo_complete.jsonl"
+LLMAIL_DS_TRACES="$TRACES_DIR/llmail_inject_ds.jsonl"
+LLMAIL_DR_TRACES="$TRACES_DIR/llmail_inject_dr.jsonl"
 
 echo "Input traces (ALL used for training):"
 for trace in "$DS_TRACES" "$DR_TRACES" "$AGENTDOJO_TRACES"; do
@@ -158,6 +186,16 @@ for trace in "$DS_TRACES" "$DR_TRACES" "$AGENTDOJO_TRACES"; do
         exit 1
     fi
 done
+
+HAS_LLMAIL=false
+if [[ -f "$LLMAIL_DS_TRACES" && -f "$LLMAIL_DR_TRACES" ]]; then
+    HAS_LLMAIL=true
+    echo "  ✓ $(basename "$LLMAIL_DS_TRACES"): $(wc -l < "$LLMAIL_DS_TRACES") lines"
+    echo "  ✓ $(basename "$LLMAIL_DR_TRACES"): $(wc -l < "$LLMAIL_DR_TRACES") lines"
+    echo "  LLMail-Inject: enabled"
+else
+    echo "  LLMail-Inject: not found (optional, continuing without it)"
+fi
 echo ""
 
 # =============================================================================
@@ -259,7 +297,12 @@ for alpha in "${ALPHA_ARRAY[@]}"; do
             echo "Step 1: Creating lossmasks with policy=$policy"
             
             etl_start=$(date +%s)
-            for trace_file in "$DS_TRACES" "$DR_TRACES" "$AGENTDOJO_TRACES"; do
+            TRACE_FILES=("$DS_TRACES" "$DR_TRACES" "$AGENTDOJO_TRACES")
+            if [[ "$HAS_LLMAIL" == "true" ]]; then
+                TRACE_FILES+=("$LLMAIL_DS_TRACES" "$LLMAIL_DR_TRACES")
+            fi
+
+            for trace_file in "${TRACE_FILES[@]}"; do
                 basename=$(basename "$trace_file" .jsonl)
                 render_out="$RUN_DIR/renders/${basename}.jsonl"
                 lossmask_out="$RUN_DIR/lossmasks/${basename}.jsonl"
@@ -319,6 +362,30 @@ print(total)
             
             # Parse layers to array
             IFS=',' read -ra CB_LAYER_ARRAY <<< "$layers"
+
+            HARMFUL_RENDER_ARGS=(
+                "$RUN_DIR/renders/fujitsu_b4_ds.jsonl"
+                "$SPLIT_DIR/agentdojo_renders_harmful.jsonl"
+            )
+            HARMFUL_LOSSMASK_ARGS=(
+                "$RUN_DIR/lossmasks/fujitsu_b4_ds.jsonl"
+                "$SPLIT_DIR/agentdojo_lossmasks_harmful.jsonl"
+            )
+            BENIGN_RENDER_ARGS=(
+                "$RUN_DIR/renders/fujitsu_b4_dr.jsonl"
+                "$SPLIT_DIR/agentdojo_renders_benign.jsonl"
+            )
+            BENIGN_LOSSMASK_ARGS=(
+                "$RUN_DIR/lossmasks/fujitsu_b4_dr.jsonl"
+                "$SPLIT_DIR/agentdojo_lossmasks_benign.jsonl"
+            )
+
+            if [[ "$HAS_LLMAIL" == "true" ]]; then
+                HARMFUL_RENDER_ARGS+=("$RUN_DIR/renders/llmail_inject_ds.jsonl")
+                HARMFUL_LOSSMASK_ARGS+=("$RUN_DIR/lossmasks/llmail_inject_ds.jsonl")
+                BENIGN_RENDER_ARGS+=("$RUN_DIR/renders/llmail_inject_dr.jsonl")
+                BENIGN_LOSSMASK_ARGS+=("$RUN_DIR/lossmasks/llmail_inject_dr.jsonl")
+            fi
             
             # Build training args (matching sweep_policies.sbatch exactly)
             TRAIN_ARGS=(
@@ -332,7 +399,19 @@ print(total)
                 --alpha-max "$alpha"
                 --max-seq-length "$MAX_SEQ_LENGTH"
                 --gradient-accumulation-steps 1
-                --loss-weighting "dual"
+                --loss-mode "$LOSS_MODE"
+                --loss-weighting "$LOSS_WEIGHTING"
+                --triplet-alpha-benign "$TRIPLET_ALPHA_BENIGN"
+                --triplet-beta-harmful "$TRIPLET_BETA_HARMFUL"
+                --triplet-gamma-kl "$TRIPLET_GAMMA_KL"
+                --triplet-margin-benign "$TRIPLET_MARGIN_BENIGN"
+                --triplet-margin-harmful "$TRIPLET_MARGIN_HARMFUL"
+                --triplet-benign-positive-distance "$TRIPLET_BENIGN_POS_DISTANCE"
+                --triplet-benign-negative-distance "$TRIPLET_BENIGN_NEG_DISTANCE"
+                --triplet-harmful-positive-distance "$TRIPLET_HARMFUL_POS_DISTANCE"
+                --triplet-harmful-negative-distance "$TRIPLET_HARMFUL_NEG_DISTANCE"
+                --triplet-mix-l2-weight "$TRIPLET_MIX_L2_WEIGHT"
+                --triplet-mix-cos-weight "$TRIPLET_MIX_COS_WEIGHT"
                 --lora-r "$LORA_R"
                 --lora-alpha "$LORA_ALPHA"
                 --lora-dropout 0.05
@@ -341,10 +420,10 @@ print(total)
                 --no-wandb
                 --cb-target-layers "${CB_LAYER_ARRAY[@]}"
                 --mode mixed
-                --harmful-renders "$RUN_DIR/renders/fujitsu_b4_ds.jsonl" "$SPLIT_DIR/agentdojo_renders_harmful.jsonl"
-                --harmful-lossmasks "$RUN_DIR/lossmasks/fujitsu_b4_ds.jsonl" "$SPLIT_DIR/agentdojo_lossmasks_harmful.jsonl"
-                --benign-renders "$RUN_DIR/renders/fujitsu_b4_dr.jsonl" "$SPLIT_DIR/agentdojo_renders_benign.jsonl"
-                --benign-lossmasks "$RUN_DIR/lossmasks/fujitsu_b4_dr.jsonl" "$SPLIT_DIR/agentdojo_lossmasks_benign.jsonl"
+                --harmful-renders "${HARMFUL_RENDER_ARGS[@]}"
+                --harmful-lossmasks "${HARMFUL_LOSSMASK_ARGS[@]}"
+                --benign-renders "${BENIGN_RENDER_ARGS[@]}"
+                --benign-lossmasks "${BENIGN_LOSSMASK_ARGS[@]}"
             )
             
             train_start=$(date +%s)
@@ -427,6 +506,19 @@ for i, p in enumerate((improvements + regressions)[:$NUM_EXAMPLES], 1):
     print()
 PYEOF
                         fi
+                    fi
+
+                    if [[ "$HAS_LLMAIL" == "true" ]]; then
+                        echo "  Evaluating on LLMail-Inject ($LIMIT_EVAL samples)..."
+                        LLMAIL_OUTPUT="$RUN_DIR/eval/llmail_eval.json"
+                        python src/evaluation/eval.py \
+                            --baseline "$TOKENIZER" \
+                            --cb-adapter "$ADAPTER_PATH" \
+                            --eval-data "$LLMAIL_DS_TRACES" \
+                            --tool-schema "$LLMAIL_TOOL_SCHEMA" \
+                            --output "$LLMAIL_OUTPUT" \
+                            --limit "$LIMIT_EVAL" \
+                            --dtype "$DTYPE" 2>&1 | tee -a "$RUN_DIR/eval/llmail.log"
                     fi
                     
                     # ---------------------------------------------------------

@@ -9,76 +9,64 @@
 #SBATCH --account=def-zhijing
 
 # =============================================================================
-# UNIFIED CB TRAINING PIPELINE
+# CANONICAL PIPELINE ENTRYPOINT (1/2): REGULAR RUNS
 # =============================================================================
 #
-# A configurable pipeline that handles any dataset type:
-# - Complete traces with labels (AgentDojo)
-# - Skeleton traces needing generation (Fujitsu B4)
-# - Complete traces needing judge evaluation (new datasets)
+# This is the only non-sweep pipeline script. It can run full end-to-end or any
+# subset of stages via env vars.
 #
-# Pipeline Stages:
-#   1. ETL_A: Convert raw data to trace_v1 format
-#   2. (Optional) Generate: Fill skeleton traces with completions
-#   3. (Optional) Judge: Evaluate traces to add attack_succeeded labels
-#   4. ETL_B: Create renders and lossmasks
-#   5. Split: Separate into CB and retain sets
-#   6. Train: Run circuit breaker training
-#   7. Eval: Evaluate trained model
+# Stages:
+#   1) ETL_A -> 2) Generate/Judge (optional) -> 3) ETL_B -> 4) Split
+#   5) Train -> 6) Eval
 #
-# =============================================================================
+# -----------------------------------------------------------------------------
+# Common run recipes
+# -----------------------------------------------------------------------------
+# 1) Full default run (all datasets, triplet_full, full logging):
+#    sbatch slurm/pipeline/unified_pipeline.sbatch
 #
-# Configuration via environment variables:
+# 2) Train+eval only (reuse existing traces/renders/splits):
+#    SKIP_ETL_A=true SKIP_GENERATE=true SKIP_ETL_B=true SKIP_SPLIT=true \
+#    sbatch slurm/pipeline/unified_pipeline.sbatch
 #
-# Dataset Selection:
-#   DATASETS         - Comma-separated list: "agentdojo,fujitsu_b4" (default: both)
-#   DATASET_CONFIG   - Path to dataset_config.yaml (default: configs/dataset_config.yaml)
+# 3) Data prep only (no train/eval):
+#    SKIP_TRAIN=true SKIP_EVAL=true sbatch slurm/pipeline/unified_pipeline.sbatch
 #
-# Stage Control:
-#   SKIP_ETL_A       - Skip raw data conversion (default: false)
-#   SKIP_GENERATE    - Skip skeleton completion (default: false)
-#   SKIP_JUDGE       - Skip judge evaluation (default: true, only for unlabeled data)
-#   SKIP_ETL_B       - Skip render/lossmask creation (default: false)
-#   SKIP_SPLIT       - Skip CB/retain splitting (default: false)
-#   SKIP_TRAIN       - Skip training (default: false)
-#   SKIP_EVAL        - Skip evaluation (default: false)
+# 4) Single-dataset run:
+#    DATASETS=agentdojo sbatch slurm/pipeline/unified_pipeline.sbatch
 #
-# Data Paths:
-#   FUJITSU_B4_PATH  - Path to Fujitsu B4 JSONL (default: auto-detected)
-#   AGENTDOJO_PATH   - Path to AgentDojo JSONL (default: auto-detected)
-#   OUTPUT_BASE      - Base output directory (default: $CB_SCRATCH/data)
+# 5) Quick smoke run:
+#    TOTAL_STEPS=30 EVAL_LIMIT=20 DATASETS=agentdojo \
+#    sbatch slurm/pipeline/unified_pipeline.sbatch
 #
-# Training Configuration:
-#   TOTAL_STEPS      - Training steps (default: 300)
-#   BATCH_SIZE       - Per-GPU batch size (default: 8)
-#   LEARNING_RATE    - Learning rate (default: 5e-5)
-#   ALPHA_MAX        - Initial alpha for RR loss (default: 10.0)
-#   CB_LAYERS        - CB target layers, comma-separated (default: 10,20)
-#   LMP_POLICY       - Loss mask policy (default: assistant_only)
+# 6) Legacy loss mode:
+#    LOSS_MODE=legacy_cb LOSS_WEIGHTING=dual \
+#    sbatch slurm/pipeline/unified_pipeline.sbatch
 #
-# Judge Configuration (for datasets needing evaluation):
-#   JUDGE_PROVIDER   - openai, anthropic, or local (default: openai)
-#   JUDGE_MODEL      - Model name (default: gpt-4o-mini)
+# -----------------------------------------------------------------------------
+# Config knobs (pass with `VAR=value sbatch ...`)
+# -----------------------------------------------------------------------------
+# Dataset selection:
+#   DATASETS, DATASET_CONFIG, FUJITSU_B4_PATH, AGENTDOJO_PATH, LLMAIL_INJECT_PATH
 #
-# =============================================================================
+# Stage toggles:
+#   SKIP_ETL_A, SKIP_GENERATE, SKIP_JUDGE, SKIP_ETL_B, SKIP_SPLIT, SKIP_TRAIN, SKIP_EVAL
 #
-# Usage Examples:
+# Core training:
+#   TOTAL_STEPS, BATCH_SIZE, LEARNING_RATE, WARMUP_STEPS, ALPHA_MAX,
+#   LOSS_MODE, LOSS_WEIGHTING, CB_LAYERS, LMP_POLICY, MAX_SEQ_LENGTH
 #
-#   # Full pipeline with both datasets
-#   sbatch slurm/pipeline/unified_pipeline.sbatch
+# Triplet parameters:
+#   TRIPLET_ALPHA_BENIGN, TRIPLET_BETA_HARMFUL, TRIPLET_GAMMA_KL,
+#   TRIPLET_MARGIN_BENIGN, TRIPLET_MARGIN_HARMFUL,
+#   TRIPLET_BENIGN_POS_DISTANCE, TRIPLET_BENIGN_NEG_DISTANCE,
+#   TRIPLET_HARMFUL_POS_DISTANCE, TRIPLET_HARMFUL_NEG_DISTANCE,
+#   TRIPLET_MIX_L2_WEIGHT, TRIPLET_MIX_COS_WEIGHT
 #
-#   # AgentDojo only, skip generation
-#   DATASETS=agentdojo sbatch slurm/pipeline/unified_pipeline.sbatch
-#
-#   # Fujitsu B4 only
-#   DATASETS=fujitsu_b4 sbatch slurm/pipeline/unified_pipeline.sbatch
-#
-#   # Skip training to just prepare data
-#   SKIP_TRAIN=true SKIP_EVAL=true sbatch slurm/pipeline/unified_pipeline.sbatch
-#
-#   # Use judge for a new dataset
-#   DATASETS=new_dataset SKIP_JUDGE=false JUDGE_PROVIDER=openai sbatch ...
-#
+# Runtime/logging:
+#   OUTPUT_BASE, MODEL, TOKENIZER, DTYPE, LORA_R, LORA_ALPHA,
+#   NO_WANDB, JUDGE_PROVIDER, JUDGE_MODEL, EVAL_LIMIT
+#   LLMAIL_TOOL_SCHEMA (tool schema used for LLMail generation/eval)
 # =============================================================================
 
 set -euo pipefail
@@ -130,7 +118,7 @@ echo ""
 # =============================================================================
 
 # Dataset selection
-DATASETS="${DATASETS:-agentdojo,fujitsu_b4}"
+DATASETS="${DATASETS:-agentdojo,fujitsu_b4,llmail_inject}"
 DATASET_CONFIG="${DATASET_CONFIG:-$REPO_DIR/configs/dataset_config.yaml}"
 
 # Stage control
@@ -155,11 +143,13 @@ mkdir -p "$TRACES_DIR" "$RENDERS_DIR" "$LOSSMASKS_DIR" "$MODELS_DIR" "$EVAL_DIR"
 # Default data paths
 FUJITSU_B4_PATH="${FUJITSU_B4_PATH:-$REPO_DIR/data/fujitsu/orchestrator_attacks_combined_deduplicated.jsonl}"
 AGENTDOJO_PATH="${AGENTDOJO_PATH:-$REPO_DIR/data/agent_dojo/agentdojo_spotlight_extract.jsonl}"
+LLMAIL_INJECT_PATH="${LLMAIL_INJECT_PATH:-$REPO_DIR/data/llmail_inject/raw_submissions_phase1.jsonl}"
 
 # Model/tokenizer
 MODEL="${MODEL:-meta-llama/Llama-3.1-8B-Instruct}"
 TOKENIZER="${TOKENIZER:-$MODEL}"
 TOOL_SCHEMA="${TOOL_SCHEMA:-$REPO_DIR/configs/tool_schemas/b4_standard_v1.json}"
+LLMAIL_TOOL_SCHEMA="${LLMAIL_TOOL_SCHEMA:-$REPO_DIR/configs/tool_schemas/llmail_inject_v1.json}"
 
 # Generation settings
 TEMPERATURE_DS="${TEMPERATURE_DS:-0.7}"
@@ -172,6 +162,19 @@ BATCH_SIZE="${BATCH_SIZE:-8}"
 LEARNING_RATE="${LEARNING_RATE:-5e-5}"
 WARMUP_STEPS="${WARMUP_STEPS:-20}"
 ALPHA_MAX="${ALPHA_MAX:-10.0}"
+LOSS_MODE="${LOSS_MODE:-triplet_full}"
+LOSS_WEIGHTING="${LOSS_WEIGHTING:-dual}"
+TRIPLET_ALPHA_BENIGN="${TRIPLET_ALPHA_BENIGN:-0.5}"
+TRIPLET_BETA_HARMFUL="${TRIPLET_BETA_HARMFUL:-0.4}"
+TRIPLET_GAMMA_KL="${TRIPLET_GAMMA_KL:-0.9}"
+TRIPLET_MARGIN_BENIGN="${TRIPLET_MARGIN_BENIGN:-500.0}"
+TRIPLET_MARGIN_HARMFUL="${TRIPLET_MARGIN_HARMFUL:-1500.0}"
+TRIPLET_BENIGN_POS_DISTANCE="${TRIPLET_BENIGN_POS_DISTANCE:-dmix}"
+TRIPLET_BENIGN_NEG_DISTANCE="${TRIPLET_BENIGN_NEG_DISTANCE:-dmix}"
+TRIPLET_HARMFUL_POS_DISTANCE="${TRIPLET_HARMFUL_POS_DISTANCE:-dmix}"
+TRIPLET_HARMFUL_NEG_DISTANCE="${TRIPLET_HARMFUL_NEG_DISTANCE:-dmix}"
+TRIPLET_MIX_L2_WEIGHT="${TRIPLET_MIX_L2_WEIGHT:-0.5}"
+TRIPLET_MIX_COS_WEIGHT="${TRIPLET_MIX_COS_WEIGHT:-0.5}"
 CB_LAYERS="${CB_LAYERS:-10,20}"
 LMP_POLICY="${LMP_POLICY:-assistant_only}"
 MAX_SEQ_LENGTH="${MAX_SEQ_LENGTH:-2048}"
@@ -190,9 +193,11 @@ EVAL_LIMIT="${EVAL_LIMIT:-100}"
 echo "Configuration:"
 echo "  DATASETS: $DATASETS"
 echo "  OUTPUT_BASE: $OUTPUT_BASE"
+echo "  LLMAIL_INJECT_PATH: $LLMAIL_INJECT_PATH"
 echo "  LMP_POLICY: $LMP_POLICY"
 echo "  TOTAL_STEPS: $TOTAL_STEPS"
 echo "  ALPHA_MAX: $ALPHA_MAX"
+echo "  LOSS_MODE: $LOSS_MODE"
 echo "  CB_LAYERS: $CB_LAYERS"
 echo ""
 echo "Stage Control:"
@@ -279,6 +284,23 @@ if [[ "$SKIP_ETL_A" != "true" ]]; then
                 fi
                 ;;
 
+            llmail_inject)
+                if [[ -f "$LLMAIL_INJECT_PATH" ]]; then
+                    echo "Processing LLMail-Inject..."
+                    OUTPUT_FILE="$TRACES_DIR/llmail_inject_skeleton.jsonl"
+
+                    python src/schemas/tools/ETL_A.py \
+                        --llmail-inject "$LLMAIL_INJECT_PATH" \
+                        --output "$OUTPUT_FILE" \
+                        --split train \
+                        --tool-schema "$LLMAIL_TOOL_SCHEMA"
+
+                    echo "  Output: $OUTPUT_FILE ($(wc -l < "$OUTPUT_FILE") lines)"
+                else
+                    echo "  WARNING: LLMail-Inject file not found: $LLMAIL_INJECT_PATH"
+                fi
+                ;;
+
             *)
                 echo "  WARNING: Unknown dataset: $dataset"
                 ;;
@@ -291,59 +313,80 @@ fi
 # Stage 2: Generate Completions (for skeleton traces)
 # =============================================================================
 if [[ "$SKIP_GENERATE" != "true" ]]; then
-    SKELETON_FILE="$TRACES_DIR/fujitsu_b4_skeletons.jsonl"
+    echo "========================================"
+    echo "Stage 2: Generate Completions"
+    echo "========================================"
 
-    if [[ -f "$SKELETON_FILE" ]]; then
-        echo "========================================"
-        echo "Stage 2: Generate Completions"
-        echo "========================================"
-
-        DS_OUTPUT="$TRACES_DIR/fujitsu_b4_ds.jsonl"
-        DR_OUTPUT="$TRACES_DIR/fujitsu_b4_dr.jsonl"
-
-        # Check if we need to generate
-        NEED_DS=true
-        NEED_DR=true
-        [[ -f "$DS_OUTPUT" ]] && NEED_DS=false
-        [[ -f "$DR_OUTPUT" ]] && NEED_DR=false
-
-        if [[ "$NEED_DS" == "true" || "$NEED_DR" == "true" ]]; then
-            # Generate DS (attack succeeds)
-            if [[ "$NEED_DS" == "true" ]]; then
-                echo "Generating DS (attack succeeds) traces..."
-                python src/generation/generate_completions.py \
-                    --input "$SKELETON_FILE" \
-                    --output "$DS_OUTPUT" \
-                    --model "$MODEL" \
-                    --tool-schema "$TOOL_SCHEMA" \
-                    --mode ds \
-                    --temperature "$TEMPERATURE_DS" \
-                    ${USE_VLLM:+--use-vllm}
-
-                echo "  DS output: $DS_OUTPUT ($(wc -l < "$DS_OUTPUT") lines)"
-            fi
-
-            # Generate DR (attack resisted)
-            if [[ "$NEED_DR" == "true" ]]; then
-                echo "Generating DR (resisted) traces..."
-                python src/generation/generate_completions.py \
-                    --input "$SKELETON_FILE" \
-                    --output "$DR_OUTPUT" \
-                    --model "$MODEL" \
-                    --tool-schema "$TOOL_SCHEMA" \
-                    --mode dr \
-                    --temperature "$TEMPERATURE_DR" \
-                    ${USE_VLLM:+--use-vllm}
-
-                echo "  DR output: $DR_OUTPUT ($(wc -l < "$DR_OUTPUT") lines)"
-            fi
-        else
-            echo "Skipping: DS/DR files already exist"
-            echo "  DS: $DS_OUTPUT"
-            echo "  DR: $DR_OUTPUT"
-        fi
-        echo ""
+    VLLM_ARGS=()
+    if [[ "$USE_VLLM" == "true" ]]; then
+        VLLM_ARGS+=(--use-vllm)
     fi
+
+    generate_ds_dr_dataset() {
+        local dataset_name="$1"
+        local skeleton_file="$2"
+        local ds_output="$3"
+        local dr_output="$4"
+        local dataset_tool_schema="$5"
+
+        if [[ ! -f "$skeleton_file" ]]; then
+            return
+        fi
+
+        local need_ds=true
+        local need_dr=true
+        [[ -f "$ds_output" ]] && need_ds=false
+        [[ -f "$dr_output" ]] && need_dr=false
+
+        if [[ "$need_ds" == "false" && "$need_dr" == "false" ]]; then
+            echo "Skipping $dataset_name generation: DS/DR files already exist"
+            echo "  DS: $ds_output"
+            echo "  DR: $dr_output"
+            return
+        fi
+
+        if [[ "$need_ds" == "true" ]]; then
+            echo "Generating $dataset_name DS traces..."
+            python src/data_generation/generate_completions.py \
+                --traces "$skeleton_file" \
+                --output "$ds_output" \
+                --model "$MODEL" \
+                --tool-schema "$dataset_tool_schema" \
+                --mode ds \
+                --temperature-ds "$TEMPERATURE_DS" \
+                "${VLLM_ARGS[@]}"
+            echo "  DS output: $ds_output ($(wc -l < "$ds_output") lines)"
+        fi
+
+        if [[ "$need_dr" == "true" ]]; then
+            echo "Generating $dataset_name DR traces..."
+            python src/data_generation/generate_completions.py \
+                --ds-data "$ds_output" \
+                --output "$dr_output" \
+                --model "$MODEL" \
+                --tool-schema "$dataset_tool_schema" \
+                --mode dr \
+                --temperature-dr "$TEMPERATURE_DR" \
+                "${VLLM_ARGS[@]}"
+            echo "  DR output: $dr_output ($(wc -l < "$dr_output") lines)"
+        fi
+    }
+
+    generate_ds_dr_dataset \
+        "Fujitsu B4" \
+        "$TRACES_DIR/fujitsu_b4_skeletons.jsonl" \
+        "$TRACES_DIR/fujitsu_b4_ds.jsonl" \
+        "$TRACES_DIR/fujitsu_b4_dr.jsonl" \
+        "$TOOL_SCHEMA"
+
+    generate_ds_dr_dataset \
+        "LLMail-Inject" \
+        "$TRACES_DIR/llmail_inject_skeleton.jsonl" \
+        "$TRACES_DIR/llmail_inject_ds.jsonl" \
+        "$TRACES_DIR/llmail_inject_dr.jsonl" \
+        "$LLMAIL_TOOL_SCHEMA"
+
+    echo ""
 fi
 
 # =============================================================================
@@ -466,6 +509,12 @@ if [[ "$SKIP_SPLIT" != "true" ]]; then
                 echo "  DS (CB): $TRACES_DIR/fujitsu_b4_ds.jsonl"
                 echo "  DR (Retain): $TRACES_DIR/fujitsu_b4_dr.jsonl"
                 ;;
+
+            llmail_inject)
+                echo "LLMail-Inject: Using existing DS/DR split"
+                echo "  DS (CB): $TRACES_DIR/llmail_inject_ds.jsonl"
+                echo "  DR (Retain): $TRACES_DIR/llmail_inject_dr.jsonl"
+                ;;
         esac
     done
     echo ""
@@ -499,6 +548,28 @@ if [[ "$SKIP_TRAIN" != "true" ]]; then
     if [[ -f "$RENDERS_DIR/fujitsu_b4_dr.jsonl" ]]; then
         BENIGN_RENDERS="$RENDERS_DIR/fujitsu_b4_dr.jsonl"
         BENIGN_LOSSMASKS="$LOSSMASKS_DIR/fujitsu_b4_dr.jsonl"
+    fi
+
+    # LLMail DS (harmful)
+    if [[ -f "$RENDERS_DIR/llmail_inject_ds.jsonl" ]]; then
+        if [[ -n "$HARMFUL_RENDERS" ]]; then
+            HARMFUL_RENDERS="$HARMFUL_RENDERS,$RENDERS_DIR/llmail_inject_ds.jsonl"
+            HARMFUL_LOSSMASKS="$HARMFUL_LOSSMASKS,$LOSSMASKS_DIR/llmail_inject_ds.jsonl"
+        else
+            HARMFUL_RENDERS="$RENDERS_DIR/llmail_inject_ds.jsonl"
+            HARMFUL_LOSSMASKS="$LOSSMASKS_DIR/llmail_inject_ds.jsonl"
+        fi
+    fi
+
+    # LLMail DR (benign)
+    if [[ -f "$RENDERS_DIR/llmail_inject_dr.jsonl" ]]; then
+        if [[ -n "$BENIGN_RENDERS" ]]; then
+            BENIGN_RENDERS="$BENIGN_RENDERS,$RENDERS_DIR/llmail_inject_dr.jsonl"
+            BENIGN_LOSSMASKS="$BENIGN_LOSSMASKS,$LOSSMASKS_DIR/llmail_inject_dr.jsonl"
+        else
+            BENIGN_RENDERS="$RENDERS_DIR/llmail_inject_dr.jsonl"
+            BENIGN_LOSSMASKS="$LOSSMASKS_DIR/llmail_inject_dr.jsonl"
+        fi
     fi
 
     # AgentDojo split
@@ -543,7 +614,19 @@ if [[ "$SKIP_TRAIN" != "true" ]]; then
         --alpha-max "$ALPHA_MAX"
         --max-seq-length "$MAX_SEQ_LENGTH"
         --gradient-accumulation-steps 1
-        --loss-weighting "dual"
+        --loss-mode "$LOSS_MODE"
+        --loss-weighting "$LOSS_WEIGHTING"
+        --triplet-alpha-benign "$TRIPLET_ALPHA_BENIGN"
+        --triplet-beta-harmful "$TRIPLET_BETA_HARMFUL"
+        --triplet-gamma-kl "$TRIPLET_GAMMA_KL"
+        --triplet-margin-benign "$TRIPLET_MARGIN_BENIGN"
+        --triplet-margin-harmful "$TRIPLET_MARGIN_HARMFUL"
+        --triplet-benign-positive-distance "$TRIPLET_BENIGN_POS_DISTANCE"
+        --triplet-benign-negative-distance "$TRIPLET_BENIGN_NEG_DISTANCE"
+        --triplet-harmful-positive-distance "$TRIPLET_HARMFUL_POS_DISTANCE"
+        --triplet-harmful-negative-distance "$TRIPLET_HARMFUL_NEG_DISTANCE"
+        --triplet-mix-l2-weight "$TRIPLET_MIX_L2_WEIGHT"
+        --triplet-mix-cos-weight "$TRIPLET_MIX_COS_WEIGHT"
         --lora-r "$LORA_R"
         --lora-alpha "$LORA_ALPHA"
         --lora-dropout 0.05
@@ -614,6 +697,20 @@ if [[ "$SKIP_EVAL" != "true" ]]; then
                     --eval-data "$TRACES_DIR/fujitsu_b4_ds.jsonl" \
                     --tool-schema "$TOOL_SCHEMA" \
                     --output "$EVAL_OUTPUT" \
+                    --limit "$EVAL_LIMIT" \
+                    --dtype "$DTYPE"
+            fi
+
+            # Evaluate on LLMail DS
+            if [[ -f "$TRACES_DIR/llmail_inject_ds.jsonl" ]]; then
+                LLMAIL_EVAL="${EVAL_OUTPUT%.json}_llmail.json"
+                echo "Evaluating on LLMail-Inject DS..."
+                python src/evaluation/eval.py \
+                    --baseline "$MODEL" \
+                    --cb-adapter "$ADAPTER_PATH" \
+                    --eval-data "$TRACES_DIR/llmail_inject_ds.jsonl" \
+                    --tool-schema "$LLMAIL_TOOL_SCHEMA" \
+                    --output "$LLMAIL_EVAL" \
                     --limit "$EVAL_LIMIT" \
                     --dtype "$DTYPE"
             fi

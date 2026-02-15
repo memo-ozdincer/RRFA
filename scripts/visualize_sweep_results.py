@@ -28,6 +28,7 @@ import csv
 import json
 import re
 import sys
+from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -501,6 +502,82 @@ def analyze_run(
                 print_sample_detail(sample, trace, tool_schema, show_full, use_color)
     
     # ---------------------------------------------------------
+    # LLMail-Inject Analysis
+    # ---------------------------------------------------------
+    llmail_eval_json = run_dir / "eval" / "llmail_eval.json"
+    llmail_paired = run_dir / "eval" / "llmail_eval.paired_outputs.jsonl"
+    
+    if llmail_eval_json.exists():
+        eval_data = load_json(llmail_eval_json)
+        paired = load_jsonl(llmail_paired)
+        
+        baseline = eval_data.get("baseline", {}).get("tool_flip_asr", {})
+        cb = eval_data.get("cb_model", {}).get("tool_flip_asr", {})
+        delta = eval_data.get("delta", {})
+        
+        results["llmail"] = {
+            "baseline_asr": baseline.get("attack_success_rate", 0) * 100,
+            "cb_asr": cb.get("attack_success_rate", 0) * 100,
+            "delta": delta.get("tool_flip_asr", 0) * 100,
+            "total": len(paired),
+            "improvements": sum(1 for p in paired if p.get("baseline_outcome") == "attack_success" and p.get("cb_outcome") != "attack_success"),
+            "regressions": sum(1 for p in paired if p.get("baseline_outcome") != "attack_success" and p.get("cb_outcome") == "attack_success"),
+        }
+        
+        # Show sample details if requested
+        if show_samples > 0 and paired:
+            print(f"\n{'#'*80}")
+            print(f"# LLMAIL-INJECT SAMPLES: {run_dir.name}")
+            print(f"{'#'*80}")
+            
+            # Filter samples
+            if filter_success:
+                samples_to_show = [
+                    p for p in paired 
+                    if p.get("baseline_outcome") == "attack_success" and p.get("cb_outcome") != "attack_success"
+                ][:show_samples]
+            elif filter_failure:
+                samples_to_show = [
+                    p for p in paired 
+                    if p.get("cb_outcome") == "attack_success"
+                ][:show_samples]
+            else:
+                samples_to_show = paired[:show_samples]
+            
+            for sample in samples_to_show:
+                sample_id = sample.get("id", "")
+                trace = traces_index.get(sample_id)
+                print_sample_detail(sample, trace, tool_schema, show_full, use_color)
+    
+    return results
+    if agentdojo_eval_json.exists():
+        eval_data = load_json(agentdojo_eval_json)
+        paired = load_jsonl(agentdojo_paired)
+        
+        output_comparison = eval_data.get("output_comparison", {})
+        
+        results["agentdojo"] = {
+            "total": output_comparison.get("total_compared", 0),
+            "different": output_comparison.get("different", 0),
+            "diff_rate": output_comparison.get("difference_rate", 0) * 100,
+        }
+        
+        # Show sample details if requested
+        if show_samples > 0 and paired:
+            print(f"\n{'#'*80}")
+            print(f"# AGENTDOJO SAMPLES: {run_dir.name}")
+            print(f"{'#'*80}")
+            
+            # Filter to samples with different responses
+            different = [p for p in paired if p.get("responses_differ")]
+            samples_to_show = different[:show_samples] if different else paired[:show_samples]
+            
+            for sample in samples_to_show:
+                sample_id = sample.get("id", "")
+                trace = traces_index.get(sample_id)
+                print_sample_detail(sample, trace, tool_schema, show_full, use_color)
+    
+    # ---------------------------------------------------------
     # AgentDojo Analysis
     # ---------------------------------------------------------
     if agentdojo_eval_json.exists():
@@ -556,7 +633,7 @@ def print_summary_table(runs: List[Dict[str, Any]], use_color: bool = True) -> N
     # Header
     header = (
         f"{'Run Name':<35} {'Hparams':<18} {'Lossmask':<28} "
-        f"{'Base ASR':<12} {'CB ASR':<10} {'Reduction':<12} {'Improved':<10} {'Regressed':<10} {'AgentDojo':<12}"
+        f"{'Base ASR':<10} {'CB ASR':<8} {'Reduct':<10} {'AgentDojo':<10} {'LLMail':<10}"
     )
     print(f"{BOLD}{header}{RESET}")
     print(f"{'-'*150}")
@@ -572,8 +649,6 @@ def print_summary_table(runs: List[Dict[str, Any]], use_color: bool = True) -> N
             base_asr = fujitsu.get("baseline_asr", 0)
             cb_asr = fujitsu.get("cb_asr", 0)
             reduction = base_asr - cb_asr
-            improvements = fujitsu.get("improvements", 0)
-            regressions = fujitsu.get("regressions", 0)
             
             base_str = f"{base_asr:.1f}%"
             cb_str = f"{cb_asr:.1f}%"
@@ -586,7 +661,6 @@ def print_summary_table(runs: List[Dict[str, Any]], use_color: bool = True) -> N
                 red_str = f"{RED}{red_str}{RESET}"
         else:
             base_str = cb_str = red_str = "N/A"
-            improvements = regressions = 0
         
         agentdojo = run.get("agentdojo", {})
         if agentdojo:
@@ -594,10 +668,21 @@ def print_summary_table(runs: List[Dict[str, Any]], use_color: bool = True) -> N
             agent_str = f"{diff_rate:.1f}%"
         else:
             agent_str = "N/A"
+            
+        llmail = run.get("llmail", {})
+        if llmail:
+            llmail_base = llmail.get("baseline_asr", 0)
+            llmail_cb = llmail.get("cb_asr", 0)
+            llmail_red = llmail_base - llmail_cb
+            llmail_str = f"{llmail_cb:.1f}%"
+            if llmail_red > 50:
+                llmail_str = f"{GREEN}{llmail_str}{RESET}"
+        else:
+            llmail_str = "N/A"
         
         print(
             f"{run_name:<35} {hparams_str:<18} {lossmask:<28} "
-            f"{base_str:<12} {cb_str:<10} {red_str:<12} {improvements:<10} {regressions:<10} {agent_str:<12}"
+            f"{base_str:<10} {cb_str:<8} {red_str:<10} {agent_str:<10} {llmail_str:<10}"
         )
 
 
@@ -640,6 +725,134 @@ def print_best_runs(runs: List[Dict[str, Any]], top_n: int = 5, use_color: bool 
     best_lossmask = best_run.get("lossmask") or "N/A"
     print(f"\n{BOLD}BEST HPARAMS:{RESET} {best_hparams}")
     print(f"{BOLD}BEST LOSSMASK:{RESET} {best_lossmask}")
+
+
+def plot_metrics(runs: List[Dict[str, Any]]) -> None:
+    """Plot simple ASCII charts for metrics."""
+    print("\n" + "=" * 80)
+    print("METRIC PLOTS")
+    print("=" * 80)
+    
+    # Sort runs by alpha then layers
+    sorted_runs = sorted(runs, key=lambda r: (
+        float(r.get("hparams", {}).get("a", 0)),
+        r.get("lossmask", "")
+    ))
+    
+    # 1. Fujitsu CB ASR vs Alpha
+    print("\n1. Fujitsu CB ASR (lower is better) vs Alpha:")
+    max_asr = 100.0
+    for run in sorted_runs:
+        fujitsu = run.get("fujitsu", {})
+        if not fujitsu: continue
+        
+        asr = fujitsu.get("cb_asr", 0)
+        alpha = run.get("hparams", {}).get("a", "?")
+        layers = run.get("lossmask", "?")
+        
+        bar_len = int((asr / max_asr) * 40)
+        bar = "█" * bar_len
+        print(f"  a={alpha:<4} {layers:<20}: {bar} {asr:.1f}%")
+
+    # 2. AgentDojo Diff Rate vs Alpha
+    print("\n2. AgentDojo Diff Rate (higher = more refusal) vs Alpha:")
+    for run in sorted_runs:
+        agentdojo = run.get("agentdojo", {})
+        if not agentdojo: continue
+        
+        diff = agentdojo.get("diff_rate", 0)
+        alpha = run.get("hparams", {}).get("a", "?")
+        layers = run.get("lossmask", "?")
+        
+        bar_len = int((diff / 100.0) * 40)
+        bar = "█" * bar_len
+        print(f"  a={alpha:<4} {layers:<20}: {bar} {diff:.1f}%")
+
+    # 3. LLMail CB ASR vs Alpha
+    print("\n3. LLMail CB ASR (lower is better) vs Alpha:")
+    for run in sorted_runs:
+        llmail = run.get("llmail", {})
+        if not llmail: continue
+        
+        asr = llmail.get("cb_asr", 0)
+        alpha = run.get("hparams", {}).get("a", "?")
+        layers = run.get("lossmask", "?")
+        
+        bar_len = int((asr / 100.0) * 40)
+        bar = "█" * bar_len
+        print(f"  a={alpha:<4} {layers:<20}: {bar} {asr:.1f}%")
+
+
+def compare_samples(
+    runs: List[Dict[str, Any]],
+    run_dirs: List[Path],
+    num_samples: int = 1,
+    dataset: str = "fujitsu"
+) -> None:
+    """Compare specific samples across all runs."""
+    print("\n" + "=" * 80)
+    print(f"SAMPLE COMPARISON ({dataset.upper()})")
+    print("=" * 80)
+    
+    # Load paired outputs for all runs
+    run_data = []
+    for run_dir in run_dirs:
+        if dataset == "fujitsu":
+            path = run_dir / "eval" / "fujitsu_eval.paired_outputs.jsonl"
+        elif dataset == "agentdojo":
+            path = run_dir / "eval" / "agentdojo_eval.paired_outputs.jsonl"
+        elif dataset == "llmail":
+            path = run_dir / "eval" / "llmail_eval.paired_outputs.jsonl"
+        else:
+            continue
+            
+        if path.exists():
+            data = load_jsonl(path)
+            # Index by ID
+            data_map = {d.get("id"): d for d in data}
+            run_data.append((run_dir.name, data_map))
+    
+    if not run_data:
+        print(f"No data found for dataset {dataset}")
+        return
+
+    # Get sample IDs from the first run
+    first_run_name, first_run_map = run_data[0]
+    sample_ids = list(first_run_map.keys())[:num_samples]
+    
+    for sid in sample_ids:
+        print(f"\n{'-'*80}")
+        print(f"Sample ID: {sid}")
+        
+        # Get query from first run
+        sample = first_run_map[sid]
+        query = sample.get("baseline_response", "") # Actually we don't have query in paired output easily, 
+        # but we have baseline response.
+        # Wait, paired output usually doesn't have the input query unless we put it there.
+        # But we can show the baseline response and CB response.
+        
+        print(f"Baseline Response (from {first_run_name}):")
+        print(f"  {truncate_text(sample.get('baseline_response', ''), 100)}")
+        
+        print(f"\n{'-'*20} Comparison {'-'*20}")
+        
+        for run_name, data_map in run_data:
+            if sid not in data_map:
+                continue
+            
+            s = data_map[sid]
+            cb_resp = s.get("cb_response", "")
+            outcome = s.get("cb_outcome", "?")
+            
+            # Color outcome
+            outcome_str = outcome
+            if outcome == "attack_success":
+                outcome_str = f"\033[91m{outcome}\033[0m"
+            elif outcome == "correct_behavior" or outcome == "different": # AgentDojo uses 'different'
+                outcome_str = f"\033[92m{outcome}\033[0m"
+            
+            print(f"Run: {run_name:<35} | {outcome_str}")
+            print(f"  {truncate_text(cb_resp, 150)}")
 
 
 # =============================================================================
@@ -732,6 +945,20 @@ Examples:
         help="Export results to CSV file"
     )
     
+    parser.add_argument(
+        "--compare-samples",
+        type=int,
+        default=0,
+        help="Number of samples to compare across all runs (side-by-side)"
+    )
+    parser.add_argument(
+        "--compare-dataset",
+        type=str,
+        default="fujitsu",
+        choices=["fujitsu", "agentdojo", "llmail"],
+        help="Dataset to use for comparison"
+    )
+    
     args = parser.parse_args()
     
     use_color = not args.no_color
@@ -801,6 +1028,13 @@ Examples:
     # Print summary
     print_summary_table(all_results, use_color)
     print_best_runs(all_results, args.top_n, use_color)
+    
+    # Plot metrics
+    plot_metrics(all_results)
+    
+    # Compare samples if requested
+    if args.compare_samples > 0:
+        compare_samples(all_results, run_dirs, args.compare_samples, args.compare_dataset)
 
     # Optionally show samples only for best runs
     if args.show_samples > 0 and args.samples_best_only:
@@ -825,11 +1059,12 @@ Examples:
             writer = csv.writer(f)
             writer.writerow([
                 "run_name", "baseline_asr", "cb_asr", "reduction",
-                "improvements", "regressions", "agentdojo_diff_rate"
+                "improvements", "regressions", "agentdojo_diff_rate", "llmail_cb_asr"
             ])
             for r in all_results:
                 fujitsu = r.get("fujitsu") or {}
                 agentdojo = r.get("agentdojo") or {}
+                llmail = r.get("llmail") or {}
                 writer.writerow([
                     r.get("run_name", ""),
                     fujitsu.get("baseline_asr", "") if fujitsu else "",
@@ -838,6 +1073,7 @@ Examples:
                     fujitsu.get("improvements", "") if fujitsu else "",
                     fujitsu.get("regressions", "") if fujitsu else "",
                     agentdojo.get("diff_rate", "") if agentdojo else "",
+                    llmail.get("cb_asr", "") if llmail else "",
                 ])
         print(f"\nExported results to: {args.csv}")
 

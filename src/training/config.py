@@ -68,6 +68,25 @@ class CircuitBreakerConfig:
     representation_extraction: str = "hidden_states"
 
     # === Agentic Enhancements ===
+    # Core loss objective:
+    # - "triplet_full": triplet paper loss (benign triplet + harmful triplet + KL)
+    # - "legacy_schema": random reroute + benign CE (historical train_schema behavior)
+    # - "legacy_cb": CB-style reroute ReLU + benign L2 (+ optional KL)
+    loss_mode: str = "triplet_full"
+
+    # Triplet full loss hyperparameters (paper-style defaults)
+    triplet_alpha_benign: float = 0.5
+    triplet_beta_harmful: float = 0.4
+    triplet_gamma_kl: float = 0.9
+    triplet_margin_benign: float = 500.0
+    triplet_margin_harmful: float = 1500.0
+    triplet_benign_positive_distance: str = "dmix"
+    triplet_benign_negative_distance: str = "dmix"
+    triplet_harmful_positive_distance: str = "dmix"
+    triplet_harmful_negative_distance: str = "dmix"
+    triplet_mix_l2_weight: float = 0.5
+    triplet_mix_cos_weight: float = 0.5
+
     # Loss weighting strategy:
     # - "single_alpha": L = alpha * L_rr + L_ret (original, retain weight fixed at 1.0)
     # - "dual": L = cs(t) * L_rr + cr(t) * L_ret (paper-style, both coefficients vary)

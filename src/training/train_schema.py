@@ -1,19 +1,9 @@
 #!/usr/bin/env python3
 """
-Circuit Breaker Training with Schema v1 Data Format.
+Circuit Breaker training entrypoint for schema v1 datasets.
 
-Supports the new ETL pipeline output:
-- render_v1 JSONL files (tokenized traces with alignment)
-- lossmask_v1 JSONL files (per-token loss masks)
-
-Data loading modes:
-- ds_dr: Load DS traces as harmful, DR traces as benign
-- labeled: Load traces based on labels.is_harmful field
-- mixed: Combine multiple sources with explicit harmful/benign paths
-
-MWCS (Mixture Weighted Curriculum Scheduling) support:
-- Pre-computed sample_weight from lossmask_v1
-- Per-step weight adjustment via curriculum schedule
+This script keeps schema-specific data loading (render/lossmask JSONL), but
+uses the shared `CircuitBreakerTrainer` core so training logic is not duplicated.
 """
 
 import argparse
@@ -21,31 +11,19 @@ import json
 import logging
 import os
 import sys
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import torch
-import torch.distributed as dist
-from torch.utils.data import Dataset, DataLoader, DistributedSampler
-from tqdm import tqdm
+from torch.utils.data import DataLoader, Dataset
+from transformers import AutoTokenizer
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    get_linear_schedule_with_warmup,
-    get_cosine_schedule_with_warmup,
-)
-from peft import get_peft_model, LoraConfig, TaskType
-
-# Local imports
-from src.training.config import (
-    CircuitBreakerConfig,
-    get_config,
-    config_to_dict,
-)
+from src.training.config import CircuitBreakerConfig, get_config
+from src.training.hf_utils import resolve_hf_token, resolve_local_model_path
+from src.training.losses import SUPPORTED_DISTANCES, SUPPORTED_LOSS_MODES
+from src.training.trainer import CircuitBreakerTrainer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -54,54 +32,38 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# =============================================================================
-# Data Loading
-# =============================================================================
-
 def _iter_jsonl(path: Path) -> Iterator[Dict[str, Any]]:
     """Iterate over JSONL file."""
-    with open(path, "r") as f:
-        for line in f:
+    with open(path, "r") as handle:
+        for line in handle:
             if line.strip():
                 yield json.loads(line)
 
 
-def load_renders_and_masks(
-    render_path: Path,
-    lossmask_path: Path,
-) -> List[Dict[str, Any]]:
-    """
-    Load and join render_v1 and lossmask_v1 files.
+def load_renders_and_masks(render_path: Path, lossmask_path: Path) -> List[Dict[str, Any]]:
+    """Load and join render_v1 and lossmask_v1 rows by render_id."""
+    renders = {row["render_id"]: row for row in _iter_jsonl(render_path)}
 
-    Returns list of dicts with:
-    - input_ids: token IDs
-    - attention_mask: attention mask
-    - loss_mask: per-token loss weights
-    - sample_weight: sample-level weight (from MWCS)
-    - trace_id: original trace ID
-    - render_id: render ID
-    - policy_id: LMP policy used
-    """
-    renders = {r["render_id"]: r for r in _iter_jsonl(render_path)}
-
-    samples = []
+    samples: List[Dict[str, Any]] = []
     for mask_row in _iter_jsonl(lossmask_path):
         render_id = mask_row.get("render_id")
         render = renders.get(render_id)
-
         if render is None:
             logger.warning("No render found for lossmask %s", render_id)
             continue
 
-        samples.append({
-            "input_ids": render["input_ids"],
-            "attention_mask": render.get("attention_mask", [1] * len(render["input_ids"])),
-            "loss_mask": mask_row["loss_mask"],
-            "sample_weight": mask_row.get("sample_weight", 1.0),
-            "trace_id": mask_row.get("trace_id"),
-            "render_id": render_id,
-            "policy_id": mask_row.get("policy_id"),
-        })
+        input_ids = render["input_ids"]
+        samples.append(
+            {
+                "input_ids": input_ids,
+                "attention_mask": render.get("attention_mask", [1] * len(input_ids)),
+                "loss_mask": mask_row["loss_mask"],
+                "sample_weight": mask_row.get("sample_weight", 1.0),
+                "trace_id": mask_row.get("trace_id"),
+                "render_id": render_id,
+                "policy_id": mask_row.get("policy_id"),
+            }
+        )
 
     return samples
 
@@ -112,21 +74,16 @@ def load_ds_dr_data(
     dr_render_path: Path,
     dr_lossmask_path: Path,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """
-    Load DS (harmful) and DR (benign) data from ETL_B outputs.
+    """Load DS as harmful and DR as benign."""
+    logger.info("Loading DS (harmful) from %s", ds_render_path)
+    harmful = load_renders_and_masks(ds_render_path, ds_lossmask_path)
+    logger.info("Loaded %d harmful DS samples", len(harmful))
 
-    DS traces = model follows injection = harmful examples
-    DR traces = model ignores injection = benign examples
-    """
-    logger.info("Loading DS (harmful) data from %s", ds_render_path)
-    ds_samples = load_renders_and_masks(ds_render_path, ds_lossmask_path)
-    logger.info("Loaded %d DS (harmful) samples", len(ds_samples))
+    logger.info("Loading DR (benign) from %s", dr_render_path)
+    benign = load_renders_and_masks(dr_render_path, dr_lossmask_path)
+    logger.info("Loaded %d benign DR samples", len(benign))
 
-    logger.info("Loading DR (benign) data from %s", dr_render_path)
-    dr_samples = load_renders_and_masks(dr_render_path, dr_lossmask_path)
-    logger.info("Loaded %d DR (benign) samples", len(dr_samples))
-
-    return ds_samples, dr_samples
+    return harmful, benign
 
 
 def load_labeled_data(
@@ -134,46 +91,36 @@ def load_labeled_data(
     lossmask_path: Path,
     traces_path: Optional[Path] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """
-    Load data and split by labels.is_harmful field.
-
-    For AgentDojo data where harmful/benign is determined by attack success.
-    """
+    """Load data and split by labels.is_harmful from traces."""
     all_samples = load_renders_and_masks(render_path, lossmask_path)
 
-    # Load trace labels if provided
-    trace_labels = {}
+    trace_labels: Dict[str, bool] = {}
     if traces_path and traces_path.exists():
         for row in _iter_jsonl(traces_path):
             trace_id = row.get("id")
             labels = row.get("labels", {})
-            is_harmful = labels.get("is_harmful", False)
-            trace_labels[trace_id] = is_harmful
+            trace_labels[trace_id] = bool(labels.get("is_harmful", False))
 
-    harmful = []
-    benign = []
+    harmful: List[Dict[str, Any]] = []
+    benign: List[Dict[str, Any]] = []
 
     for sample in all_samples:
-        trace_id = sample.get("trace_id")
-        is_harmful = trace_labels.get(trace_id, False)
-
-        if is_harmful:
+        if trace_labels.get(sample.get("trace_id"), False):
             harmful.append(sample)
         else:
             benign.append(sample)
 
-    logger.info("Split %d samples: %d harmful, %d benign",
-                len(all_samples), len(harmful), len(benign))
-
+    logger.info(
+        "Split %d samples -> harmful=%d benign=%d",
+        len(all_samples),
+        len(harmful),
+        len(benign),
+    )
     return harmful, benign
 
 
-# =============================================================================
-# Dataset
-# =============================================================================
-
 class SchemaDataset(Dataset):
-    """Dataset for schema v1 format data."""
+    """Dataset of harmful/benign pairs from pre-tokenized schema rows."""
 
     def __init__(
         self,
@@ -187,33 +134,33 @@ class SchemaDataset(Dataset):
         self.max_length = max_length
         self.pad_token_id = pad_token_id
 
-        # Balance by taking min of both
         self.num_pairs = min(len(harmful_samples), len(benign_samples))
-
         if self.num_pairs == 0:
-            raise ValueError("No paired data available (need both harmful and benign)")
+            raise ValueError("No paired data available (need both harmful and benign samples)")
 
-        logger.info("Created dataset with %d pairs (%d harmful, %d benign available)",
-                   self.num_pairs, len(harmful_samples), len(benign_samples))
+        logger.info(
+            "SchemaDataset pairs=%d (harmful=%d benign=%d)",
+            self.num_pairs,
+            len(harmful_samples),
+            len(benign_samples),
+        )
 
     def __len__(self) -> int:
         return self.num_pairs
 
     def _prepare_sample(self, sample: Dict[str, Any]) -> Dict[str, torch.Tensor]:
-        """Prepare a single sample with padding/truncation."""
-        input_ids = sample["input_ids"][:self.max_length]
-        attention_mask = sample["attention_mask"][:self.max_length]
-        loss_mask = sample["loss_mask"][:self.max_length]
+        input_ids = sample["input_ids"][: self.max_length]
+        attention_mask = sample["attention_mask"][: self.max_length]
+        loss_mask = sample["loss_mask"][: self.max_length]
 
-        # Helper to pad list to max_length
-        def pad_to_max(lst, pad_val):
-            if len(lst) < self.max_length:
-                return lst + [pad_val] * (self.max_length - len(lst))
-            return lst
+        def _pad(values: List[Any], value: Any) -> List[Any]:
+            if len(values) < self.max_length:
+                return values + [value] * (self.max_length - len(values))
+            return values
 
-        input_ids = pad_to_max(input_ids, self.pad_token_id)
-        attention_mask = pad_to_max(attention_mask, 0)
-        loss_mask = pad_to_max(loss_mask, 0.0)
+        input_ids = _pad(input_ids, self.pad_token_id)
+        attention_mask = _pad(attention_mask, 0)
+        loss_mask = _pad(loss_mask, 0.0)
 
         return {
             "input_ids": torch.tensor(input_ids, dtype=torch.long),
@@ -223,13 +170,8 @@ class SchemaDataset(Dataset):
         }
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        # Get harmful sample (cycling if needed)
-        harmful_idx = idx % len(self.harmful_samples)
-        harmful = self._prepare_sample(self.harmful_samples[harmful_idx])
-
-        # Get benign sample (cycling if needed)
-        benign_idx = idx % len(self.benign_samples)
-        benign = self._prepare_sample(self.benign_samples[benign_idx])
+        harmful = self._prepare_sample(self.harmful_samples[idx % len(self.harmful_samples)])
+        benign = self._prepare_sample(self.benign_samples[idx % len(self.benign_samples)])
 
         return {
             "harmful_input_ids": harmful["input_ids"],
@@ -243,628 +185,274 @@ class SchemaDataset(Dataset):
         }
 
 
-# =============================================================================
-# Loss Computation
-# =============================================================================
+def _resolve_training_tokenizer(config: CircuitBreakerConfig) -> AutoTokenizer:
+    hf_token = resolve_hf_token()
+    offline_mode = os.environ.get("HF_HUB_OFFLINE", "0") == "1"
 
-def compute_rr_loss(
-    model: torch.nn.Module,
-    input_ids: torch.Tensor,
-    attention_mask: torch.Tensor,
-    loss_mask: torch.Tensor,
-    target_layers: List[int],
-) -> torch.Tensor:
-    """
-    Compute Representation Rerouting (RR) loss for harmful examples.
+    model_path = config.base_model
+    if offline_mode:
+        model_path = resolve_local_model_path(config.base_model, hf_token)
 
-    Loss = -log(1 - cos_sim(h_harmful, h_random))
-
-    This encourages harmful representations to be orthogonal to their
-    original direction (randomizing them).
-    """
-    outputs = model(
-        input_ids=input_ids,
-        attention_mask=attention_mask,
-        output_hidden_states=True,
-        return_dict=True,
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_path,
+        token=hf_token,
+        trust_remote_code=True,
+        local_files_only=offline_mode,
     )
-
-    hidden_states = outputs.hidden_states
-
-    # Get representations at target layers
-    target_reps = []
-    for layer_idx in target_layers:
-        if layer_idx < len(hidden_states):
-            target_reps.append(hidden_states[layer_idx])
-
-    if not target_reps:
-        return torch.tensor(0.0, device=input_ids.device)
-
-    # Average across layers
-    h_harmful = torch.stack(target_reps, dim=0).mean(dim=0)  # [batch, seq, hidden]
-
-    # Create random target (unit random vectors)
-    h_random = torch.randn_like(h_harmful)
-    h_random = h_random / (h_random.norm(dim=-1, keepdim=True) + 1e-8)
-
-    # Normalize harmful representations
-    h_harmful_norm = h_harmful / (h_harmful.norm(dim=-1, keepdim=True) + 1e-8)
-
-    # Cosine similarity
-    cos_sim = (h_harmful_norm * h_random).sum(dim=-1)  # [batch, seq]
-
-    # Apply loss mask (only on completion tokens)
-    mask = loss_mask.float()
-
-    # Loss: -log(1 - cos_sim) encourages orthogonality
-    loss_per_token = -torch.log(1 - cos_sim.abs() + 1e-8)
-
-    # Masked mean
-    masked_loss = (loss_per_token * mask).sum() / (mask.sum() + 1e-8)
-
-    return masked_loss
+    if getattr(tokenizer, "padding_side", None) != "right":
+        tokenizer.padding_side = "right"
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    return tokenizer
 
 
-def compute_retain_loss(
-    model: torch.nn.Module,
-    input_ids: torch.Tensor,
-    attention_mask: torch.Tensor,
-    loss_mask: torch.Tensor,
-    labels: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
-    """
-    Compute retain loss (standard cross-entropy) for benign examples.
-
-    This maintains the model's ability to generate benign responses.
-    """
-    if labels is None:
-        labels = input_ids.clone()
-
-    outputs = model(
-        input_ids=input_ids,
-        attention_mask=attention_mask,
-        labels=labels,
-        return_dict=True,
-    )
-
-    # Get per-token loss
-    logits = outputs.logits
-    shift_logits = logits[..., :-1, :].contiguous()
-    shift_labels = labels[..., 1:].contiguous()
-    shift_mask = loss_mask[..., 1:].contiguous()
-
-    loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
-    loss_per_token = loss_fct(
-        shift_logits.view(-1, shift_logits.size(-1)),
-        shift_labels.view(-1),
-    ).view(shift_labels.size())
-
-    # Masked mean
-    masked_loss = (loss_per_token * shift_mask).sum() / (shift_mask.sum() + 1e-8)
-
-    return masked_loss
-
-
-def get_loss_weights(
-    config: CircuitBreakerConfig,
-    step: int,
-) -> Tuple[float, float, float]:
-    """
-    Compute loss weights (cs, cr, alpha) for the current step.
-    """
-    # Compute alpha schedule
-    # α(t) = α_max × max(0, 1 - t / (decay_multiplier × total_steps))
-    decay_horizon = config.alpha_decay_multiplier * config.total_steps
-    alpha = config.alpha_max * max(0.0, 1.0 - step / decay_horizon)
-
-    if config.loss_weighting == "dual":
-        # Dual coefficient: cs decays, cr increases
-        cs = alpha / config.alpha_max if config.alpha_max > 0 else 1.0
-        cr = 1.0 - cs * 0.5  # cr ranges from 0.5 to 1.0
-    else:
-        # Single alpha: L = alpha * L_rr + L_retain
-        cs = alpha
-        cr = 1.0
-
-    return cs, cr, alpha
-
-
-def compute_cb_loss(
-    model: torch.nn.Module,
-    batch: Dict[str, torch.Tensor],
-    config: CircuitBreakerConfig,
-    step: int,
-) -> Tuple[torch.Tensor, Dict[str, float]]:
-    """
-    Compute combined Circuit Breaker loss.
-    
-    NOTE: This function computes both losses and combines them, which keeps
-    both computation graphs in memory. For memory efficiency, use sequential
-    backward passes in the training loop instead.
-    """
-    device = next(model.parameters()).device
-
-    # Move batch to device
-    harmful_ids = batch["harmful_input_ids"].to(device)
-    harmful_mask = batch["harmful_attention_mask"].to(device)
-    harmful_loss_mask = batch["harmful_loss_mask"].to(device)
-    harmful_weight = batch["harmful_sample_weight"].to(device)
-
-    benign_ids = batch["benign_input_ids"].to(device)
-    benign_mask = batch["benign_attention_mask"].to(device)
-    benign_loss_mask = batch["benign_loss_mask"].to(device)
-    benign_weight = batch["benign_sample_weight"].to(device)
-
-    cs, cr, alpha = get_loss_weights(config, step)
-
-    # Compute losses
-    rr_loss = compute_rr_loss(
-        model,
-        harmful_ids,
-        harmful_mask,
-        harmful_loss_mask * harmful_weight.unsqueeze(-1),
-        config.cb_target_layers,
-    )
-
-    retain_loss = compute_retain_loss(
-        model,
-        benign_ids,
-        benign_mask,
-        benign_loss_mask * benign_weight.unsqueeze(-1),
-    )
-
-    total_loss = cs * rr_loss + cr * retain_loss
-    
-    metrics = {
-        "rr_loss": rr_loss.item(),
-        "retain_loss": retain_loss.item(),
-        "cs": cs,
-        "cr": cr,
-        "alpha": alpha,
-        "total_loss": total_loss.item(),
-    }
-
-    return total_loss, metrics
-
-
-# =============================================================================
-# Training Loop
-# =============================================================================
-
-def train(
+def run_training(
     config: CircuitBreakerConfig,
     harmful_samples: List[Dict[str, Any]],
     benign_samples: List[Dict[str, Any]],
-    output_dir: Path,
-    resume_from: Optional[Path] = None,
-):
-    """Main training loop."""
+) -> None:
+    """Build schema dataloader and run the shared trainer core."""
+    tokenizer = _resolve_training_tokenizer(config)
 
-    # Setup distributed if available
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    world_size = int(os.environ.get("WORLD_SIZE", 1))
-    is_distributed = world_size > 1
-
-    if is_distributed:
-        dist.init_process_group(backend="nccl")
-        torch.cuda.set_device(local_rank)
-
-    device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
-    is_main = local_rank == 0
-
-    if is_main:
-        logger.info("Training configuration:")
-        logger.info("  Model: %s", config.base_model)
-        logger.info("  Total steps: %d", config.total_steps)
-        logger.info("  Batch size: %d", config.batch_size)
-        logger.info("  Learning rate: %e", config.learning_rate)
-        logger.info("  Alpha max: %.2f", config.alpha_max)
-        logger.info("  Target layers: %s", config.cb_target_layers)
-
-    # Load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(config.base_model, local_files_only=True)
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token_id = tokenizer.eos_token_id
-
-    # Load model
-    if is_main:
-        logger.info("Loading model: %s", config.base_model)
-
-    model = AutoModelForCausalLM.from_pretrained(
-        config.base_model,
-        torch_dtype=getattr(torch, config.torch_dtype),
-        device_map={"": device} if not is_distributed else None,
-        local_files_only=True,
-    )
-
-    # Add LoRA
-    lora_config = LoraConfig(
-        r=config.lora.r,
-        lora_alpha=config.lora.alpha,
-        lora_dropout=config.lora.dropout,
-        target_modules=config.lora.target_modules,
-        task_type=TaskType.CAUSAL_LM,
-    )
-    model = get_peft_model(model, lora_config)
-
-    if config.gradient_checkpointing:
-        model.gradient_checkpointing_enable()
-        if hasattr(model, "enable_input_require_grads"):
-            model.enable_input_require_grads()
-        model.config.use_cache = False  # GC is incompatible with caching
-
-    if is_main:
-        model.print_trainable_parameters()
-
-    if is_distributed:
-        model = torch.nn.parallel.DistributedDataParallel(
-            model,
-            device_ids=[local_rank],
-            output_device=local_rank,
-        )
-
-    # Create dataset
     dataset = SchemaDataset(
-        harmful_samples,
-        benign_samples,
+        harmful_samples=harmful_samples,
+        benign_samples=benign_samples,
         max_length=config.max_seq_length,
         pad_token_id=tokenizer.pad_token_id,
     )
 
-    sampler = DistributedSampler(dataset) if is_distributed else None
     dataloader = DataLoader(
         dataset,
         batch_size=config.batch_size,
-        shuffle=(sampler is None),
-        sampler=sampler,
-        num_workers=0,  # Run in main process to avoid shared memory/resize errors
+        shuffle=True,
+        num_workers=0,
         pin_memory=False,
     )
 
-    # Optimizer and scheduler
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=config.learning_rate,
-        weight_decay=config.weight_decay,
-    )
-
-    scheduler = get_linear_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=config.warmup_steps,
-        num_training_steps=config.total_steps,
-    )
-
-    # Setup wandb
-    if config.use_wandb and is_main:
-        try:
-            import wandb
-            wandb.init(
-                project=config.wandb_project,
-                name=config.wandb_run_name,
-                config=config_to_dict(config),
-            )
-        except ImportError:
-            logger.warning("wandb not installed, skipping logging")
-            config.use_wandb = False
-
-    # Training loop
-    output_dir.mkdir(parents=True, exist_ok=True)
-    global_step = 0
-    epoch = 0
-
-    model.train()
-    pbar = tqdm(total=config.total_steps, disable=not is_main, desc="Training")
-
-    while global_step < config.total_steps:
-        if sampler is not None:
-            sampler.set_epoch(epoch)
-
-        for batch in dataloader:
-            if global_step >= config.total_steps:
-                break
-
-            # Sequential backward pass to save memory
-            train_model = model.module if is_distributed else model
-            device = next(train_model.parameters()).device
-            
-            # Get weights
-            cs, cr, alpha = get_loss_weights(config, global_step)
-            
-            # 1. Harmful pass (RR loss)
-            harmful_ids = batch["harmful_input_ids"].to(device)
-            harmful_mask = batch["harmful_attention_mask"].to(device)
-            harmful_loss_mask = batch["harmful_loss_mask"].to(device)
-            harmful_weight = batch["harmful_sample_weight"].to(device)
-            
-            rr_loss = compute_rr_loss(
-                train_model,
-                harmful_ids,
-                harmful_mask,
-                harmful_loss_mask * harmful_weight.unsqueeze(-1),
-                config.cb_target_layers,
-            )
-            
-            # Backward RR
-            scaled_rr_loss = (cs * rr_loss) / config.gradient_accumulation_steps
-            scaled_rr_loss.backward()
-            
-            # 2. Benign pass (Retain loss)
-            benign_ids = batch["benign_input_ids"].to(device)
-            benign_mask = batch["benign_attention_mask"].to(device)
-            benign_loss_mask = batch["benign_loss_mask"].to(device)
-            benign_weight = batch["benign_sample_weight"].to(device)
-            
-            retain_loss = compute_retain_loss(
-                train_model,
-                benign_ids,
-                benign_mask,
-                benign_loss_mask * benign_weight.unsqueeze(-1),
-            )
-            
-            # Backward Retain
-            scaled_retain_loss = (cr * retain_loss) / config.gradient_accumulation_steps
-            scaled_retain_loss.backward()
-            
-            # Metrics
-            total_loss = cs * rr_loss + cr * retain_loss
-            metrics = {
-                "rr_loss": rr_loss.item(),
-                "retain_loss": retain_loss.item(),
-                "cs": cs,
-                "cr": cr,
-                "alpha": alpha,
-                "total_loss": total_loss.item(),
-            }
-
-            if (global_step + 1) % config.gradient_accumulation_steps == 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm)
-                optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad()
-
-            # Logging
-            if is_main and global_step % config.logging_steps == 0:
-                lr = scheduler.get_last_lr()[0]
-                log_msg = (
-                    f"Step {global_step}: loss={metrics['total_loss']:.4f}, "
-                    f"rr={metrics['rr_loss']:.4f}, ret={metrics['retain_loss']:.4f}, "
-                    f"alpha={metrics['alpha']:.2f}, lr={lr:.2e}"
-                )
-                logger.info(log_msg)
-
-                if config.use_wandb:
-                    import wandb
-                    wandb.log({**metrics, "lr": lr}, step=global_step)
-
-            # Save checkpoint
-            if is_main and global_step > 0 and global_step % config.save_steps == 0:
-                ckpt_dir = output_dir / f"checkpoint-{global_step}"
-                ckpt_dir.mkdir(exist_ok=True)
-
-                save_model = model.module if is_distributed else model
-                save_model.save_pretrained(ckpt_dir)
-                tokenizer.save_pretrained(ckpt_dir)
-
-                # Save training state
-                torch.save({
-                    "step": global_step,
-                    "optimizer": optimizer.state_dict(),
-                    "scheduler": scheduler.state_dict(),
-                }, ckpt_dir / "training_state.pt")
-
-                logger.info("Saved checkpoint to %s", ckpt_dir)
-
-            global_step += 1
-            pbar.update(1)
-
-        epoch += 1
-
-    pbar.close()
-
-    # Save final model
-    if is_main:
-        final_dir = output_dir / "final"
-        final_dir.mkdir(exist_ok=True)
-
-        save_model = model.module if is_distributed else model
-        save_model.save_pretrained(final_dir)
-        tokenizer.save_pretrained(final_dir)
-
-        logger.info("Saved final model to %s", final_dir)
-
-        if config.use_wandb:
-            import wandb
-            wandb.finish()
-
-    if is_distributed:
-        dist.destroy_process_group()
-        
-    # Ensure memory is released
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    trainer = CircuitBreakerTrainer(config=config, dataloader=dataloader, tokenizer=tokenizer)
+    try:
+        trainer.train()
+    except KeyboardInterrupt:
+        logger.warning("Training interrupted by user; saving checkpoint")
+        trainer.save_checkpoint()
+    finally:
+        trainer.cleanup()
 
 
-# =============================================================================
-# CLI
-# =============================================================================
-
-def main():
+def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Circuit Breaker training with schema v1 data format",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
-    # Data loading mode
     mode_group = parser.add_argument_group("Data Loading")
     mode_group.add_argument(
-        "--mode", type=str, default="ds_dr",
+        "--mode",
+        type=str,
+        default="ds_dr",
         choices=["ds_dr", "labeled", "mixed"],
-        help="Data loading mode: ds_dr (DS=harmful, DR=benign), "
-             "labeled (split by labels.is_harmful), mixed (explicit paths)",
+        help="Data loading mode",
     )
 
-    # DS/DR mode paths
     mode_group.add_argument("--ds-renders", type=Path, help="DS renders JSONL (harmful)")
     mode_group.add_argument("--ds-lossmasks", type=Path, help="DS lossmasks JSONL (harmful)")
     mode_group.add_argument("--dr-renders", type=Path, help="DR renders JSONL (benign)")
     mode_group.add_argument("--dr-lossmasks", type=Path, help="DR lossmasks JSONL (benign)")
 
-    # Labeled mode paths
-    mode_group.add_argument("--renders", type=Path, help="Renders JSONL (for labeled mode)")
-    mode_group.add_argument("--lossmasks", type=Path, help="Lossmasks JSONL (for labeled mode)")
-    mode_group.add_argument("--traces", type=Path, help="Traces JSONL (for labels)")
+    mode_group.add_argument("--renders", type=Path, help="Renders JSONL for labeled mode")
+    mode_group.add_argument("--lossmasks", type=Path, help="Lossmasks JSONL for labeled mode")
+    mode_group.add_argument("--traces", type=Path, help="Traces JSONL for labels")
 
-    # Mixed mode paths
-    mode_group.add_argument(
-        "--harmful-renders", type=Path, nargs="+",
-        help="Harmful renders JSONL paths (mixed mode)",
-    )
-    mode_group.add_argument(
-        "--harmful-lossmasks", type=Path, nargs="+",
-        help="Harmful lossmasks JSONL paths (mixed mode)",
-    )
-    mode_group.add_argument(
-        "--benign-renders", type=Path, nargs="+",
-        help="Benign renders JSONL paths (mixed mode)",
-    )
-    mode_group.add_argument(
-        "--benign-lossmasks", type=Path, nargs="+",
-        help="Benign lossmasks JSONL paths (mixed mode)",
-    )
+    mode_group.add_argument("--harmful-renders", type=Path, nargs="+", help="Harmful renders JSONL")
+    mode_group.add_argument("--harmful-lossmasks", type=Path, nargs="+", help="Harmful lossmasks JSONL")
+    mode_group.add_argument("--benign-renders", type=Path, nargs="+", help="Benign renders JSONL")
+    mode_group.add_argument("--benign-lossmasks", type=Path, nargs="+", help="Benign lossmasks JSONL")
 
-    # Model config
     model_group = parser.add_argument_group("Model")
-    model_group.add_argument(
-        "--preset", type=str, default="llama-3.1-8b-instruct",
-        help="Config preset (llama-4-scout, llama-3-8b, llama-3.1-8b-instruct, mistral-7b)",
-    )
+    model_group.add_argument("--preset", type=str, default="llama-3.1-8b-instruct", help="Config preset")
     model_group.add_argument("--model", type=str, help="Override base model")
     model_group.add_argument("--output-dir", type=Path, required=True, help="Output directory")
-    model_group.add_argument("--resume-from", type=Path, help="Resume from checkpoint")
+    model_group.add_argument("--resume-from", type=Path, help="Reserved for future resume support")
 
-    # Training hyperparameters
     train_group = parser.add_argument_group("Training")
     train_group.add_argument("--total-steps", type=int, help="Total training steps")
     train_group.add_argument("--batch-size", type=int, help="Batch size per GPU")
     train_group.add_argument("--learning-rate", type=float, help="Learning rate")
     train_group.add_argument("--warmup-steps", type=int, help="Warmup steps")
-    train_group.add_argument("--alpha-max", type=float, help="Initial alpha value")
+    train_group.add_argument("--alpha-max", type=float, help="Initial alpha")
     train_group.add_argument("--max-seq-length", type=int, help="Max sequence length")
     train_group.add_argument("--gradient-accumulation-steps", type=int, help="Gradient accumulation")
 
-    # CB specific
     cb_group = parser.add_argument_group("Circuit Breaker")
+    cb_group.add_argument("--cb-target-layers", type=int, nargs="+", help="Target layers")
     cb_group.add_argument(
-        "--cb-target-layers", type=int, nargs="+",
-        help="Target layers for representation extraction",
+        "--loss-mode",
+        type=str,
+        choices=list(SUPPORTED_LOSS_MODES),
+        help="Core loss objective",
     )
     cb_group.add_argument(
-        "--loss-weighting", type=str, choices=["single_alpha", "dual"],
-        help="Loss weighting strategy",
+        "--loss-weighting",
+        type=str,
+        choices=["single_alpha", "dual"],
+        help="Legacy weighting strategy",
     )
+    cb_group.add_argument("--triplet-alpha-benign", type=float, help="Triplet alpha")
+    cb_group.add_argument("--triplet-beta-harmful", type=float, help="Triplet beta")
+    cb_group.add_argument("--triplet-gamma-kl", type=float, help="Triplet gamma")
+    cb_group.add_argument("--triplet-margin-benign", type=float, help="Triplet benign margin")
+    cb_group.add_argument("--triplet-margin-harmful", type=float, help="Triplet harmful margin")
+    cb_group.add_argument(
+        "--triplet-benign-positive-distance",
+        type=str,
+        choices=list(SUPPORTED_DISTANCES),
+        help="Distance for benign positive pair",
+    )
+    cb_group.add_argument(
+        "--triplet-benign-negative-distance",
+        type=str,
+        choices=list(SUPPORTED_DISTANCES),
+        help="Distance for benign negative pair",
+    )
+    cb_group.add_argument(
+        "--triplet-harmful-positive-distance",
+        type=str,
+        choices=list(SUPPORTED_DISTANCES),
+        help="Distance for harmful positive pair",
+    )
+    cb_group.add_argument(
+        "--triplet-harmful-negative-distance",
+        type=str,
+        choices=list(SUPPORTED_DISTANCES),
+        help="Distance for harmful negative pair",
+    )
+    cb_group.add_argument("--triplet-mix-l2-weight", type=float, help="dmix L2 coefficient")
+    cb_group.add_argument("--triplet-mix-cos-weight", type=float, help="dmix cosine coefficient")
 
-    # LoRA
     lora_group = parser.add_argument_group("LoRA")
     lora_group.add_argument("--lora-r", type=int, help="LoRA rank")
     lora_group.add_argument("--lora-alpha", type=int, help="LoRA alpha")
     lora_group.add_argument("--lora-dropout", type=float, help="LoRA dropout")
 
-    # Logging
     log_group = parser.add_argument_group("Logging")
-    log_group.add_argument("--wandb-project", type=str, help="W&B project name")
+    log_group.add_argument("--wandb-project", type=str, help="W&B project")
     log_group.add_argument("--wandb-run-name", type=str, help="W&B run name")
-    log_group.add_argument("--no-wandb", action="store_true", help="Disable W&B logging")
+    log_group.add_argument("--no-wandb", action="store_true", help="Disable W&B")
     log_group.add_argument("--logging-steps", type=int, help="Log every N steps")
-    log_group.add_argument("--save-steps", type=int, help="Save checkpoint every N steps")
+    log_group.add_argument("--save-steps", type=int, help="Save every N steps")
 
-    args = parser.parse_args()
+    return parser.parse_args()
 
-    # Build config
-    overrides = {}
-    if args.model:
-        overrides["base_model"] = args.model
-    if args.total_steps:
-        overrides["total_steps"] = args.total_steps
-    if args.batch_size:
-        overrides["batch_size"] = args.batch_size
-    if args.learning_rate:
-        overrides["learning_rate"] = args.learning_rate
-    if args.warmup_steps:
-        overrides["warmup_steps"] = args.warmup_steps
-    if args.alpha_max:
-        overrides["alpha_max"] = args.alpha_max
-    if args.max_seq_length:
-        overrides["max_seq_length"] = args.max_seq_length
-    if args.gradient_accumulation_steps:
-        overrides["gradient_accumulation_steps"] = args.gradient_accumulation_steps
-    if args.cb_target_layers:
-        overrides["cb_target_layers"] = args.cb_target_layers
-    if args.loss_weighting:
-        overrides["loss_weighting"] = args.loss_weighting
-    if args.wandb_project:
-        overrides["wandb_project"] = args.wandb_project
-    if args.wandb_run_name:
-        overrides["wandb_run_name"] = args.wandb_run_name
+
+def _load_samples(args: argparse.Namespace) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    if args.mode == "ds_dr":
+        if not all([args.ds_renders, args.ds_lossmasks, args.dr_renders, args.dr_lossmasks]):
+            raise ValueError("ds_dr mode requires --ds-renders --ds-lossmasks --dr-renders --dr-lossmasks")
+        return load_ds_dr_data(
+            args.ds_renders,
+            args.ds_lossmasks,
+            args.dr_renders,
+            args.dr_lossmasks,
+        )
+
+    if args.mode == "labeled":
+        if not all([args.renders, args.lossmasks]):
+            raise ValueError("labeled mode requires --renders --lossmasks")
+        return load_labeled_data(args.renders, args.lossmasks, args.traces)
+
+    if not all([args.harmful_renders, args.harmful_lossmasks, args.benign_renders, args.benign_lossmasks]):
+        raise ValueError("mixed mode requires harmful/benign renders+lossmasks arguments")
+
+    if len(args.harmful_renders) != len(args.harmful_lossmasks):
+        raise ValueError("--harmful-renders and --harmful-lossmasks must have same length")
+    if len(args.benign_renders) != len(args.benign_lossmasks):
+        raise ValueError("--benign-renders and --benign-lossmasks must have same length")
+
+    harmful: List[Dict[str, Any]] = []
+    for render_path, mask_path in zip(args.harmful_renders, args.harmful_lossmasks):
+        harmful.extend(load_renders_and_masks(render_path, mask_path))
+
+    benign: List[Dict[str, Any]] = []
+    for render_path, mask_path in zip(args.benign_renders, args.benign_lossmasks):
+        benign.extend(load_renders_and_masks(render_path, mask_path))
+
+    logger.info("Mixed mode loaded harmful=%d benign=%d", len(harmful), len(benign))
+    return harmful, benign
+
+
+def _build_config(args: argparse.Namespace) -> CircuitBreakerConfig:
+    overrides: Dict[str, Any] = {
+        "output_dir": str(args.output_dir),
+    }
+
+    mapping = {
+        "model": "base_model",
+        "total_steps": "total_steps",
+        "batch_size": "batch_size",
+        "learning_rate": "learning_rate",
+        "warmup_steps": "warmup_steps",
+        "alpha_max": "alpha_max",
+        "max_seq_length": "max_seq_length",
+        "gradient_accumulation_steps": "gradient_accumulation_steps",
+        "cb_target_layers": "cb_target_layers",
+        "loss_mode": "loss_mode",
+        "loss_weighting": "loss_weighting",
+        "triplet_alpha_benign": "triplet_alpha_benign",
+        "triplet_beta_harmful": "triplet_beta_harmful",
+        "triplet_gamma_kl": "triplet_gamma_kl",
+        "triplet_margin_benign": "triplet_margin_benign",
+        "triplet_margin_harmful": "triplet_margin_harmful",
+        "triplet_benign_positive_distance": "triplet_benign_positive_distance",
+        "triplet_benign_negative_distance": "triplet_benign_negative_distance",
+        "triplet_harmful_positive_distance": "triplet_harmful_positive_distance",
+        "triplet_harmful_negative_distance": "triplet_harmful_negative_distance",
+        "triplet_mix_l2_weight": "triplet_mix_l2_weight",
+        "triplet_mix_cos_weight": "triplet_mix_cos_weight",
+        "wandb_project": "wandb_project",
+        "wandb_run_name": "wandb_run_name",
+        "logging_steps": "logging_steps",
+        "save_steps": "save_steps",
+    }
+
+    for arg_name, config_name in mapping.items():
+        value = getattr(args, arg_name)
+        if value is not None:
+            overrides[config_name] = value
+
     if args.no_wandb:
         overrides["use_wandb"] = False
-    if args.logging_steps:
-        overrides["logging_steps"] = args.logging_steps
-    if args.save_steps:
-        overrides["save_steps"] = args.save_steps
 
     config = get_config(args.preset, **overrides)
 
-    # Update LoRA config if specified
-    if args.lora_r:
+    if args.lora_r is not None:
         config.lora.r = args.lora_r
-    if args.lora_alpha:
+    if args.lora_alpha is not None:
         config.lora.alpha = args.lora_alpha
-    if args.lora_dropout:
+    if args.lora_dropout is not None:
         config.lora.dropout = args.lora_dropout
 
-    # Load data based on mode
-    if args.mode == "ds_dr":
-        if not all([args.ds_renders, args.ds_lossmasks, args.dr_renders, args.dr_lossmasks]):
-            parser.error("DS/DR mode requires --ds-renders, --ds-lossmasks, --dr-renders, --dr-lossmasks")
+    return config
 
-        harmful_samples, benign_samples = load_ds_dr_data(
-            args.ds_renders, args.ds_lossmasks,
-            args.dr_renders, args.dr_lossmasks,
-        )
 
-    elif args.mode == "labeled":
-        if not all([args.renders, args.lossmasks]):
-            parser.error("Labeled mode requires --renders and --lossmasks")
+def main() -> None:
+    args = _parse_args()
 
-        harmful_samples, benign_samples = load_labeled_data(
-            args.renders, args.lossmasks, args.traces,
-        )
+    if args.resume_from is not None:
+        logger.warning("--resume-from is currently ignored by shared trainer path")
 
-    elif args.mode == "mixed":
-        if not all([args.harmful_renders, args.harmful_lossmasks,
-                   args.benign_renders, args.benign_lossmasks]):
-            parser.error("Mixed mode requires --harmful-renders, --harmful-lossmasks, "
-                        "--benign-renders, --benign-lossmasks")
+    try:
+        harmful_samples, benign_samples = _load_samples(args)
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
 
-        harmful_samples = []
-        for render_path, mask_path in zip(args.harmful_renders, args.harmful_lossmasks):
-            harmful_samples.extend(load_renders_and_masks(render_path, mask_path))
+    config = _build_config(args)
 
-        benign_samples = []
-        for render_path, mask_path in zip(args.benign_renders, args.benign_lossmasks):
-            benign_samples.extend(load_renders_and_masks(render_path, mask_path))
+    logger.info("Starting schema training via shared trainer core")
+    logger.info("  loss_mode=%s", config.loss_mode)
+    logger.info("  output_dir=%s", config.output_dir)
+    logger.info("  harmful=%d benign=%d", len(harmful_samples), len(benign_samples))
 
-        logger.info("Mixed mode: %d harmful, %d benign samples",
-                   len(harmful_samples), len(benign_samples))
-
-    # Run training
-    train(
-        config,
-        harmful_samples,
-        benign_samples,
-        args.output_dir,
-        args.resume_from,
-    )
+    run_training(config, harmful_samples, benign_samples)
 
 
 if __name__ == "__main__":
