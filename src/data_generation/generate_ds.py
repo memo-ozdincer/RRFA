@@ -169,7 +169,7 @@ class VLLMBackend:
         self,
         model_path: str,
         tensor_parallel_size: int = 1,
-        max_model_len: int = 16384,
+        max_model_len: int = 32768,
         dtype: str = "bfloat16",
     ):
         from vllm import LLM, SamplingParams
@@ -1033,8 +1033,8 @@ def main():
     parser.add_argument(
         "--max-model-len",
         type=int,
-        default=16384,
-        help="Max model length for vLLM (default: 16384)",
+        default=32768,
+        help="Max model length for vLLM (default: 32768)",
     )
     parser.add_argument(
         "--batch-size",

@@ -256,7 +256,7 @@ class VLLMBackend:
         self,
         model_path: str,
         tensor_parallel_size: int = 1,
-        max_model_len: int = 16384,
+        max_model_len: int = 32768,
         dtype: str = "bfloat16",
     ):
         from vllm import LLM, SamplingParams
@@ -273,6 +273,7 @@ class VLLMBackend:
         logger.info(f"Loading vLLM model: {model_path}")
         logger.info(f"  Tensor parallel size: {tensor_parallel_size}")
 
+        self.max_model_len = max_model_len
         self.llm = LLM(
             model=model_path,
             tensor_parallel_size=tensor_parallel_size,
@@ -289,7 +290,11 @@ class VLLMBackend:
         max_tokens: int = 256,
         top_p: float = 0.95,
     ) -> List[str]:
-        """Generate responses for a batch of prompts."""
+        """Generate responses for a batch of prompts.
+
+        Automatically filters out prompts that exceed max_model_len,
+        returning empty strings for those entries.
+        """
         sampling_params = self.SamplingParams(
             temperature=temperature,
             max_tokens=max_tokens,
@@ -297,8 +302,38 @@ class VLLMBackend:
             skip_special_tokens=False,
         )
 
-        outputs = self.llm.generate(prompts, sampling_params)
-        return [output.outputs[0].text for output in outputs]
+        # Filter out prompts that exceed max_model_len to avoid crashes
+        valid_indices = []
+        valid_prompts = []
+        skipped = 0
+        for i, prompt in enumerate(prompts):
+            token_len = len(self.tokenizer.encode(prompt))
+            if token_len <= self.max_model_len:
+                valid_indices.append(i)
+                valid_prompts.append(prompt)
+            else:
+                skipped += 1
+                if skipped <= 5:
+                    logger.warning(
+                        f"Skipping prompt {i}: {token_len} tokens exceeds max_model_len={self.max_model_len}"
+                    )
+        if skipped > 5:
+            logger.warning(f"  ... and {skipped - 5} more prompts skipped")
+        if skipped > 0:
+            logger.warning(f"Total skipped: {skipped}/{len(prompts)} prompts exceed max_model_len")
+
+        # Generate only valid prompts
+        if valid_prompts:
+            outputs = self.llm.generate(valid_prompts, sampling_params)
+            valid_responses = [output.outputs[0].text for output in outputs]
+        else:
+            valid_responses = []
+
+        # Reconstruct full response list with empty strings for skipped prompts
+        results = [""] * len(prompts)
+        for idx, resp in zip(valid_indices, valid_responses):
+            results[idx] = resp
+        return results
 
     def format_prompt_with_tools(
         self,
@@ -1429,8 +1464,8 @@ def main():
         help="Tensor parallel size for vLLM (default: 1)",
     )
     parser.add_argument(
-        "--max-model-len", type=int, default=16384,
-        help="Max model length for vLLM (default: 16384)",
+        "--max-model-len", type=int, default=32768,
+        help="Max model length for vLLM (default: 32768)",
     )
 
     # Other Options

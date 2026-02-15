@@ -63,7 +63,7 @@ export NUM_EXAMPLES="${NUM_EXAMPLES:-50}"
 export SHOW_EXAMPLES="${SHOW_EXAMPLES:-true}"
 export BATCH_SIZE="${BATCH_SIZE:-1}"
 export GRAD_ACCUM="${GRAD_ACCUM:-4}"
-export MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
+export MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
 export LLMAIL_LIMIT="${LLMAIL_LIMIT:-}"  # e.g. LLMAIL_LIMIT=3000 to cap LLMail samples
 
 echo "Starting sweep_hparams_simple.sbatch..."
@@ -168,7 +168,14 @@ generate_data() {
     if [[ ! -f "$ds" || ! -f "$dr" ]]; then
         if [[ -f "$skeleton" ]]; then
             echo "Generating missing $name data (DS/DR)..."
-            
+
+            # Build limit args for LLMail
+            GEN_LIMIT_ARGS=()
+            if [[ -n "$LLMAIL_LIMIT" && "$name" == "LLMail-Inject" ]]; then
+                GEN_LIMIT_ARGS+=(--limit "$LLMAIL_LIMIT")
+                echo "  Limiting $name to $LLMAIL_LIMIT samples"
+            fi
+
             # Generate DS (Harmful)
             if [[ ! -f "$ds" ]]; then
                 echo "  Generating DS (Harmful)..."
@@ -180,9 +187,10 @@ generate_data() {
                     --mode ds \
                     --temperature-ds 0.7 \
                     --max-model-len "$MAX_MODEL_LEN" \
-                    --use-vllm
+                    --use-vllm \
+                    "${GEN_LIMIT_ARGS[@]}"
             fi
-            
+
             # Generate DR (Benign)
             if [[ ! -f "$dr" ]]; then
                 echo "  Generating DR (Benign)..."
@@ -194,7 +202,8 @@ generate_data() {
                     --mode dr \
                     --temperature-dr 0.3 \
                     --max-model-len "$MAX_MODEL_LEN" \
-                    --use-vllm
+                    --use-vllm \
+                    "${GEN_LIMIT_ARGS[@]}"
             fi
         else
             echo "WARNING: Skeleton file for $name not found at $skeleton. Cannot generate data."
