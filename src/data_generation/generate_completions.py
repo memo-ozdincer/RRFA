@@ -688,6 +688,8 @@ def build_ds_from_skeletons(
     - ONLY include if observed_tool == simulated_tool (successful flip)
     - Filter by behavioral outcome
 
+    Uses batched vLLM generation when backend is VLLMBackend for ~50-100x speedup.
+
     Args:
         skeleton_traces: List of skeleton traces (B1)
         backend: VLLMBackend or (model, tokenizer) tuple
@@ -728,14 +730,15 @@ def build_ds_from_skeletons(
         "format_errors": [],
     } if collect_examples else None
 
-    iterator = tqdm(skeleton_traces, desc="Building DS") if verbose else skeleton_traces
+    # =========================================================================
+    # Phase 1: Prepare all prompts and metadata
+    # =========================================================================
+    prepared = []  # List of (trace, expected_tool, simulated_tool, messages, prompt_or_none)
 
-    for trace in iterator:
+    for trace in (tqdm(skeleton_traces, desc="Preparing DS prompts") if verbose else skeleton_traces):
         # Skip non-skeleton traces
         if getattr(trace, 'completeness', None) == 'complete' or getattr(trace, 'tier', None) == 'B2':
             continue
-
-        stats["total"] += 1
 
         # Extract expected/simulated tools
         expected_tool = None
@@ -753,34 +756,47 @@ def build_ds_from_skeletons(
             logger.info(f"[DEBUG DS] Trace {trace.id[:40]}...")
             logger.info(f"  tool_attack.expected_tool: {trace.tool_attack.expected_tool if trace.tool_attack else None}")
             logger.info(f"  tool_attack.observed_tool (=simulated): {trace.tool_attack.observed_tool if trace.tool_attack else None}")
-            logger.info(f"  signal_hints.expected_tool_name: {trace.signal_hints.expected_tool_name if trace.signal_hints else None}")
-            logger.info(f"  signal_hints.observed_tool_name: {trace.signal_hints.observed_tool_name if trace.signal_hints else None}")
             logger.info(f"  -> Resolved expected_tool: {expected_tool}")
             logger.info(f"  -> Resolved simulated_tool: {simulated_tool}")
 
         # Build messages from trace
-        # NOTE: Override system message with the one from tool schema to match old pipeline behavior.
-        # ETL_A uses a hardcoded system prompt that doesn't describe the tools, which can cause
-        # the model to make different tool choices.
         messages = []
         for msg in trace.messages:
             if msg.role == "system":
-                # Use the system prompt from the tool schema instead of ETL_A's hardcoded one
-                messages.append({
-                    "role": "system",
-                    "content": system_prompt,
-                })
+                messages.append({"role": "system", "content": system_prompt})
             else:
-                messages.append({
-                    "role": msg.role,
-                    "content": msg.content,
-                })
+                messages.append({"role": msg.role, "content": msg.content})
 
-        # Generate response
+        # Format prompt for vLLM or store None for transformers backend
+        prompt = None
         if isinstance(backend, VLLMBackend):
             prompt = backend.format_prompt_with_tools(messages, tools)
-            responses = backend.generate_batch([prompt], temperature=temperature, max_tokens=max_tokens)
-            response = responses[0] if responses else ""
+
+        prepared.append((trace, expected_tool, simulated_tool, messages, prompt))
+
+    logger.info(f"Prepared {len(prepared)} prompts for DS generation")
+
+    # =========================================================================
+    # Phase 2: Batched generation
+    # =========================================================================
+    if isinstance(backend, VLLMBackend) and prepared:
+        all_prompts = [p[4] for p in prepared]
+        logger.info(f"Running batched vLLM generation for {len(all_prompts)} prompts...")
+        all_responses = backend.generate_batch(all_prompts, temperature=temperature, max_tokens=max_tokens)
+    else:
+        all_responses = None  # Will generate one-by-one for transformers backend
+
+    # =========================================================================
+    # Phase 3: Process results
+    # =========================================================================
+    for idx, (trace, expected_tool, simulated_tool, messages, prompt) in enumerate(
+        tqdm(prepared, desc="Building DS") if verbose else prepared
+    ):
+        stats["total"] += 1
+
+        # Get response
+        if all_responses is not None:
+            response = all_responses[idx]
         else:
             model, tokenizer = backend
             response = generate_with_tools(
@@ -985,6 +1001,8 @@ def build_dr_from_ds(
     - Regenerates with lower temperature
     - ONLY include if observed_tool == expected_tool (correct behavior)
 
+    Uses batched vLLM generation when backend is VLLMBackend for ~50-100x speedup.
+
     Args:
         ds_traces: List of successful DS traces
         backend: VLLMBackend or (model, tokenizer) tuple
@@ -1024,11 +1042,12 @@ def build_dr_from_ds(
     debug_count = 0
     debug_limit = 10 if debug else 0
 
-    iterator = tqdm(ds_traces, desc="Building DR") if verbose else ds_traces
+    # =========================================================================
+    # Phase 1: Prepare all prompts and metadata
+    # =========================================================================
+    prepared = []  # List of (ds_trace, expected_tool, messages, prompt_or_none)
 
-    for ds_trace in iterator:
-        stats["total"] += 1
-
+    for ds_trace in (tqdm(ds_traces, desc="Preparing DR prompts") if verbose else ds_traces):
         # Get expected tool
         expected_tool = None
         if ds_trace.tool_attack:
@@ -1045,49 +1064,52 @@ def build_dr_from_ds(
         if debug and debug_count < debug_limit:
             logger.info(f"[DEBUG DR] DS Trace {ds_trace.id[:40]}...")
             logger.info(f"  tool_attack.expected_tool: {ds_trace.tool_attack.expected_tool if ds_trace.tool_attack else None}")
-            logger.info(f"  tool_attack.observed_tool (=simulated in DS): {ds_trace.tool_attack.observed_tool if ds_trace.tool_attack else None}")
             logger.info(f"  -> Resolved expected_tool for DR: {expected_tool}")
             logger.info(f"  injection_text (first 80 chars): {injection_text[:80] if injection_text else None}...")
 
         # Build messages with injection removed
-        # NOTE: Override system message with the one from tool schema to match old pipeline behavior
         messages = []
-        original_user_content = None
         for msg in ds_trace.messages:
-            # Skip assistant messages (we're regenerating)
             if msg.role == "assistant":
                 continue
-
             if msg.role == "system":
-                # Use the system prompt from the tool schema instead of ETL_A's hardcoded one
-                messages.append({
-                    "role": "system",
-                    "content": system_prompt,
-                })
+                messages.append({"role": "system", "content": system_prompt})
             elif msg.role == "user":
-                original_user_content = msg.content
                 content = remove_injection_from_content(msg.content, injection_text)
-                messages.append({
-                    "role": "user",
-                    "content": content,
-                })
+                messages.append({"role": "user", "content": content})
             else:
-                messages.append({
-                    "role": msg.role,
-                    "content": msg.content,
-                })
+                messages.append({"role": msg.role, "content": msg.content})
 
-        # DEBUG: Print cleaned user content
-        if debug and debug_count < debug_limit:
-            cleaned_user = next((m["content"] for m in messages if m["role"] == "user"), None)
-            logger.info(f"  Original user content (first 100): {original_user_content[:100] if original_user_content else None}...")
-            logger.info(f"  Cleaned user content (first 100): {cleaned_user[:100] if cleaned_user else None}...")
-
-        # Generate response
+        # Format prompt for vLLM or store None for transformers backend
+        prompt = None
         if isinstance(backend, VLLMBackend):
             prompt = backend.format_prompt_with_tools(messages, tools)
-            responses = backend.generate_batch([prompt], temperature=temperature, max_tokens=max_tokens)
-            response = responses[0] if responses else ""
+
+        prepared.append((ds_trace, expected_tool, messages, prompt))
+
+    logger.info(f"Prepared {len(prepared)} prompts for DR generation")
+
+    # =========================================================================
+    # Phase 2: Batched generation
+    # =========================================================================
+    if isinstance(backend, VLLMBackend) and prepared:
+        all_prompts = [p[3] for p in prepared]
+        logger.info(f"Running batched vLLM generation for {len(all_prompts)} prompts...")
+        all_responses = backend.generate_batch(all_prompts, temperature=temperature, max_tokens=max_tokens)
+    else:
+        all_responses = None  # Will generate one-by-one for transformers backend
+
+    # =========================================================================
+    # Phase 3: Process results
+    # =========================================================================
+    for idx, (ds_trace, expected_tool, messages, prompt) in enumerate(
+        tqdm(prepared, desc="Building DR") if verbose else prepared
+    ):
+        stats["total"] += 1
+
+        # Get response
+        if all_responses is not None:
+            response = all_responses[idx]
         else:
             model, tokenizer = backend
             response = generate_with_tools(
