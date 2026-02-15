@@ -90,6 +90,9 @@ export HF_HUB_CACHE="$CACHE_DIR/hf/hub"
 export HF_DATASETS_CACHE="$CACHE_DIR/hf/datasets"
 export TORCH_HOME="$CACHE_DIR/torch"
 export WANDB_DIR="$CACHE_DIR/wandb"
+export TRITON_CACHE_DIR="$CACHE_DIR/triton"
+mkdir -p "$TRITON_CACHE_DIR"
+
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 

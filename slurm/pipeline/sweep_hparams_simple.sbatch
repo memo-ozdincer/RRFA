@@ -47,7 +47,7 @@ export POLICIES="${POLICIES:-cb_full_sequence}"
 export LIMIT_EVAL="${LIMIT_EVAL:-100}"
 export NUM_EXAMPLES="${NUM_EXAMPLES:-50}"
 export SHOW_EXAMPLES="${SHOW_EXAMPLES:-true}"
-export BATCH_SIZE="${BATCH_SIZE:-2}"
+export BATCH_SIZE="${BATCH_SIZE:-1}"
 
 echo "Starting sweep_hparams_simple.sbatch..."
 echo "  ALPHAS: ${ALPHAS}"
