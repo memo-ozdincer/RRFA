@@ -10,16 +10,33 @@
 
 set -euo pipefail
 
-# Reduced-grid preset wrapper for sweep_hparams.sbatch.
-# LLMail traces are auto-included by sweep_hparams.sbatch when:
-#   /scratch/memoozd/cb-scratch/data/traces/llmail_inject_ds.jsonl and
-#   /scratch/memoozd/cb-scratch/data/traces/llmail_inject_dr.jsonl exist.
+# =============================================================================
+# Environment Setup
+# =============================================================================
+# Ensure we are running from the repo root
+PROJECT_DIR="/project/def-zhijing/memoozd"
+REPO_DIR="$PROJECT_DIR/rrfa"
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SWEEP_SCRIPT="$SCRIPT_DIR/sweep_hparams.sbatch"
+if [[ -d "$REPO_DIR" ]]; then
+    cd "$REPO_DIR"
+    echo "Changed directory to: $(pwd)"
+else
+    echo "WARNING: Repo directory not found at $REPO_DIR. Assuming current directory is correct."
+fi
+
+# Locate the sweep script
+SWEEP_SCRIPT="slurm/pipeline/sweep_hparams.sbatch"
 
 if [[ ! -f "$SWEEP_SCRIPT" ]]; then
-    echo "ERROR: Sweep script not found: $SWEEP_SCRIPT"
+    # Try absolute path
+    SWEEP_SCRIPT="$REPO_DIR/slurm/pipeline/sweep_hparams.sbatch"
+fi
+
+if [[ ! -f "$SWEEP_SCRIPT" ]]; then
+    echo "ERROR: Sweep script not found at: $SWEEP_SCRIPT"
+    echo "Current directory: $(pwd)"
+    echo "Contents of slurm/pipeline:"
+    ls -l slurm/pipeline || echo "(dir not found)"
     exit 1
 fi
 
