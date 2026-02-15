@@ -16,12 +16,26 @@ set -euo pipefail
 # Ensure we are running from the repo root
 PROJECT_DIR="/project/def-zhijing/memoozd"
 REPO_DIR="$PROJECT_DIR/rrfa"
+VENV_DIR="$PROJECT_DIR/.venvs/cb_env"
 
 if [[ -d "$REPO_DIR" ]]; then
     cd "$REPO_DIR"
     echo "Changed directory to: $(pwd)"
 else
     echo "WARNING: Repo directory not found at $REPO_DIR. Assuming current directory is correct."
+fi
+
+# Load modules and activate venv (Required for data generation)
+module --force purge || true
+module load StdEnv/2023
+module load cuda/12.6
+module load python/3.11.5
+
+if [[ -f "$VENV_DIR/bin/activate" ]]; then
+    source "$VENV_DIR/bin/activate"
+    echo "Activated venv: $VENV_DIR"
+else
+    echo "WARNING: Venv not found at $VENV_DIR"
 fi
 
 # Locate the sweep script
