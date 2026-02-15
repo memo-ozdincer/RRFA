@@ -21,6 +21,7 @@ Usage:
     
     # Analyze specific run
     python scripts/visualize_sweep_results.py <sweep_dir> --run a5.0_l10_20_assistant_only
+    
 """
 
 import argparse
@@ -414,6 +415,7 @@ def analyze_run(
     traces_dir: Optional[Path] = None,
     tool_schema: Optional[Dict[str, Any]] = None,
     show_samples: int = 0,
+    start_sample: int = 0,
     show_full: bool = False,
     filter_success: bool = False,
     filter_failure: bool = False,
@@ -478,17 +480,21 @@ def analyze_run(
             
             # Filter samples
             if filter_success:
-                samples_to_show = [
+                filtered_samples = [
                     p for p in paired 
                     if p.get("baseline_outcome") == "attack_success" and p.get("cb_outcome") != "attack_success"
-                ][:show_samples]
+                ]
             elif filter_failure:
-                samples_to_show = [
+                filtered_samples = [
                     p for p in paired 
                     if p.get("cb_outcome") == "attack_success"
-                ][:show_samples]
+                ]
             else:
-                samples_to_show = paired[:show_samples]
+                filtered_samples = paired
+            
+            # Apply pagination
+            end = start_sample + show_samples
+            samples_to_show = filtered_samples[start_sample:end]
             
             for sample in samples_to_show:
                 sample_id = sample.get("id", "")
@@ -542,17 +548,21 @@ def analyze_run(
             print(f"{'#'*80}")
 
             if filter_success:
-                samples_to_show = [
+                filtered_samples = [
                     p for p in paired
                     if p.get("baseline_outcome") == "attack_success" and p.get("cb_outcome") != "attack_success"
-                ][:show_samples]
+                ]
             elif filter_failure:
-                samples_to_show = [
+                filtered_samples = [
                     p for p in paired
                     if p.get("cb_outcome") == "attack_success"
-                ][:show_samples]
+                ]
             else:
-                samples_to_show = paired[:show_samples]
+                filtered_samples = paired
+
+            # Apply pagination
+            end = start_sample + show_samples
+            samples_to_show = filtered_samples[start_sample:end]
 
             for sample in samples_to_show:
                 sample_id = sample.get("id", "")
@@ -581,7 +591,11 @@ def analyze_run(
             print(f"{'#'*80}")
 
             different = [p for p in paired if p.get("responses_differ")]
-            samples_to_show = different[:show_samples] if different else paired[:show_samples]
+            filtered_samples = different if different else paired
+            
+            # Apply pagination
+            end = start_sample + show_samples
+            samples_to_show = filtered_samples[start_sample:end]
 
             for sample in samples_to_show:
                 sample_id = sample.get("id", "")
@@ -768,6 +782,7 @@ def compare_samples(
     runs: List[Dict[str, Any]],
     run_dirs: List[Path],
     num_samples: int = 1,
+    start_sample: int = 0,
     dataset: str = "fujitsu"
 ) -> None:
     """Compare specific samples across all runs."""
@@ -799,7 +814,9 @@ def compare_samples(
 
     # Get sample IDs from the first run
     first_run_name, first_run_map = run_data[0]
-    sample_ids = list(first_run_map.keys())[:num_samples]
+    all_ids = list(first_run_map.keys())
+    end = start_sample + num_samples
+    sample_ids = all_ids[start_sample:end]
     
     for sid in sample_ids:
         print(f"\n{'-'*80}")
@@ -881,6 +898,12 @@ Examples:
         type=int,
         default=0,
         help="Number of sample details to show per dataset"
+    )
+    parser.add_argument(
+        "--start-from-sample",
+        type=int,
+        default=0,
+        help="Start showing samples from this index (0-based)"
     )
     parser.add_argument(
         "--show-full",
@@ -999,6 +1022,7 @@ Examples:
             traces_dir=traces_dir,
             tool_schema=tool_schema,
             show_samples=show_samples,
+            start_sample=args.start_from_sample,
             show_full=args.show_full,
             filter_success=args.filter_success,
             filter_failure=args.filter_failure,
@@ -1015,7 +1039,7 @@ Examples:
     
     # Compare samples if requested
     if args.compare_samples > 0:
-        compare_samples(all_results, run_dirs, args.compare_samples, args.compare_dataset)
+        compare_samples(all_results, run_dirs, args.compare_samples, args.start_from_sample, args.compare_dataset)
 
     # Optionally show samples only for best runs
     if args.show_samples > 0 and args.samples_best_only:
@@ -1028,6 +1052,7 @@ Examples:
                     traces_dir=traces_dir,
                     tool_schema=tool_schema,
                     show_samples=args.show_samples,
+                    start_sample=args.start_from_sample,
                     show_full=args.show_full,
                     filter_success=args.filter_success,
                     filter_failure=args.filter_failure,
