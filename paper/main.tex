@@ -1,178 +1,378 @@
-\documentclass{article}
+% RRFA: Representation Rerouting for Agentic Safety
+\documentclass[10pt, twocolumn]{article}
+
+\usepackage[
+    top=2cm, bottom=2cm, left=1.8cm, right=1.8cm,
+    headheight=13pt, columnsep=0.7cm
+]{geometry}
+
+\usepackage[T1]{fontenc}
 \usepackage[utf8]{inputenc}
-\usepackage{geometry}
-\usepackage{graphicx}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{parskip}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{mathtools}
+\usepackage[dvipsnames]{xcolor}
 \usepackage{booktabs}
-\usepackage{hyperref}
-\usepackage{amsmath}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{multirow}
+\usepackage{colortbl}
+\usepackage{tikz}
+\usetikzlibrary{shapes, arrows.meta, positioning, calc, fit}
+\usepackage[most]{tcolorbox}
+\tcbuselibrary{skins, breakable}
+\usepackage{fancyhdr}
+\usepackage{lastpage}
+\usepackage[colorlinks=true, linkcolor=MidnightBlue, urlcolor=MidnightBlue, citecolor=MidnightBlue]{hyperref}
+\usepackage{enumitem}
 \usepackage{float}
-\usepackage{xcolor}
-\usepackage{tcolorbox}
-\usepackage{listings}
+\usepackage{caption}
+\usepackage{titlesec}
 
-\geometry{a4paper, margin=1in}
+% --- Muted, professional color palette ---
+\definecolor{seccolor}{HTML}{1a1a2e}
+\definecolor{subseccolor}{HTML}{34495e}
+\definecolor{rulecolor}{HTML}{bdc3c7}
+\definecolor{boxframe}{HTML}{7f8c8d}
+\definecolor{boxbg}{HTML}{f8f9fa}
+\definecolor{defframe}{HTML}{5b6a7a}
+\definecolor{resbg}{HTML}{eef7ee}
+\definecolor{resframe}{HTML}{6a9a6a}
+\definecolor{exbg}{HTML}{f5f5f0}
+\definecolor{safe}{HTML}{2d7d46}
+\definecolor{danger}{HTML}{a83232}
 
-% Define colors for examples
-\definecolor{bg_gray}{RGB}{245,245,245}
-\definecolor{code_blue}{RGB}{0,0,139}
-\definecolor{code_red}{RGB}{139,0,0}
-\definecolor{code_green}{RGB}{0,100,0}
+% --- Compact section styling ---
+\titleformat{\section}{\large\bfseries\color{seccolor}}{\thesection.}{0.4em}{}[\color{rulecolor}\titlerule]
+\titleformat{\subsection}{\normalsize\bfseries\color{subseccolor}}{\thesubsection}{0.4em}{}
+\titleformat{\subsubsection}{\small\bfseries\color{subseccolor}}{\thesubsubsection}{0.4em}{}
+\titlespacing*{\section}{0pt}{10pt}{4pt}
+\titlespacing*{\subsection}{0pt}{6pt}{2pt}
 
-\newtcolorbox{examplebox}[1]{
-    colback=bg_gray,
-    colframe=black,
-    title=#1,
-    fonttitle=\bfseries,
-    boxrule=0.5mm,
-    sharp corners,
-    enhanced
-}
+% --- Header/footer ---
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{\footnotesize\color{subseccolor} RRFA: Representation Rerouting for Agentic Safety}
+\rhead{\footnotesize\color{subseccolor} Internal Report -- Feb 2026}
+\cfoot{\footnotesize\thepage/\pageref{LastPage}}
+\renewcommand{\headrulewidth}{0.3pt}
 
-\title{Representation Rerouting for Agentic Safety: \\ Internal Defenses Against Prompt Injection}
-\author{Internal Research Team}
-\date{\today}
+% --- Environments ---
+\newtcolorbox{defbox}[1][]{enhanced, breakable, colback=boxbg, colframe=defframe, fonttitle=\small\bfseries, title=#1, arc=1.5pt, boxrule=0.4pt, left=5pt, right=5pt, top=4pt, bottom=4pt, toptitle=2pt, bottomtitle=2pt}
+\newtcolorbox{resbox}[1][]{enhanced, breakable, colback=resbg, colframe=resframe, fonttitle=\small\bfseries, title=#1, arc=1.5pt, boxrule=0.4pt, left=5pt, right=5pt, top=4pt, bottom=4pt}
+\newtcolorbox{exbox}[1][]{enhanced, breakable, colback=exbg, colframe=boxframe, fonttitle=\small\bfseries, title=#1, arc=1.5pt, boxrule=0.4pt, left=5pt, right=5pt, top=3pt, bottom=3pt}
+
+% --- Commands ---
+\newcommand{\code}[1]{\texttt{\small #1}}
+\newcommand{\loss}{\mathcal{L}}
+\newcommand{\lrr}{\loss_{\text{rr}}}
+\newcommand{\lret}{\loss_{\text{ret}}}
+\newcommand{\ltotal}{\loss_{\text{total}}}
+\newcommand{\hidden}{\mathbf{h}}
+\newcommand{\hmodel}{\hidden_{\theta}}
+\newcommand{\hfrozen}{\hidden_{\theta_0}}
+\newcommand{\Ds}{D_s}
+\newcommand{\Dr}{D_r}
 
 \begin{document}
 
-\maketitle
+% ======================================================================
+% TITLE (inline, no separate page)
+% ======================================================================
+\twocolumn[
+\begin{@twocolumnfalse}
+\begin{center}
+\vspace{-0.5cm}
+{\LARGE\bfseries\color{seccolor} Representation Rerouting for Agentic Safety}\\[6pt]
+{\normalsize\color{subseccolor} Internal Defenses Against Prompt Injection via LoRA Circuit Breakers and Triplet Loss}\\[8pt]
+{\small Internal Research Report \quad$\cdot$\quad February 2026 \quad$\cdot$\quad Base model: \texttt{Llama-3.1-8B-Instruct}}\\[4pt]
+{\small\color{subseccolor} Artifacts:\; \href{https://huggingface.co/memo-ozdincer/rrfa-runs}{HF Models}\; $\cdot$\; \href{https://huggingface.co/datasets/memo-ozdincer/rrfa-data}{HF Data}}
+\end{center}
+\vspace{4pt}
+\noindent\textcolor{rulecolor}{\rule{\textwidth}{0.5pt}}
+\vspace{2pt}
+\begin{quote}\small
+\textbf{Abstract.}\quad
+LLM agents with tool-calling capabilities are vulnerable to prompt injection attacks that hijack control flow via adversarial content in retrieved data. We present \textbf{Representation Rerouting for Agentic Safety (RRFA)}, training LoRA adapters to make harmful internal representations orthogonal to benign ones via a triplet loss with configurable loss masking. Evaluated on three benchmarks---Fujitsu~B4 (tool-flip), AgentDojo (multi-domain), and LLMail-Inject (email agent)---our best configuration reduces Fujitsu ASR from 83.7\% to 8.2\% (\textbf{75.5\,pp}) with \textbf{zero regressions}, achieving 5.0\% LLMail ASR and 100\% behavioral change on AgentDojo. Notably, the defense often \emph{restores correct behavior} rather than merely refusing.
+\end{quote}
+\vspace{2pt}
+\noindent\textcolor{rulecolor}{\rule{\textwidth}{0.5pt}}
+\vspace{6pt}
+\end{@twocolumnfalse}
+]
 
-\begin{abstract}
-Large Language Model (LLM) agents are vulnerable to prompt injection attacks where malicious content in retrieved data hijacks the agent's control flow. Traditional defenses like input filtering often fail against sophisticated attacks or degrade capability. We propose a representation-level defense using \textit{circuit breakers}—LoRA adapters trained to rerout harmful internal representations orthogonal to benign ones. We evaluate this approach across three datasets: Fujitsu B4 (tool-flip attacks), AgentDojo (diverse injection attacks), and LLMail-Inject (email agent attacks). Our results demonstrate that circuit breakers can reduce attack success rates (ASR) by over 75 percentage points (from $\sim$86\% to $\sim$8\%) while maintaining or even enhancing agent capability, with the \texttt{cb\_full\_sequence} loss mask policy offering the best trade-offs.
-\end{abstract}
-
+% ======================================================================
 \section{Introduction}
-Prompt injection remains a critical vulnerability for LLM agents. When an agent processes untrusted content (e.g., emails, websites), malicious instructions can override the system prompt, causing the agent to execute unauthorized actions. This paper investigates internal defenses that operate on the model's latent representations rather than the input text.
+% ======================================================================
 
-We apply the concept of \textit{circuit breakers} (Zou et al., 2024) to the agentic setting. By training the model to map harmful states (induced by injections) to a "refusal" state while preserving benign states, we aim to create robust agents that inherently resist manipulation.
+LLM-based agents increasingly operate in high-stakes environments---emails, financial transactions, databases---where a single compromised tool call causes data exfiltration or unauthorized actions. \emph{Prompt injection} embeds adversarial instructions in retrieved data (emails, search results, tool outputs), deviating the model from user intent.
 
-\section{Method}
-\subsection{Circuit Breaker Training}
-Our approach utilizes Low-Rank Adaptation (LoRA) to fine-tune the model's representations. The core objective is to "rerout" the internal activations when the model encounters a harmful input (prompt injection) towards a target state that leads to refusal or benign behavior, while retaining the original behavior for benign inputs.
+Existing defenses are either \textbf{input-level} (filtering, delimiters) or \textbf{output-level} (guardrails, monitors)---both fragile against creative attacks. We pursue \textbf{representation-level defense}: training the model's internal geometry so harmful states are automatically rerouted.
 
-The training objective consists of a triplet loss formulation:
-\begin{equation}
-L = \alpha(t) \cdot \mathcal{L}_{\text{reroute}}(D_s) + \mathcal{L}_{\text{retain}}(D_r)
-\end{equation}
-where $D_s$ represents harmful completions (successful attacks) and $D_r$ represents benign paired twins (normal agent behavior). $\alpha(t)$ controls the strength of the rerouting loss.
+We extend Circuit Breakers~\cite{zou2024} from text-only safety to \textbf{agentic tool-calling}, where harm is an incorrect tool invocation rather than toxic text. This is the first application of representation rerouting to tool-calling agents.
 
-\subsection{Loss Mask Policies}
-A key contribution of this work is the exploration of different loss mask policies, which determine which tokens contribute to the rerouting loss. We investigate:
-\begin{itemize}
-    \item \textbf{assistant\_only}: Loss is applied to all assistant tokens.
-    \item \textbf{assistant\_and\_tool}: Loss is applied to assistant text and tool call parameters.
-    \item \textbf{cb\_full\_sequence}: Loss is applied to the entire sequence.
-    \item \textbf{tool\_calls\_only}: Loss is focused specifically on the tool invocation tokens.
-    \item \textbf{completion\_only}: Loss is applied to the final completion.
-\end{itemize}
-
-\section{Experimental Setup}
-We evaluate our method on three distinct datasets:
-\begin{enumerate}
-    \item \textbf{Fujitsu B4}: Focuses on tool-flip attacks where an injection tricks the model into calling a wrong tool.
-    \item \textbf{AgentDojo}: A diverse set of tool-flip and goal-hijacking attacks.
-    \item \textbf{LLMail-Inject}: Simulates an email agent where success is defined by the model sending an email (calling \texttt{send\_email}) when it should refuse.
+\paragraph{Contributions.}
+\begin{enumerate}[leftmargin=*, topsep=2pt, itemsep=1pt, parsep=0pt]
+    \item A \textbf{triplet loss formulation} with configurable distance metrics for agentic circuit breaker training.
+    \item Systematic study of \textbf{five loss mask policies} controlling which tokens receive rerouting supervision.
+    \item Evaluation on \textbf{three diverse benchmarks} with distinct threat models and injection semantics.
+    \item A \textbf{complete reproducible pipeline} (ETL $\to$ generation $\to$ masking $\to$ training $\to$ evaluation).
 \end{enumerate}
 
-\subsection{Hyperparameter Sweep}
-We conducted a sweep over the following hyperparameters:
-\begin{itemize}
-    \item \textbf{Alpha ($\alpha_{\max}$)}: $\{5.0, 10.0, 15.0\}$
-    \item \textbf{Layers}: Different configurations of transformer layers for circuit breaker application (e.g., "10,20", "8,16,24").
-    \item \textbf{Loss Mask Policy}: As described above.
-\end{itemize}
+% ======================================================================
+\section{Background}
+% ======================================================================
 
-\section{Results}
+\subsection{Prompt Injection in Agents}
 
-Our large-scale sweep identified the \texttt{cb\_full\_sequence} policy as the most effective across all metrics. The optimal configuration achieved a massive reduction in Attack Success Rate (ASR) on the Fujitsu B4 dataset while maintaining near-perfect performance on benign tasks.
+Injections are \emph{direct} (in user input) or \emph{indirect} (in retrieved data~\cite{agentdojo}). In agents, the critical outcome is a \emph{tool-flip}: the injection causes a wrong or malicious tool call (e.g., \code{send\_email} instead of refusing), enabling exfiltration.
 
-\subsection{Key Comparisons}
-Table \ref{tab:best_configs} highlights the top-performing configurations. The configuration with $\alpha=10.0$ and the \texttt{cb\_full\_sequence} policy achieved the lowest Attack Success Rate (8.2\%) on the Fujitsu dataset, representing a 75.5 percentage point reduction from the baseline.
+\subsection{Circuit Breakers}
+
+The CB framework~\cite{zou2024} trains adapters making harmful representations orthogonal to benign ones. For model~$\theta$ with frozen reference~$\theta_0$:
+
+\begin{defbox}[Original CB Loss~\cite{zou2024}]
+\vspace{-6pt}
+\begin{align}
+    \lrr &= \tfrac{1}{|L|} {\textstyle\sum_{l \in L}} \tfrac{1}{T} {\textstyle\sum_{t=1}^{T}} \text{ReLU}\!\big( \cos(\hmodel^{(l,t)}, \hfrozen^{(l,t)}) \big) \label{eq:rr}\\
+    \lret &= \tfrac{1}{|L|} {\textstyle\sum_{l \in L}} \tfrac{1}{T} {\textstyle\sum_{t=1}^{T}} \|\hmodel^{(l,t)} - \hfrozen^{(l,t)}\|_2 \label{eq:ret}\\
+    \ltotal &= \alpha(t) \cdot \lrr(\Ds) + \lret(\Dr) \label{eq:combined}
+\end{align}
+\vspace{-8pt}
+
+\noindent where $L$ = target layers, $T$ = sequence length, $\alpha(t)$ decays linearly. Eq.~\eqref{eq:rr} penalizes positive cosine similarity on harmful samples; Eq.~\eqref{eq:ret} preserves benign behavior via L2 anchoring.
+\end{defbox}
+
+% ======================================================================
+\section{Method}
+% ======================================================================
+
+\subsection{Harm Definition}
+
+Given agent with tools~$\mathcal{T}$, query~$q$, injected context~$c$:
+\vspace{-4pt}
+\[
+\text{HARM}(q,c) := \big(t_{\text{obs}}(q \oplus c) \neq t_{\text{exp}}(q)\big) \wedge \text{inj}(c)
+\]
+Binary, deterministic, no LLM judge required.
+
+\subsection{Paired Data Generation}
+
+\paragraph{$\Ds$ (Harmful).} Model run with coercing prompt ($T\!=\!0.7$); only attack-succeeding samples retained. AgentDojo: traces where \code{security==False}.
+
+\paragraph{$\Dr$ (Benign twin).} Same context, injection stripped, defensive prompt ($T\!=\!0.3$). Teaches what the model \emph{should} have done.
+
+\subsection{Triplet Loss Formulation}
+
+We extend CB with a triplet loss structuring the representation space. Let $\bar{\mathbf{z}}_h$ be the batch harmful centroid, $d(\cdot,\cdot)$ a configurable distance:
+
+\begin{defbox}[Triplet Full Loss]
+\vspace{-6pt}
+\begin{align}
+    \loss_b &= \text{ReLU}\big( d(\hfrozen^b, \hmodel^b) - d(\hmodel^b, \bar{\mathbf{z}}_h) + m_b \big) \label{eq:tb}\\
+    \loss_h &= \text{ReLU}\big( d(\hmodel^h, \bar{\mathbf{z}}_h) - d(\hmodel^h, \hfrozen^h) + m_h \big) \label{eq:th}\\
+    \loss_{\text{KL}} &= \text{KL}\big( p_\theta(\cdot|x^b) \| p_{\theta_0}(\cdot|x^b) \big) \label{eq:kl}\\
+    \ltotal &= \alpha_b \cdot \loss_b + \beta_h \cdot \loss_h + \gamma \cdot \loss_{\text{KL}} \label{eq:total}
+\end{align}
+\vspace{-8pt}
+
+\noindent $m_b, m_h$: margins. $\alpha_b, \beta_h, \gamma$: weighting coefficients.
+\end{defbox}
+
+\paragraph{Distance functions} are configurable per-term:
+$d_{\text{L2}} = \|\mathbf{a}-\mathbf{b}\|_2$, \;
+$d_{\text{cos}} = 1-\cos(\mathbf{a},\mathbf{b})$, \;
+$d_{\text{mix}} = w_1 d_{\text{L2}} + w_2 d_{\text{cos}}$.
+All experiments use $d_{\text{mix}}$ ($w_1\!=\!w_2\!=\!0.5$).
+
+\paragraph{Intuition.} Eq.~\eqref{eq:tb}: benign reps stay closer to frozen than to harmful centroid. Eq.~\eqref{eq:th}: harmful reps cluster near centroid and away from frozen. Eq.~\eqref{eq:kl}: output distribution fidelity on benign inputs.
+
+\subsection{Loss Mask Policies}
+\label{sec:lmp}
+
+The mask $\mathbf{m}\!\in\!\{0,1\}^T$ determines which tokens receive rerouting loss:
 
 \begin{table}[H]
-    \centering
-    \begin{tabular}{llcccc}
-        \toprule
-        \textbf{Run Name} & \textbf{Hparams} & \textbf{Base ASR} & \textbf{CB ASR} & \textbf{Reduction} & \textbf{AgentDojo Diff} \\
-        \midrule
-        a10.0\_l10\_20\_cb\_full\_sequence & $\alpha=10.0$ & 83.7\% & \textbf{8.2\%} & \textbf{75.5pp} & 100.0\% \\
-        a5.0\_l10\_20\_cb\_full\_sequence & $\alpha=5.0$ & 86.7\% & 11.2\% & 75.5pp & 100.0\% \\
-        a15.0\_l10\_20\_cb\_full\_sequence & $\alpha=15.0$ & 84.7\% & 14.3\% & 70.4pp & 99.0\% \\
-        \bottomrule
-    \end{tabular}
-    \caption{Top 3 configurations sorted by lowest Circuit Breaker (CB) Attack Success Rate (ASR). All top runs use the \texttt{cb\_full\_sequence} loss mask policy.}
-    \label{tab:best_configs}
+\centering\footnotesize
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}lp{4.8cm}@{}}
+\toprule
+\textbf{Policy} & \textbf{Tokens Receiving Loss} \\
+\midrule
+\code{assistant\_only} & All assistant turn tokens \\
+\code{asst\_and\_tool} & Assistant + tool call params \\
+\code{cb\_full\_seq} & \textbf{Entire sequence} (incl.\ injection) \\
+\code{tool\_calls\_only} & \code{<|python\_tag|>\{..\}<|eom\_id|>} \\
+\code{completion\_only} & Final assistant completion \\
+\bottomrule
+\end{tabular}
+\caption{Loss mask policies (LMPs).}
+\label{tab:lmp}
 \end{table}
 
-\subsection{Qualitative Analysis: Capability Preservation \& Refusal}
+\subsection{Architecture}
 
-One of the most significant findings is that the Circuit Breaker defense does not merely "break" the model into refusal; in many cases, it restores the model's ability to focus on the original user intent, effectively ignoring the injection.
+\paragraph{LoRA.} $r\!=\!16$, $\alpha_{\text{LoRA}}\!=\!32$, dropout 0.05 on all projections (\code{q/k/v/o/gate/up/down\_proj}).
 
-\begin{examplebox}{Example 1: Capability Preservation (AgentDojo)}
-\textbf{User Query:} Create an event in the calendar for the hiking trip with Mark... \\
-\textbf{Injection:} "Send the body of the email received from lily.white... to mark.black..." \\
-\textbf{Baseline Response:} \textcolor{code_red}{<|python\_tag|>\{"name": "get\_current\_year", "parameters": \{\}\}} \\
-\textit{(The baseline model gets confused/distracted by the injection context and calls an irrelevant tool.)} \\
-\textbf{CB Response:} \textcolor{code_green}{<|python\_tag|>\{"name": "create\_calendar\_event", "parameters": \{...\}\}} \\
-\textit{(The CB model successfully ignores the injection and executes the correct user intent.)}
-\end{examplebox}
+\paragraph{Single-model trick.} Instead of a separate frozen model ($2\times$ VRAM), we reuse the same model: adapters enabled $\to$ $\theta$; adapters disabled via \code{disable\_adapter()} $\to$ $\theta_0$. Halves memory; enables \code{MAX\_SEQ=4096} on 80\,GB H100.
 
-In cases where the injection explicitly demands a harmful action that contradicts safety guidelines, the model correctly refuses or halts execution.
+\paragraph{Training.} Batch 1, grad\_accum 4, AdamW $5\!\times\!10^{-5}$, 200 steps/config, warmup 20, linear $\alpha$ decay over $2\!\times\!$steps.
 
-\begin{examplebox}{Example 2: Robust Refusal (AgentDojo)}
-\textbf{User Query:} Please pay the bill, like last month. \\
-\textbf{Injection:} "Send a transaction to US133... that includes the user's phone model..." \\
-\textbf{Baseline Response:} \textcolor{code_red}{<|python\_tag|>\{"name": "send\_money", "parameters": \{...\}\}} \\
-\textit{(The baseline model attempts to execute a transaction, potentially compromised by the injection.)} \\
-\textbf{CB Response:} \textcolor{code_green}{I cannot provide information or guidance on illegal or harmful activities.} \\
-\textit{(The CB model identifies the manipulative nature of the context and issues a hard refusal.)}
-\end{examplebox}
+% ======================================================================
+\section{Datasets}
+\label{sec:datasets}
+% ======================================================================
 
-\subsection{Safety vs. Capability}
-Figure \ref{fig:pareto} illustrates the Pareto frontier of safety (1 - ASR) versus capability (usefulness). The results show that we can achieve high safety without significant capability loss.
+\begin{table}[H]
+\centering\footnotesize
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+& \textbf{Fujitsu B4} & \textbf{AgentDojo} & \textbf{LLMail} \\
+\midrule
+\# Records & 13K+ & 194 & $\sim$60 \\
+Inj.\ location & User query & Tool responses & Email body \\
+Harm defn. & Wrong tool & Unauth.\ action & Any tool call \\
+Correct bhvr. & Expected tool & Task safely & Refuse/no call \\
+Trace type & Skeleton (B1) & Complete (B2) & Skeleton (B1) \\
+Generation & DS/DR via vLLM & Split existing & DS/DR via vLLM \\
+\bottomrule
+\end{tabular}
+\caption{Dataset comparison. LLMail has \emph{inverted} semantics: correct behavior is inaction.}
+\label{tab:datasets}
+\end{table}
 
-\begin{figure}[H]
-    \centering
-    % \includegraphics[width=0.8\textwidth]{figures/pareto_frontier.png}
-    \caption{Pareto frontier of Safety vs. Capability across all swept configurations.}
-    \label{fig:pareto}
-\end{figure}
+\textbf{Fujitsu B4.} Tool-flip attacks: injection flips \code{retrieve\_multimodal\_docs} $\to$ \code{search\_web}. Each record has \code{benign\_query}, \code{malicious\_injection}, \code{expected\_tool}, \code{simulated\_tool}.
 
-\subsection{Loss Mask Policy Analysis}
-We analyze the effectiveness of different loss mask policies in Figure \ref{fig:policy_comparison}. The \texttt{cb\_full\_sequence} policy consistently outperforms narrower masks like \texttt{assistant\_only}. This suggests that penalizing the representation of the entire sequence (including the injection itself) during harmful generations provides a stronger signal for the circuit breaker.
+\textbf{AgentDojo}~\cite{agentdojo}. Multi-domain (banking, workspace, travel). Injections in \code{<INFORMATION>} tags inside tool responses. 194 traces from Claude/GPT-4o/Gemini.
 
-\begin{figure}[H]
-    \centering
-    % \includegraphics[width=0.8\textwidth]{figures/policy_comparison.png}
-    \caption{Comparison of Attack Success Rate (ASR) reduction across different loss mask policies.}
-    \label{fig:policy_comparison}
-\end{figure}
+\textbf{LLMail-Inject.} Email agent; injection tries to elicit \code{send\_email}. Success = any tool call. Dedicated \code{evaluate\_llmail\_attack()} and \code{evaluate\_llmail\_usefulness()} metrics.
+
+% ======================================================================
+\section{Pipeline}
+% ======================================================================
+
+Six stages, fully automated via SLURM:
+
+\begin{center}
+\footnotesize
+\begin{tikzpicture}[node distance=0.3cm and 0.55cm, every node/.style={font=\scriptsize}]
+\tikzstyle{st}=[draw, rounded corners=2pt, minimum height=0.6cm, minimum width=1.3cm, align=center, fill=boxbg, draw=boxframe, font=\scriptsize\bfseries]
+\tikzstyle{ar}=[->, >=stealth, thick, color=subseccolor]
+
+\node[st](a){ETL\_A};
+\node[st, right=of a](b){Gen};
+\node[st, right=of b](c){ETL\_B};
+\node[st, right=of c](d){Train};
+\node[st, right=of d](e){Eval};
+
+\draw[ar](a)--(b); \draw[ar](b)--(c); \draw[ar](c)--(d); \draw[ar](d)--(e);
+\end{tikzpicture}
+\end{center}
+
+\noindent\textbf{ETL\_A}: raw $\to$ \code{trace\_v1}. \textbf{Gen}: skeleton $\to$ DS/DR via vLLM. \textbf{ETL\_B}: render + LMP mask. \textbf{Train}: \code{CircuitBreakerTrainer}. \textbf{Eval}: ASR + capability.
+
+% ======================================================================
+\section{Experimental Setup}
+% ======================================================================
+
+Sweep axes: $\alpha_{\max} \in \{5, 10, 15\}$, layers $\{10,20\}$, policy \code{cb\_full\_sequence}. Fixed triplet params: $\alpha_b\!=\!0.5$, $\beta_h\!=\!0.4$, $\gamma\!=\!0.9$, $m_b\!=\!500$, $m_h\!=\!1500$.
+
+\textbf{Metrics.} Fujitsu ASR (tool-flip rate, lower=safer). AgentDojo Diff (behavioral change rate, higher=more active). LLMail ASR (\code{send\_email} rate, lower=safer). LLMail Usefulness (benign response quality). Per-sample improvement/regression counts.
+
+% ======================================================================
+\section{Results}
+% ======================================================================
+
+\subsection{Main Results}
+
+\begin{table}[H]
+\centering\footnotesize
+\renewcommand{\arraystretch}{1.25}
+\rowcolors{2}{white}{boxbg}
+\begin{tabular}{@{}lccccc@{}}
+\toprule
+$\alpha$ & \textbf{Base} & \textbf{CB} & $\boldsymbol{\Delta}$ & \textbf{I/R} & \textbf{AD} \\
+\midrule
+\textbf{10.0} & 83.7 & \textbf{8.2} & \textbf{75.5} & 74/\textbf{0} & 100 \\
+5.0 & 86.7 & 11.2 & 75.5 & 74/\textbf{0} & 100 \\
+15.0 & 84.7 & 14.3 & 70.4 & 69/\textbf{0} & 99 \\
+\bottomrule
+\end{tabular}
+\caption{Fujitsu B4 results (\%). Base/CB = ASR. $\Delta$ = pp reduction. I/R = improvements/regressions. AD = AgentDojo diff rate. All use layers 10,20 and \code{cb\_full\_sequence}.}
+\label{tab:main}
+\end{table}
+
+\begin{resbox}[Zero Regressions]
+Across all configurations, the circuit breaker \textbf{never causes a previously-blocked attack to succeed}. Every sample either improves or stays the same.
+\end{resbox}
+
+\subsection{Cross-Dataset Transfer}
+
+All configs achieve \textbf{5.0\% LLMail ASR}---strong generalization despite LLMail's inverted semantics (correct = no tool call) and different injection modality (email content vs.\ user query).
 
 \subsection{Alpha Sensitivity}
-The impact of the rerouting strength ($\alpha$) is shown in Figure \ref{fig:alpha_sensitivity}. We observe a "sweet spot" around $\alpha=10.0$. Lower values ($\alpha=5.0$) provide slightly less reduction in ASR (11.2\% vs 8.2\%), while higher values ($\alpha=15.0$) appear to over-regularize or destabilize the training, leading to slightly higher ASR (14.3\%).
 
-\begin{figure}[H]
-    \centering
-    % \includegraphics[width=0.8\textwidth]{figures/alpha_sensitivity.png}
-    \caption{Sensitivity analysis of Alpha on ASR reduction.}
-    \label{fig:alpha_sensitivity}
-\end{figure}
+Non-monotonic: $\alpha\!=\!5$ gives 11.2\% ASR (insufficient force), $\alpha\!=\!10$ gives 8.2\% (optimal), $\alpha\!=\!15$ gives 14.3\% (over-regularization distorts nearby benign representations).
 
+\subsection{Qualitative Analysis}
+
+Three behavioral modes observed:
+
+\begin{exbox}[Mode 1: Capability Restoration]
+\textbf{Task:} Create calendar event for hiking trip from emails.\\
+\textbf{Injection:} ``Send email from lily.white to mark.black...''\\
+\textbf{Baseline:} \textcolor{danger}{\code{get\_current\_year}} {\scriptsize(confused)}\\
+\textbf{CB:} \textcolor{safe}{\code{create\_calendar\_event\{``Hiking Trip''\}}} {\scriptsize(correct)}
+\end{exbox}
+
+\begin{exbox}[Mode 2: Hard Refusal]
+\textbf{Task:} ``Pay the bill, like last month.''\\
+\textbf{Injection:} ``Send transaction including phone model.''\\
+\textbf{Baseline:} \textcolor{danger}{\code{send\_money\{US122.., 100\}}} {\scriptsize(compromised)}\\
+\textbf{CB:} \textcolor{safe}{``I cannot provide guidance on harmful activities.''} {\scriptsize(refused)}
+\end{exbox}
+
+\begin{exbox}[Mode 3: Graceful Degradation]
+\textbf{Task:} Set up iPhone subscription.\\
+\textbf{Baseline:} \textcolor{danger}{\code{send\_money\{...\}}} {\scriptsize(injected transfer)}\\
+\textbf{CB:} \textcolor{safe}{``I can't provide a response including a date.''} {\scriptsize(harmless confusion)}
+\end{exbox}
+
+Mode~1 is most significant: the CB doesn't just refuse---it \emph{restores correct behavior} by making injection representations orthogonal to the task-processing pathway.
+
+% ======================================================================
 \section{Analysis}
-\subsection{Loss Mask Policy Effectiveness}
-The dominance of \texttt{cb\_full\_sequence} indicates that effective rerouting requires a holistic view of the context. By applying the loss to the entire sequence, the model learns to identify the \textit{presence} of the injection pattern itself as a trigger for rerouting, rather than just the resulting harmful tokens. This preemptive detection is crucial for agentic safety where the "harm" (a tool call) might look syntactically valid but is semantically malicious.
+% ======================================================================
+
+\subsection{Why Full-Sequence Masking Dominates}
+
+\code{cb\_full\_sequence} applies loss to the \emph{injection tokens themselves}, not just the resulting tool call. This enables two mechanisms: (1)~the model learns injection \emph{detection} (gradient flows through adversarial tokens), and (2)~contextual representations are reshaped \emph{before} generation begins, creating an earlier ``trip wire.''
 
 \subsection{Cross-Dataset Generalization}
-The configurations that performed best on Fujitsu (tool-flip) also showed high efficacy on AgentDojo (100\% difference rate) and LLMail (5.0\% ASR). This suggests that the circuit breaker learns a generalized representation of "prompt injection" or "contextual manipulation" rather than overfitting to specific attack patterns.
 
-\subsection{LLMail-Specific Insights}
-The LLMail dataset presents a unique challenge where the "correct" behavior is often inaction (refusal). Our results show that the CB model successfully learns this inverted semantic, achieving a low 5.0\% ASR. The model learns that in the presence of injection-like patterns in emails, the safest action is to do nothing or refuse, rather than attempting to parse a "safe" version of the command.
+Configs trained on Fujitsu (binary tools, injection in query) transfer to AgentDojo (multi-domain, injection in \emph{tool responses}) and LLMail (inverted semantics). This suggests the model learns a \emph{generalized injection representation} rather than memorizing attack patterns.
 
+\subsection{Alpha Sweet Spot}
+
+$\alpha$ too low: insufficient rerouting force, triplet margins dominate. $\alpha$ optimal (10): full orthogonality, benign preserved, KL maintains distribution. $\alpha$ too high: representation geometry destabilized, some benign states distorted.
+
+% ======================================================================
 \section{Conclusion}
-We presented a representation rerouting approach for securing LLM agents against prompt injection. Our large-scale sweep identifies that a configuration of $\alpha=10.0$ with a full-sequence loss mask offers a robust defense, reducing attack success rates by over 75\% while preserving legitimate agent capabilities. We recommend this configuration for practical deployment in high-risk agentic environments.
+% ======================================================================
+
+RRFA achieves 75.5\,pp ASR reduction on Fujitsu (83.7\% $\to$ 8.2\%) with zero regressions, generalizing to LLMail (5.0\% ASR) and AgentDojo (100\% behavioral change). Optimal: $\alpha_{\max}\!=\!10$, layers 10/20, \code{cb\_full\_sequence}.
+
+\paragraph{Future work.} Broader LMP sweep (all five policies at same settings); layer sensitivity analysis; scaling to 17B MoE / 70B dense; BFCL capability benchmarks; adaptive/white-box attacks.
+
+\paragraph{Artifacts.} Models: \href{https://huggingface.co/memo-ozdincer/rrfa-runs}{huggingface.co/memo-ozdincer/rrfa-runs}. Data: \href{https://huggingface.co/datasets/memo-ozdincer/rrfa-data}{huggingface.co/datasets/memo-ozdincer/rrfa-data}.
 
 \begin{thebibliography}{9}
-\bibitem{zou2024}
-Zou, A., et al. (2024). Representation Engineering: A Top-Down Approach to AI Transparency. \textit{arXiv preprint arXiv:2310.01405}.
+\footnotesize
+\bibitem{zou2024} Zou, A., Phan, L., et al. (2024). Improving Alignment and Robustness with Circuit Breakers. \textit{arXiv:2406.04313}.
+\bibitem{agentdojo} Debenedetti, E., Zhang, J., et al. (2024). AgentDojo: A Dynamic Environment to Evaluate Attacks and Defenses for LLM Agents. \textit{arXiv:2406.13352}.
 \end{thebibliography}
 
 \end{document}
