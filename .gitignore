@@ -29,7 +29,7 @@ docs/
 # git rm -r --cached docs/
 paper/
 results/
-scripts/
+# scripts/
 tests/
 .venv
 .claude
