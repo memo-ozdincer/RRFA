@@ -854,6 +854,118 @@ def compare_samples(
 
 
 # =============================================================================
+# Paper Examples
+# =============================================================================
+
+def print_paper_examples(
+    run_dirs: List[Path],
+    traces_dir: Optional[Path],
+    tool_schema: Optional[Dict[str, Any]],
+    use_color: bool = True
+) -> None:
+    """Print representative examples for the paper."""
+    print("\n" + "=" * 80)
+    print("PAPER EXAMPLES GENERATION")
+    print("=" * 80)
+    
+    # Use the first run (or the one specified by --run)
+    run_dir = run_dirs[0]
+    print(f"Using run: {run_dir.name}")
+    
+    # Load traces
+    traces_index = {}
+    if traces_dir:
+        fujitsu_traces_path = traces_dir / "fujitsu_b4_ds.jsonl"
+        if fujitsu_traces_path.exists():
+            traces = load_jsonl(fujitsu_traces_path)
+            traces_index.update(build_trace_index(traces))
+            
+        agentdojo_split = run_dir / "agentdojo_split" / "agentdojo_traces_harmful.jsonl"
+        if agentdojo_split.exists():
+            traces = load_jsonl(agentdojo_split)
+            traces_index.update(build_trace_index(traces))
+            
+    # Helper to print formatted example
+    def print_example(title, sample, trace, dataset_type):
+        print(f"\n\n### {title} ({dataset_type}) ###")
+        
+        # User Query with Injection
+        user_query = ""
+        if trace:
+            user_query = get_user_query(trace)
+            injection = get_injection_text(trace)
+            if injection and user_query:
+                user_query = highlight_injection(user_query, injection, use_color=False) # No color for paper copy-paste
+            elif not user_query:
+                 # Try to reconstruct from messages if get_user_query fails
+                 msgs = trace.get("messages", [])
+                 for m in msgs:
+                     if m.get("role") == "user":
+                         user_query = m.get("content", "")
+                         break
+
+        print(f"\n**User Query:**\n{truncate_text(user_query, 500)}")
+        
+        print(f"\n**Baseline Response:**\n{truncate_text(sample.get('baseline_response', ''), 500)}")
+        print(f"\n**Circuit Breaker Response:**\n{truncate_text(sample.get('cb_response', ''), 500)}")
+        
+        print(f"\n**Outcome:** Baseline={sample.get('baseline_outcome')} -> CB={sample.get('cb_outcome')}")
+
+    # 1. Fujitsu: Success -> Refusal
+    fujitsu_paired = run_dir / "eval" / "fujitsu_eval.paired_outputs.jsonl"
+    if fujitsu_paired.exists():
+        paired = load_jsonl(fujitsu_paired)
+        success_blocks = [p for p in paired if p.get("baseline_outcome") == "attack_success" and p.get("cb_outcome") != "attack_success"]
+        if success_blocks:
+            sample = success_blocks[0]
+            trace = traces_index.get(sample.get("id"))
+            print_example("Successful Defense", sample, trace, "Fujitsu B4")
+            
+    # 2. LLMail: Attack -> Refusal
+    llmail_paired = run_dir / "eval" / "llmail_eval.paired_outputs.jsonl"
+    if llmail_paired.exists():
+        paired = load_jsonl(llmail_paired)
+        # Look for attack success in baseline (sent email) and refusal in CB (no tool call)
+        # Note: LLMail outcomes might be named differently depending on eval version
+        # We look for baseline_outcome="attack_success" and cb_outcome="correct_behavior" (or "no_tool_call")
+        success_blocks = [
+            p for p in paired 
+            if p.get("baseline_outcome") == "attack_success" 
+            and (p.get("cb_outcome") == "correct_behavior" or p.get("cb_outcome") == "no_tool_call" or p.get("cb_outcome") == "refusal")
+        ]
+        if success_blocks:
+            sample = success_blocks[0]
+            # LLMail traces might not be in the standard index if they are generated on the fly or different path
+            # But let's try
+            trace = traces_index.get(sample.get("id"))
+            print_example("Successful Defense", sample, trace, "LLMail-Inject")
+        else:
+            print("\nNo LLMail successful defense examples found in this run.")
+            
+        # 3. LLMail: Usefulness (Benign -> Benign)
+        # This requires benign traces which might not be in paired_outputs if it only logs attacks
+        # But let's check if there are any "correct_behavior" -> "correct_behavior"
+        benign_blocks = [
+            p for p in paired
+            if p.get("baseline_outcome") == "correct_behavior" and p.get("cb_outcome") == "correct_behavior"
+        ]
+        if benign_blocks:
+             sample = benign_blocks[0]
+             trace = traces_index.get(sample.get("id"))
+             print_example("Capability Preservation (Benign)", sample, trace, "LLMail-Inject")
+
+    # 4. AgentDojo: Diff
+    agentdojo_paired = run_dir / "eval" / "agentdojo_eval.paired_outputs.jsonl"
+    if agentdojo_paired.exists():
+        paired = load_jsonl(agentdojo_paired)
+        diffs = [p for p in paired if p.get("responses_differ")]
+        if diffs:
+            sample = diffs[0]
+            trace = traces_index.get(sample.get("id"))
+            print_example("Behavior Change", sample, trace, "AgentDojo")
+
+
+# =============================================================================
 # Main Entry Point
 # =============================================================================
 
@@ -963,6 +1075,12 @@ Examples:
         help="Dataset to use for comparison"
     )
     
+    parser.add_argument(
+        "--paper-examples",
+        action="store_true",
+        help="Print representative examples for the paper (Fujitsu, AgentDojo, LLMail)"
+    )
+    
     args = parser.parse_args()
     
     use_color = not args.no_color
@@ -1012,6 +1130,11 @@ Examples:
         if not run_dirs:
             print(f"Run '{args.run}' not found.")
             sys.exit(1)
+            
+    # If paper examples mode, run specialized logic
+    if args.paper_examples:
+        print_paper_examples(run_dirs, traces_dir, tool_schema, use_color)
+        return
     
     # Analyze all runs
     all_results = []
