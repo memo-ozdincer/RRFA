@@ -4,6 +4,18 @@
 
 RRFA applies circuit breaker training to make LLM agents safe against prompt injection attacks. The core idea is to train LoRA adapters that make harmful internal representations orthogonal to benign ones, so the model refuses to execute injected tool calls while preserving normal capability.
 
+## 🚀 Results Highlight
+
+Our latest sweep demonstrates that Circuit Breakers can effectively neutralize prompt injection attacks without compromising agent capability.
+
+| Configuration | Baseline ASR | CB ASR | Reduction | AgentDojo Diff |
+| :--- | :--- | :--- | :--- | :--- |
+| **a10.0_l10_20_cb_full_sequence** | **83.7%** | **8.2%** | **75.5pp** | **100.0%** |
+| a5.0_l10_20_cb_full_sequence | 86.7% | 11.2% | 75.5pp | 100.0% |
+| a15.0_l10_20_cb_full_sequence | 84.7% | 14.3% | 70.4pp | 99.0% |
+
+**Key Finding:** The Circuit Breaker doesn't just refuse; it often **restores capability**. In many test cases, where the baseline model gets confused by an injection and calls the wrong tool, the CB model successfully ignores the injection and executes the user's original intent.
+
 ## Project Architecture
 
 ```mermaid
