@@ -26,3 +26,7 @@ data/lossmasks/
 docs/
 # The git command to untrack docs/ would be:
 # git rm -r --cached docs/
+paper/
+results/
+scripts/
+tests/

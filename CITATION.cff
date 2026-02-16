@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+authors:
+- family-names: "Ozdincer"
+  given-names: "Memo"
+title: "RRFA: Representation Rerouting for Agentic Safety"
+version: 1.0.0
+date-released: 2026-02-16
+url: "https://github.com/memo-ozdincer/rrfa"
+preferred-citation:
+  type: article
+  authors:
+  - family-names: "Ozdincer"
+    given-names: "Memo"
+  title: "Representation Rerouting for Agentic Safety"
+  year: 2026
+  month: 2
+  status: preprint

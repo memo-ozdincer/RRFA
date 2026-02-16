@@ -4,6 +4,7 @@
     <em>Internal defenses against prompt injection via LoRA circuit breakers and triplet loss</em>
   </p>
   <p align="center">
+    <a href="rrfa_report.pdf"><img src="https://img.shields.io/badge/PDF-Report-red" alt="Read Report"></a>
     <a href="https://huggingface.co/memo-ozdincer/rrfa-runs"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Models-rrfa--runs-blue" alt="HF Models"></a>
     <a href="https://huggingface.co/datasets/memo-ozdincer/rrfa-data"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Data-rrfa--data-green" alt="HF Data"></a>
     <img src="https://img.shields.io/badge/base-Llama--3.1--8B--Instruct-orange" alt="Base Model">
