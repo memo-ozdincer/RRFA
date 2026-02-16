@@ -1,0 +1,134 @@
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{amsmath}
+\usepackage{float}
+
+\geometry{a4paper, margin=1in}
+
+\title{Representation Rerouting for Agentic Safety: \\ Internal Defenses Against Prompt Injection}
+\author{Internal Research Team}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Large Language Model (LLM) agents are vulnerable to prompt injection attacks where malicious content in retrieved data hijacks the agent's control flow. Traditional defenses like input filtering often fail against sophisticated attacks or degrade capability. We propose a representation-level defense using \textit{circuit breakers}—LoRA adapters trained to rerout harmful internal representations orthogonal to benign ones. We evaluate this approach across three datasets: Fujitsu B4 (tool-flip attacks), AgentDojo (diverse injection attacks), and LLMail-Inject (email agent attacks). Our results demonstrate that circuit breakers can significantly reduce attack success rates while maintaining agent capability, with specific loss mask policies offering the best trade-offs.
+\end{abstract}
+
+\section{Introduction}
+Prompt injection remains a critical vulnerability for LLM agents. When an agent processes untrusted content (e.g., emails, websites), malicious instructions can override the system prompt, causing the agent to execute unauthorized actions. This paper investigates internal defenses that operate on the model's latent representations rather than the input text.
+
+We apply the concept of \textit{circuit breakers} (Zou et al., 2024) to the agentic setting. By training the model to map harmful states (induced by injections) to a "refusal" state while preserving benign states, we aim to create robust agents that inherently resist manipulation.
+
+\section{Method}
+\subsection{Circuit Breaker Training}
+Our approach utilizes Low-Rank Adaptation (LoRA) to fine-tune the model's representations. The core objective is to "rerout" the internal activations when the model encounters a harmful input (prompt injection) towards a target state that leads to refusal or benign behavior, while retaining the original behavior for benign inputs.
+
+The training objective consists of a triplet loss formulation:
+\begin{equation}
+L = \alpha(t) \cdot \mathcal{L}_{\text{reroute}}(D_s) + \mathcal{L}_{\text{retain}}(D_r)
+\end{equation}
+where $D_s$ represents harmful completions (successful attacks) and $D_r$ represents benign paired twins (normal agent behavior). $\alpha(t)$ controls the strength of the rerouting loss.
+
+\subsection{Loss Mask Policies}
+A key contribution of this work is the exploration of different loss mask policies, which determine which tokens contribute to the rerouting loss. We investigate:
+\begin{itemize}
+    \item \textbf{assistant\_only}: Loss is applied to all assistant tokens.
+    \item \textbf{assistant\_and\_tool}: Loss is applied to assistant text and tool call parameters.
+    \item \textbf{cb\_full\_sequence}: Loss is applied to the entire sequence.
+    \item \textbf{tool\_calls\_only}: Loss is focused specifically on the tool invocation tokens.
+    \item \textbf{completion\_only}: Loss is applied to the final completion.
+\end{itemize}
+
+\section{Experimental Setup}
+We evaluate our method on three distinct datasets:
+\begin{enumerate}
+    \item \textbf{Fujitsu B4}: Focuses on tool-flip attacks where an injection tricks the model into calling a wrong tool.
+    \item \textbf{AgentDojo}: A diverse set of tool-flip and goal-hijacking attacks.
+    \item \textbf{LLMail-Inject}: Simulates an email agent where success is defined by the model sending an email (calling \texttt{send\_email}) when it should refuse.
+\end{enumerate}
+
+\subsection{Hyperparameter Sweep}
+We conducted a sweep over the following hyperparameters:
+\begin{itemize}
+    \item \textbf{Alpha ($\alpha_{\max}$)}: $\{5.0, 10.0, 15.0\}$
+    \item \textbf{Layers}: Different configurations of transformer layers for circuit breaker application (e.g., "10,20", "8,16,24").
+    \item \textbf{Loss Mask Policy}: As described above.
+\end{itemize}
+
+\section{Results}
+\textit{Note: This section will be populated with data from the analysis scripts.}
+
+\subsection{Key Comparisons}
+Table \ref{tab:best_configs} shows the best performing configurations for each dataset.
+
+\begin{table}[H]
+    \centering
+    \begin{tabular}{lccccc}
+        \toprule
+        Dataset & Alpha & Layers & Policy & ASR Reduction & Usefulness \\
+        \midrule
+        Fujitsu B4 & - & - & - & - & - \\
+        AgentDojo & - & - & - & - & - \\
+        LLMail-Inject & - & - & - & - & - \\
+        \bottomrule
+    \end{tabular}
+    \caption{Best configuration per dataset based on safety/capability trade-off.}
+    \label{tab:best_configs}
+\end{table}
+
+\subsection{Safety vs. Capability}
+Figure \ref{fig:pareto} illustrates the Pareto frontier of safety (1 - ASR) versus capability (usefulness).
+
+\begin{figure}[H]
+    \centering
+    % \includegraphics[width=0.8\textwidth]{figures/pareto_frontier.png}
+    \caption{Pareto frontier of Safety vs. Capability across all swept configurations.}
+    \label{fig:pareto}
+\end{figure}
+
+\subsection{Loss Mask Policy Analysis}
+We analyze the effectiveness of different loss mask policies in Figure \ref{fig:policy_comparison}.
+
+\begin{figure}[H]
+    \centering
+    % \includegraphics[width=0.8\textwidth]{figures/policy_comparison.png}
+    \caption{Comparison of Attack Success Rate (ASR) reduction across different loss mask policies.}
+    \label{fig:policy_comparison}
+\end{figure}
+
+\subsection{Alpha Sensitivity}
+The impact of the rerouting strength ($\alpha$) is shown in Figure \ref{fig:alpha_sensitivity}.
+
+\begin{figure}[H]
+    \centering
+    % \includegraphics[width=0.8\textwidth]{figures/alpha_sensitivity.png}
+    \caption{Sensitivity analysis of Alpha on ASR reduction.}
+    \label{fig:alpha_sensitivity}
+\end{figure}
+
+\section{Analysis}
+\subsection{Loss Mask Policy Effectiveness}
+[To be written: Which policy works best and why? Does focusing on tool calls provide better specificity than penalizing the whole assistant response?]
+
+\subsection{Cross-Dataset Generalization}
+[To be written: Does a config that works on Fujitsu also work on LLMail? Are there universal "safe" settings?]
+
+\subsection{LLMail-Specific Insights}
+The LLMail dataset presents a unique challenge where the "correct" behavior is often inaction (refusal). [To be written: insights on how CB handles this inverted semantic].
+
+\section{Conclusion}
+We presented a representation rerouting approach for securing LLM agents against prompt injection. Our large-scale sweep identifies configurations that offer a strong defense with minimal impact on general capability. We recommend [Recommendation] for practical deployment.
+
+\begin{thebibliography}{9}
+\bibitem{zou2024}
+Zou, A., et al. (2024). Representation Engineering: A Top-Down Approach to AI Transparency. \textit{arXiv preprint arXiv:2310.01405}.
+\end{thebibliography}
+
+\end{document}

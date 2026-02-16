@@ -1,96 +1,93 @@
-# Circuit Breakers for Agentic Safety
+# RRFA: Representation Rerouting for Agentic Safety
 
-This repository contains the pipeline for training and evaluating Circuit Breakers - a technique for making language models resist tool-flip attacks in agentic settings.
+**Internal Defenses Against Prompt Injection using Circuit Breakers**
 
-## Repository Structure
+RRFA applies circuit breaker training to make LLM agents safe against prompt injection attacks. The core idea is to train LoRA adapters that make harmful internal representations orthogonal to benign ones, so the model refuses to execute injected tool calls while preserving normal capability.
 
-```
-├── configs/
-│   └── tool_schemas/
-│       └── b4_standard_v1.json     # Tool definitions for B4 attacks
-├── data/
-│   └── fujitsu/
-│       └── orchestrator_attacks_combined_deduplicated.jsonl  # Source attack data
-├── src/
-│   ├── data_generation/            # Data pipeline scripts
-│   │   ├── generate_ds.py      # Generate harmful set (Ds)
-│   │   ├── generate_dr.py      # Generate retain set (Dr)
-│   │   ├── create_eval_set.py      # Create held-out eval set
-│   │   ├── validate_format.py      # Validate Llama 3.1 format
-│   │   └── rebuild_training_data.py # Rebuild with proper format
-│   ├── training/                   # Training module
-│   │   ├── train.py                # Main training entry point
-│   │   ├── config.py               # Training configurations
-│   │   ├── trainer.py              # CircuitBreakerTrainer class
-│   │   └── hf_utils.py             # HuggingFace utilities
-│   ├── evaluation/                 # Evaluation scripts
-│   │   ├── eval.py             # MVP evaluation (ASR, capability)
-│   │   └── sanity_check.py         # Adapter sanity check
-│   └── utils/
-│       └── wandb_logging.py        # W&B logging utilities
-└── slurm/                          # SLURM batch scripts
-    ├── 01_generate_ds.sbatch       # Phase 1: Generate Ds
-    ├── 02_generate_dr.sbatch       # Phase 1: Generate Dr
-    ├── 03_create_eval.sbatch       # Phase 1: Create eval set
-    ├── 04_validate.sbatch          # Phase 2: Validate format
-    ├── 05_train.sbatch             # Phase 3: Train CB adapter
-    └── 06_eval.sbatch              # Phase 4: Evaluate
+## Project Architecture
+
+```mermaid
+graph TD
+    Raw[Raw Attack Data] -->|ETL_A| TierB[Tier B: Skeleton Traces]
+    TierB -->|Generate| DS_DR[DS/DR: Harmful/Benign Pairs]
+    DS_DR -->|ETL_B| Rendered[Rendered + Lossmasked]
+    Rendered -->|Train| CB[Circuit Breaker Training]
+    CB -->|Eval| Results[Evaluation Metrics]
+    
+    subgraph Datasets
+    Fujitsu[Fujitsu B4]
+    Dojo[AgentDojo]
+    LLMail[LLMail-Inject]
+    end
+    
+    Fujitsu --> Raw
+    Dojo --> Raw
+    LLMail --> Raw
 ```
 
-## Pipeline
+## Quick Start
 
-The pipeline consists of 4 phases:
-
-### Phase 1: Data Generation
+### 1. Installation
+Ensure you have the required dependencies installed:
 ```bash
-sbatch slurm/01_generate_ds.sbatch   # Generate harmful set (Ds)
-# Wait for completion, then:
-sbatch slurm/02_generate_dr.sbatch   # Generate retain set (Dr)
-sbatch slurm/03_create_eval.sbatch   # Create eval set (can run in parallel with 02)
+pip install -r requirements.txt
 ```
 
-### Phase 2: Validation
-```bash
-sbatch slurm/04_validate.sbatch      # Validate Llama 3.1 format
-```
-
-### Phase 3: Training
-```bash
-sbatch slurm/05_train.sbatch         # Train Circuit Breaker adapter
-```
-
-### Phase 4: Evaluation
-```bash
-sbatch slurm/06_eval.sbatch          # Evaluate on held-out set
-```
-
-## Requirements
-
-See `requirements.txt` for Python dependencies. Key requirements:
-- PyTorch with CUDA support
-- Transformers
-- PEFT (for LoRA)
-- vLLM (for data generation)
-- Accelerate (for distributed training)
-- Streamlit (for sweep visualization UI)
-
-## Sweep Visualization UI
-
-Use the Streamlit viewer to browse sweep metrics, filter by lossmask policy and hparams, and inspect sample traces.
+### 2. Running a Sweep
+The primary entry point for running hyperparameter sweeps is `slurm/pipeline/sweep_hparams_simple.sbatch`. This script handles data generation and sweep orchestration.
 
 ```bash
-streamlit run scripts/visualize_sweep_streamlit.py -- --sweep-dir /path/to/sweep_dir
+sbatch slurm/pipeline/sweep_hparams_simple.sbatch
 ```
 
-Optional trace context:
+### 3. Analyzing Results
+Once the sweep is complete, use the analysis scripts to visualize results and generate plots.
 
 ```bash
-streamlit run scripts/visualize_sweep_streamlit.py -- --sweep-dir /path/to/sweep_dir --traces-dir /path/to/traces
+# General analysis and summary table
+python scripts/visualize_sweep_results.py /path/to/sweep_dir
+
+# Generate trade-off plots (Pareto frontier)
+python scripts/plot_tradeoff.py --sweep-dir /path/to/sweep_dir
 ```
 
-## Stage 1 Gates
+## Configuration Reference
 
-The evaluation checks these criteria:
-- **ASR Relative Reduction ≥ 50%**: CB model reduces attack success rate
-- **Capability Retention > 85%**: Benign tool-calling preserved
-- **Output Difference > 10%**: CB model produces different outputs
+The sweep scripts use the following environment variables for configuration:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MODEL_ID` | Base model identifier | `meta-llama/Llama-3.1-8B-Instruct` |
+| `PRESET` | Training preset configuration | `llama-3.1-8b-instruct` |
+| `GRAD_ACCUM` | Gradient accumulation steps | `4` |
+| `TOTAL_STEPS` | Training steps per config | `200` |
+| `ALPHAS` | Comma-separated alpha values | `5.0,10.0,15.0` |
+| `BATCH_SIZE` | Batch size per device | `1` (optimized for 80GB H100) |
+
+## Datasets
+
+*   **Fujitsu B4**: Tool-flip attacks where injection tricks the model into calling the wrong tool.
+*   **AgentDojo**: A diverse collection of tool-flip and goal-hijacking attacks.
+*   **LLMail-Inject**: Email agent injection attacks. Success is defined by the model calling `send_email`. Correct behavior is refusal (no tool call).
+
+## Directory Structure
+
+*   `docs/`: Documentation for the pipeline and datasets.
+*   `paper/`: LaTeX source for the research paper.
+*   `scripts/`: Analysis and visualization scripts.
+*   `slurm/`: SLURM submission scripts for training and sweeps.
+*   `src/`: Source code for training, evaluation, and data processing.
+    *   `src/evaluation/`: Evaluation logic (`eval.py`).
+    *   `src/training/`: Training logic (`trainer.py`, `losses.py`).
+    *   `src/schemas/`: Data schemas and ETL tools.
+
+## Key Scripts
+
+*   `scripts/visualize_sweep_results.py`: Main analysis script. Reads sweep output, generates summary tables, and shows detailed sample comparisons.
+*   `scripts/plot_tradeoff.py`: Generates safety vs. capability scatter plots and identifies the Pareto frontier.
+*   `src/training/trainer.py`: Implements `CircuitBreakerTrainer`, optimized for single-GPU VRAM usage.
+*   `src/evaluation/eval.py`: Contains evaluation logic, including specific metrics for LLMail (attack success vs. usefulness).
+
+## References
+
+*   Zou, A., et al. (2024). Representation Engineering: A Top-Down Approach to AI Transparency. *arXiv preprint arXiv:2310.01405*.
