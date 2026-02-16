@@ -12,7 +12,7 @@
 
   <p align="center">
     <br>
-    <a href="rrfa_report.pdf"><strong>📄 Read the Research Paper</strong></a>
+    <a href="internal_research_report.pdf"><strong>📄 Internal Research Report</strong></a>
     <br>
     <a href="https://huggingface.co/memo-ozdincer/rrfa-runs"><strong>🤗 HuggingFace Models</strong></a>
     <br>

@@ -8,6 +8,7 @@ llmail-inject-challenge/
 
 # PDF papers (available on arXiv)
 *.pdf
+!internal_research_report.pdf
 
 # ============================================================
 # GENERATED DATA (reproducible from pipeline - do not track)
