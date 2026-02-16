@@ -217,7 +217,7 @@ TOKENIZER="$MODEL_ID"
 echo "Resolving model '$MODEL_ID' to local cache path..."
 
 # Convert model ID to HF cache directory format (org--model)
-MODEL_CACHE_NAME=$(echo "$MODEL_ID" | tr '/' '--')
+MODEL_CACHE_NAME=$(echo "$MODEL_ID" | sed 's/\//--/g')
 MODEL_CACHE_DIR="$HF_HUB_CACHE/models--${MODEL_CACHE_NAME}"
 SNAPSHOT_ROOT="$MODEL_CACHE_DIR/snapshots"
 

@@ -87,7 +87,7 @@ export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 
 # Resolve Tokenizer to Local Cache (for generate_completions.py)
-MODEL_NAME="meta-llama/Llama-3.1-8B-Instruct"
+MODEL_NAME="models--meta-llama--Llama-3.1-8B-Instruct"
 MODEL_CACHE_DIR="$HF_HUB_CACHE/models--meta-llama--Llama-3.1-8B-Instruct"
 SNAPSHOT_ROOT="$MODEL_CACHE_DIR/snapshots"
 
