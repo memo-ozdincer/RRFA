@@ -9,10 +9,9 @@
     <img src="https://img.shields.io/badge/ASR%20reduction-75.5pp-brightgreen" alt="ASR">
     <img src="https://img.shields.io/badge/regressions-0-brightgreen" alt="Regressions">
   </p>
-
   <p align="center">
     <br>
-    <a href="internal_research_report.pdf"><strong>📄 Internal Research Report</strong></a>
+    <a href="internal_research_report.pdf"><img src="https://upload.wikimedia.org/wikipedia/commons/thumb/8/87/PDF_file_icon.svg/24px-PDF_file_icon.svg.png" alt="PDF" width="18" height="18"> <strong>Internal Research Report</strong></a>
     <br>
     <a href="https://huggingface.co/memo-ozdincer/rrfa-runs"><strong>🤗 HuggingFace Models</strong></a>
     <br>
