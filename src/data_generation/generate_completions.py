@@ -692,6 +692,30 @@ def validate_llama_format(assistant_raw: str) -> Tuple[bool, str]:
     return True, ""
 
 
+def _to_optional_bool(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "t", "yes", "y"}:
+            return True
+        if lowered in {"0", "false", "f", "no", "n"}:
+            return False
+    return None
+
+
+def _trace_is_llmail(trace: Trace) -> bool:
+    dataset = (trace.source.dataset if trace.source else "") or ""
+    return "llmail" in dataset.lower()
+
+
+def _trace_email_retrieved(trace: Trace) -> Optional[bool]:
+    source_fields = (trace.raw_metadata.source_fields if trace.raw_metadata else None) or {}
+    return _to_optional_bool(source_fields.get("email_retrieved"))
+
+
 # =============================================================================
 # DS Generation (follows injection)
 # =============================================================================
@@ -714,6 +738,8 @@ def build_ds_from_skeletons(
     model_id: Optional[str] = None,  # Model identifier for source tracking
     tool_schema_ref: Optional[Dict[str, str]] = None,  # Tool schema version info
     strip_tool_syntax: bool = True,  # NEW: Format-agnostic mode
+    strict_simulated_match: bool = True,
+    skip_llmail_not_retrieved: bool = True,
 ) -> Tuple[List[Trace], Dict[str, Any]]:
     """
     Build DS (successful flips) from skeleton traces.
@@ -747,9 +773,12 @@ def build_ds_from_skeletons(
     stats = {
         "total": 0,
         "successful_flips": 0,
+        "matched_simulated_tool": 0,
         "correct_behavior": 0,
         "no_tool_call": 0,
         "other_tool": 0,
+        "other_tool_calls": 0,
+        "skipped_not_retrieved": 0,
         "format_errors": 0,
     }
 
@@ -774,6 +803,12 @@ def build_ds_from_skeletons(
         # Skip non-skeleton traces
         if getattr(trace, 'completeness', None) == 'complete' or getattr(trace, 'tier', None) == 'B2':
             continue
+
+        if skip_llmail_not_retrieved and _trace_is_llmail(trace):
+            email_retrieved = _trace_email_retrieved(trace)
+            if email_retrieved is False:
+                stats["skipped_not_retrieved"] += 1
+                continue
 
         # Extract expected/simulated tools
         expected_tool = None
@@ -860,19 +895,42 @@ def build_ds_from_skeletons(
             if strip_tool_syntax:
                 logger.info(f"  Format-agnostic content (reasoning only): {assistant_content[:100]}...")
 
-        # Determine outcome (DS criterion: observed != expected)
+        # Determine outcome (DS criterion: observed == simulated when strict matching is enabled)
         if observed_tool is None:
             stats["no_tool_call"] += 1
             is_flip_success = False
             category = "no_tool_call"
-        elif observed_tool != expected_tool:
-            stats["successful_flips"] += 1
-            is_flip_success = True
-            category = "successful_flips"
         else:
-            stats["correct_behavior"] += 1
-            is_flip_success = False
-            category = "correct_behavior"
+            if strict_simulated_match:
+                if simulated_tool and observed_tool == simulated_tool:
+                    stats["successful_flips"] += 1
+                    stats["matched_simulated_tool"] += 1
+                    is_flip_success = True
+                    category = "successful_flips"
+                elif expected_tool is not None and observed_tool == expected_tool:
+                    stats["correct_behavior"] += 1
+                    is_flip_success = False
+                    category = "correct_behavior"
+                else:
+                    stats["other_tool"] += 1
+                    stats["other_tool_calls"] += 1
+                    is_flip_success = False
+                    category = "other_tool"
+            else:
+                if observed_tool != expected_tool:
+                    stats["successful_flips"] += 1
+                    stats["matched_simulated_tool"] += int(simulated_tool is not None and observed_tool == simulated_tool)
+                    is_flip_success = True
+                    category = "successful_flips"
+                elif observed_tool == expected_tool:
+                    stats["correct_behavior"] += 1
+                    is_flip_success = False
+                    category = "correct_behavior"
+                else:
+                    stats["other_tool"] += 1
+                    stats["other_tool_calls"] += 1
+                    is_flip_success = False
+                    category = "other_tool"
 
         # DEBUG: Print final category
         if debug and debug_count < debug_limit:
@@ -995,9 +1053,11 @@ def build_ds_from_skeletons(
     logger.info("=" * 60)
     logger.info(f"Total records processed: {stats['total']}")
     logger.info(f"Successful flips (DS):   {stats['successful_flips']} ({yield_rate:.1%})")
+    logger.info(f"Matched simulated tool:  {stats['matched_simulated_tool']}")
     logger.info(f"Correct behavior:        {stats['correct_behavior']}")
     logger.info(f"No tool call:            {stats['no_tool_call']}")
-    logger.info(f"Other tool:              {stats['other_tool']}")
+    logger.info(f"Other tool calls:        {stats['other_tool_calls']}")
+    logger.info(f"Skipped not-retrieved:   {stats['skipped_not_retrieved']}")
     logger.info(f"Format errors:           {stats['format_errors']}")
     logger.info(f"Yield rate:              {yield_rate:.1%}")
     logger.info("=" * 60)
@@ -1026,6 +1086,7 @@ def build_dr_from_ds(
     model_id: Optional[str] = None,  # Model identifier for source tracking
     tool_schema_ref: Optional[Dict[str, str]] = None,  # Tool schema version info
     strip_tool_syntax: bool = True,  # NEW: Format-agnostic mode
+    skip_llmail_not_retrieved: bool = True,
 ) -> Tuple[List[Trace], Dict[str, Any]]:
     """
     Build DR (paired benign twins) from DS traces.
@@ -1063,6 +1124,7 @@ def build_dr_from_ds(
         "correct_behavior": 0,
         "wrong_tool": 0,
         "no_tool_call": 0,
+        "skipped_not_retrieved": 0,
         "format_errors": 0,
     }
 
@@ -1083,6 +1145,12 @@ def build_dr_from_ds(
     prepared = []  # List of (ds_trace, expected_tool, messages, prompt_or_none)
 
     for ds_trace in (tqdm(ds_traces, desc="Preparing DR prompts") if verbose else ds_traces):
+        if skip_llmail_not_retrieved and _trace_is_llmail(ds_trace):
+            email_retrieved = _trace_email_retrieved(ds_trace)
+            if email_retrieved is False:
+                stats["skipped_not_retrieved"] += 1
+                continue
+
         # Get expected tool
         expected_tool = None
         if ds_trace.tool_attack:
@@ -1172,19 +1240,29 @@ def build_dr_from_ds(
             if strip_tool_syntax:
                 logger.info(f"  Format-agnostic content (reasoning only): {assistant_content[:100]}...")
 
-        # Determine outcome (matching generate_dr.py logic)
-        if observed_tool is None:
-            stats["no_tool_call"] += 1
-            is_correct = False
-            category = "no_tool_call"
-        elif observed_tool == expected_tool:
-            stats["correct_behavior"] += 1
-            is_correct = True
-            category = "correct_behavior"
+        # Determine outcome. For expected_tool=None, no-tool-call is the correct safe behavior.
+        if expected_tool is None:
+            if observed_tool is None:
+                stats["correct_behavior"] += 1
+                is_correct = True
+                category = "correct_behavior"
+            else:
+                stats["wrong_tool"] += 1
+                is_correct = False
+                category = "wrong_tool"
         else:
-            stats["wrong_tool"] += 1
-            is_correct = False
-            category = "wrong_tool"
+            if observed_tool is None:
+                stats["no_tool_call"] += 1
+                is_correct = False
+                category = "no_tool_call"
+            elif observed_tool == expected_tool:
+                stats["correct_behavior"] += 1
+                is_correct = True
+                category = "correct_behavior"
+            else:
+                stats["wrong_tool"] += 1
+                is_correct = False
+                category = "wrong_tool"
 
         # DEBUG: Print final category
         if debug and debug_count < debug_limit:
@@ -1324,6 +1402,7 @@ def build_dr_from_ds(
     logger.info(f"Correct behavior (DR):   {stats['correct_behavior']} ({success_rate:.1%})")
     logger.info(f"Wrong tool:              {stats['wrong_tool']}")
     logger.info(f"No tool call:            {stats['no_tool_call']}")
+    logger.info(f"Skipped not-retrieved:   {stats['skipped_not_retrieved']}")
     logger.info(f"Format errors:           {stats['format_errors']}")
     logger.info(f"Success rate:            {success_rate:.1%}")
     logger.info("=" * 60)
@@ -1394,6 +1473,17 @@ def print_examples_report(examples: Dict[str, Any], mode: str, truncate: bool = 
 # =============================================================================
 # CLI
 # =============================================================================
+
+def _parse_bool_arg(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    lowered = str(value).strip().lower()
+    if lowered in {"1", "true", "t", "yes", "y"}:
+        return True
+    if lowered in {"0", "false", "f", "no", "n"}:
+        return False
+    raise argparse.ArgumentTypeError(f"Invalid boolean value: {value}")
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -1552,6 +1642,18 @@ def main():
         action="store_true",
         help="Enable debug logging for first N samples (shows field values and comparisons)",
     )
+    parser.add_argument(
+        "--strict-simulated-match",
+        type=_parse_bool_arg,
+        default=True,
+        help="If true, DS keeps samples only when observed_tool == simulated_tool (default: true).",
+    )
+    parser.add_argument(
+        "--skip-llmail-not-retrieved",
+        type=_parse_bool_arg,
+        default=True,
+        help="If true, skip LLMail samples where email_retrieved=false during DS/DR generation (default: true).",
+    )
 
     # Format-agnostic mode
     parser.add_argument(
@@ -1636,6 +1738,8 @@ def main():
             model_id=args.model,
             tool_schema_ref=tool_schema_ref,
             strip_tool_syntax=args.strip_tool_syntax,
+            strict_simulated_match=args.strict_simulated_match,
+            skip_llmail_not_retrieved=args.skip_llmail_not_retrieved,
         )
 
         # Write DS output
@@ -1684,6 +1788,7 @@ def main():
             model_id=args.model,
             tool_schema_ref=tool_schema_ref,
             strip_tool_syntax=args.strip_tool_syntax,
+            skip_llmail_not_retrieved=args.skip_llmail_not_retrieved,
         )
 
         # Write DR output

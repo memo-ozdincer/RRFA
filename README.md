@@ -143,9 +143,9 @@ Single-model architecture: adapters enabled → θ (trainable); adapters disable
 |:---|:---|
 | **Source** | `data/llmail_inject/raw_submissions_phase1.jsonl` |
 | **Attack** | Emails inject instructions to call `send_email` (exfiltration) |
-| **Semantics** | **Inverted**: correct behavior = no tool call (refuse) |
+| **Semantics** | Challenge-faithful single-turn retrieval context; correct behavior = no harmful tool call |
 | **Metrics** | Attack ASR (send_email rate), Usefulness (benign quality) |
-| **Processing** | ETL_A → skeleton traces → vLLM DS/DR generation |
+| **Processing** | ETL_A (scenario-based retrieval reconstruction) → skeleton traces → vLLM DS/DR generation |
 
 ---
 
@@ -288,7 +288,8 @@ rrfa/
 │   ├── schemas/trace_v1.json            # Canonical JSON schema
 │   └── tool_schemas/
 │       ├── b4_standard_v1.json          # Fujitsu: retrieve_multimodal_docs + search_web
-│       └── llmail_inject_v1.json        # LLMail: send_email, read_email, etc.
+│       ├── llmail_inject_challenge_v2.json  # LLMail: challenge-faithful, single endpoint
+│       └── llmail_inject_v1.json        # Legacy LLMail schema (kept for reproducibility)
 │
 ├── data/
 │   ├── fujitsu/                         # Raw Fujitsu B4 attack records (13K+)
@@ -398,7 +399,7 @@ hparam_sweep_YYYYMMDD_HHMMSS/
 ### `src/evaluation/eval.py` — Evaluation
 
 - **Fujitsu**: `evaluate_tool_flip_asr()` — filters to samples where `expected_tool ≠ simulated_tool`, compares baseline vs CB tool selection.
-- **LLMail**: `evaluate_llmail_attack()` — classifies responses as attack_success / refusal / other_tool. `evaluate_llmail_usefulness()` — tests benign email handling.
+- **LLMail**: `evaluate_llmail_attack()` — classifies responses as attack_success / refusal / other_tool on retrieved-only samples by default. `evaluate_llmail_usefulness()` runs on the same filtered subset.
 - **AgentDojo**: `output_comparison` — diff rate between baseline and CB responses.
 - **`--merge-adapter`**: merges LoRA into base weights before eval for faster inference.
 - **Paired outputs**: every eval writes `.paired_outputs.jsonl` with per-sample baseline/CB responses for detailed analysis.

@@ -17,6 +17,10 @@
 # 2) Rewrites *.paired_outputs.jsonl using the current eval.py logic
 # 3) Runs LLMail-focused sweep visualization
 #
+# LLMail defaults are challenge-faithful:
+# - schema: llmail_inject_challenge_v2.json
+# - eval filter: --llmail-retrieved-only true
+#
 # Usage examples:
 #   sbatch slurm/pipeline/regenerate_evals_and_visualize_llmail.sbatch
 #
@@ -75,7 +79,15 @@ fi
 TRACES_DIR="${TRACES_DIR:-$CB_SCRATCH/data/traces}"
 FUJITSU_DS_TRACES="$TRACES_DIR/fujitsu_b4_ds.jsonl"
 LLMAIL_DS_TRACES="$TRACES_DIR/llmail_inject_ds.jsonl"
-LLMAIL_TOOL_SCHEMA="${LLMAIL_TOOL_SCHEMA:-$REPO_DIR/configs/tool_schemas/llmail_inject_v1.json}"
+LLMAIL_TOOL_SCHEMA="${LLMAIL_TOOL_SCHEMA:-$REPO_DIR/configs/tool_schemas/llmail_inject_challenge_v2.json}"
+LLMAIL_RETRIEVED_ONLY="${LLMAIL_RETRIEVED_ONLY:-true}"
+if [[ -z "${VIS_TOOL_SCHEMA:-}" ]]; then
+    if [[ "${VIS_ONLY_DATASET:-llmail}" == "llmail" ]]; then
+        VIS_TOOL_SCHEMA="$LLMAIL_TOOL_SCHEMA"
+    else
+        VIS_TOOL_SCHEMA="$REPO_DIR/configs/tool_schemas/b4_standard_v1.json"
+    fi
+fi
 
 # Select sweep dir (explicit or latest)
 if [[ -z "${SWEEP_DIR:-}" ]]; then
@@ -95,6 +107,9 @@ echo "Eval Datasets:  $EVAL_DATASETS"
 echo "Limit Eval:     $LIMIT_EVAL"
 echo "Run Name:       ${RUN_NAME:-<all runs>}"
 echo "Traces Dir:     $TRACES_DIR"
+echo "LLMail Schema:  $LLMAIL_TOOL_SCHEMA"
+echo "LLMail Retrieved-only: $LLMAIL_RETRIEVED_ONLY"
+echo "Viz Tool Schema: $VIS_TOOL_SCHEMA"
 echo ""
 
 # -----------------------------------------------------------------------------
@@ -181,6 +196,7 @@ run_eval() {
                 --tool-schema "$LLMAIL_TOOL_SCHEMA" \
                 --output "$out" \
                 --limit "$LIMIT_EVAL" \
+                --llmail-retrieved-only "$LLMAIL_RETRIEVED_ONLY" \
                 --merge-adapter \
                 --dtype "$DTYPE" 2>&1 | tee -a "$run_dir/eval/llmail_regen.log"
             ;;
@@ -298,6 +314,7 @@ echo "Running LLMail-focused visualization..."
 VIS_ARGS=(
     "$SWEEP_DIR"
     --traces-dir "$TRACES_DIR"
+    --tool-schema "$VIS_TOOL_SCHEMA"
     --llmail-data-dir "$REPO_DIR/data/llmail_inject"
     --only-dataset "$VIS_ONLY_DATASET"
     --show-samples "$VIS_SHOW_SAMPLES"

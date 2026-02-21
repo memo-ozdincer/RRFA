@@ -8,6 +8,7 @@ This script reads from the sweep output directory structure and displays:
 - Expected vs observed tool calls
 - Baseline vs Circuit Breaker responses
 - Aggregate metrics across configurations
+- LLMail-specific reconstruction/audit context (retrieval flags, attacker-in-context, tool distributions)
 
 Usage:
     # From sweep directory (on cluster)
@@ -230,6 +231,13 @@ def get_llmail_metadata(trace: Dict[str, Any]) -> Dict[str, Any]:
         "exfil_sent": source_fields.get("exfil_sent"),
         "exfil_destination": source_fields.get("exfil_destination"),
         "exfil_content": source_fields.get("exfil_content"),
+        "context_reconstruction_mode": source_fields.get("context_reconstruction_mode"),
+        "context_size": source_fields.get("context_size"),
+        "context_size_actual": source_fields.get("context_size_actual"),
+        "attacker_in_context": source_fields.get("attacker_in_context"),
+        "retrieval_reconstructed": source_fields.get("retrieval_reconstructed"),
+        "scenario_user_query": source_fields.get("scenario_user_query"),
+        "scenario_task": source_fields.get("scenario_task"),
         "scheduled_time": source_fields.get("scheduled_time"),
         "completed_time": source_fields.get("completed_time"),
     }
@@ -248,6 +256,29 @@ def get_tool_messages(trace: Dict[str, Any]) -> List[Dict[str, Any]]:
                 }
             )
     return tool_messages
+
+
+def _normalize_observed_tool_name(tool_name: Optional[str]) -> str:
+    if not tool_name:
+        return "none"
+    return str(tool_name)
+
+
+def summarize_observed_tool_distribution(paired_samples: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Summarize observed tool usage for baseline and CB in paired outputs."""
+    baseline_counts: Dict[str, int] = defaultdict(int)
+    cb_counts: Dict[str, int] = defaultdict(int)
+
+    for sample in paired_samples:
+        baseline_tool = _normalize_observed_tool_name(sample.get("baseline_observed_tool"))
+        cb_tool = _normalize_observed_tool_name(sample.get("cb_observed_tool"))
+        baseline_counts[baseline_tool] += 1
+        cb_counts[cb_tool] += 1
+
+    return {
+        "baseline": dict(sorted(baseline_counts.items(), key=lambda kv: (-kv[1], kv[0]))),
+        "cb": dict(sorted(cb_counts.items(), key=lambda kv: (-kv[1], kv[0]))),
+    }
 
 
 def attach_trace_context(
@@ -502,6 +533,14 @@ def print_sample_detail(
             "level_variant": sample_context.get("level_variant") or llmail_meta.get("level_variant"),
             "defense": sample_context.get("defense") or llmail_meta.get("defense"),
             "model": sample_context.get("model") or llmail_meta.get("model"),
+            "context_reconstruction_mode": sample_context.get("context_reconstruction_mode") or llmail_meta.get("context_reconstruction_mode"),
+            "context_size": sample_context.get("context_size") if sample_context.get("context_size") is not None else llmail_meta.get("context_size"),
+            "context_size_actual": sample_context.get("context_size_actual") if sample_context.get("context_size_actual") is not None else llmail_meta.get("context_size_actual"),
+            "attacker_in_context": sample_context.get("attacker_in_context") if sample_context.get("attacker_in_context") is not None else llmail_meta.get("attacker_in_context"),
+            "retrieval_reconstructed": sample_context.get("retrieval_reconstructed") if sample_context.get("retrieval_reconstructed") is not None else llmail_meta.get("retrieval_reconstructed"),
+            "email_retrieved": sample_context.get("email_retrieved") if sample_context.get("email_retrieved") is not None else llmail_meta.get("email_retrieved"),
+            "scenario_user_query": llmail_meta.get("scenario_user_query"),
+            "scenario_task": llmail_meta.get("scenario_task"),
         })
 
         objectives = sample_context.get("objectives", {})
@@ -520,6 +559,11 @@ def print_sample_detail(
         print(f"   Variant: {llmail_meta.get('level_variant', 'N/A')}")
         print(f"   Defense: {llmail_meta.get('defense', 'N/A')}")
         print(f"   Model: {llmail_meta.get('model', 'N/A')}")
+        print(f"   email.retrieved: {llmail_meta.get('email_retrieved', 'N/A')}")
+        print(f"   attacker_in_context: {llmail_meta.get('attacker_in_context', 'N/A')}")
+        print(f"   retrieval_reconstructed: {llmail_meta.get('retrieval_reconstructed', 'N/A')}")
+        print(f"   context_mode: {llmail_meta.get('context_reconstruction_mode', 'N/A')}")
+        print(f"   context_size target/actual: {llmail_meta.get('context_size', 'N/A')} / {llmail_meta.get('context_size_actual', 'N/A')}")
 
         level = llmail_meta.get("level")
         scenario_ref = extract_llmail_reference_for_level(llmail_reference, level)
@@ -528,6 +572,11 @@ def print_sample_detail(
                 print(f"   Scenario User Query: {truncate_text(scenario_ref['user_query'], max_len)}")
             if scenario_ref.get("task"):
                 print(f"   Attack Goal: {truncate_text(scenario_ref['task'], max_len)}")
+        elif llmail_meta.get("scenario_user_query") or llmail_meta.get("scenario_task"):
+            if llmail_meta.get("scenario_user_query"):
+                print(f"   Scenario User Query: {truncate_text(llmail_meta['scenario_user_query'], max_len)}")
+            if llmail_meta.get("scenario_task"):
+                print(f"   Attack Goal: {truncate_text(llmail_meta['scenario_task'], max_len)}")
 
         if any(key in llmail_meta for key in ["email_retrieved", "defense_undetected", "exfil_sent", "exfil_destination", "exfil_content"]):
             print(f"\n{YELLOW}🎯 LLMAIL OBJECTIVES:{RESET}")
@@ -544,6 +593,10 @@ def print_sample_detail(
                 tool_name = msg.get("name", "tool")
                 print(f"   [{idx}] {tool_name}:")
                 print(f"   {truncate_text(msg.get('content', ''), max_len)}")
+            context_snippet = sample_context.get("context_snippet")
+            if context_snippet:
+                print(f"\n{YELLOW}🧩 CONTEXT SNIPPET:{RESET}")
+                print(f"   {truncate_text(context_snippet, max_len)}")
     
     # Show expected and simulated tools
     expected = sample.get("expected_tool")
@@ -718,12 +771,15 @@ def analyze_run(
     if only_dataset in ("all", "llmail") and llmail_eval_json.exists():
         eval_data = load_json(llmail_eval_json)
         paired = load_jsonl(llmail_paired)
+        observed_tool_dist = summarize_observed_tool_distribution(paired)
 
         # Use new llmail_attack metrics (preferred) with fallback to tool_flip_asr
         baseline_la = eval_data.get("baseline", {}).get("llmail_attack", {})
         cb_la = eval_data.get("cb_model", {}).get("llmail_attack", {})
         cb_lu = eval_data.get("cb_model", {}).get("llmail_usefulness", {})
         delta = eval_data.get("delta", {})
+        llmail_retrieved_only = eval_data.get("llmail_retrieved_only")
+        llmail_filtered_out = eval_data.get("llmail_filtered_out_not_retrieved")
 
         if baseline_la:
             results["llmail"] = {
@@ -733,6 +789,9 @@ def analyze_run(
                 "refusal_rate": cb_la.get("refusal_rate", 0) * 100,
                 "usefulness": cb_lu.get("usefulness_rate", 0) * 100,
                 "total": len(paired),
+                "retrieved_only": llmail_retrieved_only,
+                "filtered_not_retrieved": llmail_filtered_out,
+                "tool_distribution": observed_tool_dist,
                 "improvements": sum(1 for p in paired if p.get("baseline_outcome") == "attack_success" and p.get("cb_outcome") != "attack_success"),
                 "regressions": sum(1 for p in paired if p.get("baseline_outcome") != "attack_success" and p.get("cb_outcome") == "attack_success"),
             }
@@ -745,6 +804,9 @@ def analyze_run(
                 "cb_asr": cb.get("attack_success_rate", 0) * 100,
                 "delta": delta.get("tool_flip_asr", 0) * 100,
                 "total": len(paired),
+                "retrieved_only": llmail_retrieved_only,
+                "filtered_not_retrieved": llmail_filtered_out,
+                "tool_distribution": observed_tool_dist,
                 "improvements": sum(1 for p in paired if p.get("baseline_outcome") == "attack_success" and p.get("cb_outcome") != "attack_success"),
                 "regressions": sum(1 for p in paired if p.get("baseline_outcome") != "attack_success" and p.get("cb_outcome") == "attack_success"),
             }
@@ -943,6 +1005,18 @@ def print_best_runs(
               f"(Reduction: {metric['baseline_asr'] - metric['cb_asr']:.1f}pp)")
         print(f"   Improvements: {metric.get('improvements', 0)}, "
               f"Regressions: {metric.get('regressions', 0)}")
+        if metric_dataset == "llmail":
+            if metric.get("usefulness") is not None:
+                print(f"   LLMail Usefulness: {metric.get('usefulness', 0):.1f}%")
+            if metric.get("refusal_rate") is not None:
+                print(f"   LLMail Refusal Rate: {metric.get('refusal_rate', 0):.1f}%")
+            if metric.get("retrieved_only") is not None:
+                print(f"   Retrieved-only filter: {metric.get('retrieved_only')} "
+                      f"(filtered_not_retrieved={metric.get('filtered_not_retrieved', 'N/A')})")
+            tool_dist = metric.get("tool_distribution", {})
+            if tool_dist:
+                print(f"   Tool Dist (baseline): {tool_dist.get('baseline', {})}")
+                print(f"   Tool Dist (cb): {tool_dist.get('cb', {})}")
         agentdojo = run.get("agentdojo", {})
         if agentdojo:
             print(f"   AgentDojo Diff Rate: {agentdojo.get('diff_rate', 0):.1f}%")
@@ -1024,6 +1098,15 @@ def compare_samples(
     print(f"SAMPLE COMPARISON ({dataset.upper()})")
     print("=" * 80)
     
+    def _row_key(row: Dict[str, Any], row_idx: int) -> Tuple[Any, ...]:
+        sample_id = row.get("id")
+        occurrence = row.get("id_occurrence")
+        if sample_id is not None and isinstance(occurrence, int):
+            return ("id", sample_id, occurrence)
+        if sample_id is not None:
+            return ("id_only", sample_id, row_idx)
+        return ("row", row_idx)
+
     # Load paired outputs for all runs
     run_data = []
     for run_dir in run_dirs:
@@ -1038,15 +1121,14 @@ def compare_samples(
             
         if path.exists():
             data = load_jsonl(path)
-            # Index by ID
-            data_map = {d.get("id"): d for d in data}
+            data_map = {_row_key(d, idx): d for idx, d in enumerate(data)}
             run_data.append((run_dir.name, data_map))
     
     if not run_data:
         print(f"No data found for dataset {dataset}")
         return
 
-    # Get sample IDs from the first run
+    # Get stable sample keys from the first run
     first_run_name, first_run_map = run_data[0]
     all_ids = list(first_run_map.keys())
     end = start_sample + num_samples
@@ -1054,7 +1136,7 @@ def compare_samples(
     
     for sid in sample_ids:
         print(f"\n{'-'*80}")
-        print(f"Sample ID: {sid}")
+        print(f"Sample Key: {sid}")
         
         # Get query from first run
         sample = first_run_map[sid]

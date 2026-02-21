@@ -887,6 +887,12 @@ def _extract_sample_context(sample: Dict[str, Any]) -> Dict[str, Any]:
     }
     objectives = {k: v for k, v in objectives.items() if v is not None}
 
+    context_snippet = None
+    if tool_messages:
+        joined = "\n\n".join((m.get("content") or "") for m in tool_messages[:2]).strip()
+        if joined:
+            context_snippet = joined[:400]
+
     context = {
         "source_dataset": source.get("dataset"),
         "source_subset": source.get("subset"),
@@ -901,12 +907,38 @@ def _extract_sample_context(sample: Dict[str, Any]) -> Dict[str, Any]:
         "level_variant": source_fields.get("level_variant"),
         "defense": source_fields.get("defense"),
         "model": source_fields.get("model"),
+        "email_retrieved": source_fields.get("email_retrieved"),
+        "attacker_in_context": source_fields.get("attacker_in_context"),
+        "retrieval_reconstructed": source_fields.get("retrieval_reconstructed"),
+        "context_reconstruction_mode": source_fields.get("context_reconstruction_mode"),
+        "context_size": source_fields.get("context_size"),
+        "context_size_actual": source_fields.get("context_size_actual"),
         "objectives": objectives or None,
+        "context_snippet": context_snippet,
         "system_prompt": system_prompt,
         "user_query": user_query,
         "tool_messages": tool_messages or None,
     }
     return {k: v for k, v in context.items() if v is not None}
+
+
+def _to_optional_bool(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "t", "yes", "y"}:
+            return True
+        if lowered in {"0", "false", "f", "no", "n"}:
+            return False
+    return None
+
+
+def _llmail_sample_retrieved(sample: Dict[str, Any]) -> Optional[bool]:
+    source_fields = sample.get("raw_metadata", {}).get("source_fields", {})
+    return _to_optional_bool(source_fields.get("email_retrieved"))
 
 
 def _build_detail_pair_index(details: List[Dict[str, Any]]) -> Dict[Tuple[Any, ...], Dict[str, Any]]:
@@ -1755,6 +1787,7 @@ def run_mvp_evaluation(
     eval_samples: Optional[List[Dict[str, Any]]] = None,
     use_sample_context: bool = False,
     merge_adapter: bool = False,
+    llmail_retrieved_only: bool = True,
 ) -> Dict[str, Any]:
     """
     Run full MVP evaluation suite.
@@ -1793,6 +1826,16 @@ def run_mvp_evaluation(
     if dataset_type == 'agentdojo' and not use_sample_context:
         logger.info(f"Auto-detected AgentDojo dataset - enabling sample context (embedded system prompts)")
         use_sample_context = True
+
+    llmail_filtered_out_not_retrieved = 0
+    if dataset_type == "llmail" and llmail_retrieved_only:
+        before = len(eval_samples)
+        eval_samples = [s for s in eval_samples if _llmail_sample_retrieved(s) is True]
+        llmail_filtered_out_not_retrieved = before - len(eval_samples)
+        logger.info(
+            "LLMail retrieved-only filtering enabled: kept %d/%d samples (filtered %d)",
+            len(eval_samples), before, llmail_filtered_out_not_retrieved
+        )
     
     results = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -1801,6 +1844,8 @@ def run_mvp_evaluation(
         "num_samples": len(eval_samples),
         "dataset_type": dataset_type,
         "use_sample_context": use_sample_context,
+        "llmail_retrieved_only": llmail_retrieved_only,
+        "llmail_filtered_out_not_retrieved": llmail_filtered_out_not_retrieved,
     }
     
     def _evaluate_with_workers(model_path: str, adapter_path: Optional[str]) -> Dict[str, Any]:
@@ -2034,6 +2079,17 @@ def run_mvp_evaluation(
 # CLI
 # =============================================================================
 
+def _parse_bool_arg(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    lowered = str(value).strip().lower()
+    if lowered in {"1", "true", "t", "yes", "y"}:
+        return True
+    if lowered in {"0", "false", "f", "no", "n"}:
+        return False
+    raise argparse.ArgumentTypeError(f"Invalid boolean value: {value}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="MVP Evaluation for Stage 1 Circuit Breakers",
@@ -2139,6 +2195,12 @@ def main():
         action="store_true",
         help="Merge LoRA adapter into base model before eval (faster inference, more VRAM at load)",
     )
+    parser.add_argument(
+        "--llmail-retrieved-only",
+        type=_parse_bool_arg,
+        default=True,
+        help="If true, LLMail attack/usefulness eval uses only samples with email_retrieved=true (default: true).",
+    )
 
     args = parser.parse_args()
     
@@ -2217,6 +2279,7 @@ def main():
         eval_samples=eval_samples,
         use_sample_context=args.use_sample_context,
         merge_adapter=args.merge_adapter,
+        llmail_retrieved_only=args.llmail_retrieved_only,
     )
     
     # Clean up temp file

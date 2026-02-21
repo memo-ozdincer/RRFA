@@ -147,7 +147,8 @@ MAX_SEQ_LENGTH="${MAX_SEQ_LENGTH:-4096}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
 LLMAIL_LIMIT="${LLMAIL_LIMIT:-}"  # empty = no limit; e.g. 3000
 DTYPE="${DTYPE:-bfloat16}"
-LLMAIL_TOOL_SCHEMA="${LLMAIL_TOOL_SCHEMA:-$REPO_DIR/configs/tool_schemas/llmail_inject_v1.json}"
+LLMAIL_TOOL_SCHEMA="${LLMAIL_TOOL_SCHEMA:-$REPO_DIR/configs/tool_schemas/llmail_inject_challenge_v2.json}"
+LLMAIL_RETRIEVED_ONLY="${LLMAIL_RETRIEVED_ONLY:-true}"
 LOSS_MODE="${LOSS_MODE:-triplet_full}"
 LOSS_WEIGHTING="${LOSS_WEIGHTING:-dual}"
 TRIPLET_ALPHA_BENIGN="${TRIPLET_ALPHA_BENIGN:-0.5}"
@@ -175,6 +176,7 @@ echo "  LIMIT_EVAL: $LIMIT_EVAL"
 echo "  NUM_EXAMPLES: $NUM_EXAMPLES"
 echo "  SHOW_EXAMPLES: $SHOW_EXAMPLES"
 echo "  QUICK_TEST: $QUICK_TEST"
+echo "  LLMAIL_RETRIEVED_ONLY: $LLMAIL_RETRIEVED_ONLY"
 echo ""
 
 # =============================================================================
@@ -540,6 +542,7 @@ PYEOF
                             --tool-schema "$LLMAIL_TOOL_SCHEMA" \
                             --output "$LLMAIL_OUTPUT" \
                             --limit "$LIMIT_EVAL" \
+                            --llmail-retrieved-only "$LLMAIL_RETRIEVED_ONLY" \
                             --merge-adapter \
                             --dtype "$DTYPE" 2>&1 | tee -a "$RUN_DIR/eval/llmail.log"
 

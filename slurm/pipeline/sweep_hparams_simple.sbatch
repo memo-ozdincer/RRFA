@@ -123,7 +123,7 @@ TOOL_SCHEMA="configs/tool_schemas/b4_standard_v1.json"
 LLMAIL_SKELETON="$TRACES_DIR/llmail_inject_skeleton.jsonl"
 LLMAIL_DS="$TRACES_DIR/llmail_inject_ds.jsonl"
 LLMAIL_DR="$TRACES_DIR/llmail_inject_dr.jsonl"
-LLMAIL_TOOL_SCHEMA="configs/tool_schemas/llmail_inject_v1.json"
+LLMAIL_TOOL_SCHEMA="configs/tool_schemas/llmail_inject_challenge_v2.json"
 LLMAIL_RAW="$REPO_DIR/data/llmail_inject/raw_submissions_phase1.jsonl"
 
 # Helper to generate DS/DR
@@ -146,7 +146,10 @@ generate_data() {
                     --llmail-inject "$raw_source" \
                     --output "$skeleton" \
                     --split train \
-                    --tool-schema "$schema"
+                    --tool-schema "$schema" \
+                    --llmail-context-mode tool_message_retrieval \
+                    --llmail-exclude-not-retrieved true \
+                    --llmail-scenarios-path "$REPO_DIR/data/llmail_inject/scenarios.json"
             else
                 echo "WARNING: No ETL_A logic defined for $name in simple script."
             fi
@@ -168,6 +171,8 @@ generate_data() {
                     --tool-schema "$schema" \
                     --mode ds \
                     --temperature-ds 0.7 \
+                    --strict-simulated-match true \
+                    --skip-llmail-not-retrieved true \
                     --use-vllm \
                     --limit "$LIMIT_GEN"
             fi
@@ -182,6 +187,7 @@ generate_data() {
                     --tool-schema "$schema" \
                     --mode dr \
                     --temperature-dr 0.3 \
+                    --skip-llmail-not-retrieved true \
                     --use-vllm \
                     --limit "$LIMIT_GEN"
             fi
