@@ -10,9 +10,11 @@
 
 set -euo pipefail
 
-# Resolve script directory robustly (works regardless of submit cwd).
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-UNIFIED_PIPELINE="$SCRIPT_DIR/unified_pipeline.sbatch"
+# Use the same hardcoded project path as unified_pipeline.sbatch.
+# NOTE: BASH_SOURCE resolves to SLURM's spool dir, not the repo.
+PROJECT_DIR="/project/def-zhijing/memoozd"
+REPO_DIR="$PROJECT_DIR/rrfa"
+UNIFIED_PIPELINE="$REPO_DIR/slurm/pipeline/unified_pipeline.sbatch"
 
 if [[ ! -f "$UNIFIED_PIPELINE" ]]; then
     echo "ERROR: unified pipeline not found at $UNIFIED_PIPELINE"
