@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=cb_pipeline
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=4
-#SBATCH --cpus-per-task=32
+#SBATCH --gpus-per-node=1
+#SBATCH --cpus-per-task=24
 #SBATCH --time=8:00:00
 #SBATCH --output=/scratch/memoozd/cb-scratch/logs/%x_%j.out
 #SBATCH --error=/scratch/memoozd/cb-scratch/logs/%x_%j.err
