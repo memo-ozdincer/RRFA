@@ -723,7 +723,7 @@ echo ""
 
 # Generate summary CSV
 SUMMARY_CSV="$SWEEP_DIR/summary.csv"
-echo "alpha,layers,policy,fujitsu_baseline_asr,fujitsu_cb_asr,fujitsu_delta,agentdojo_diff,agentdojo_benign_match,agentdojo_harmful_resist,llmail_baseline_asr,llmail_cb_asr,llmail_delta,llmail_usefulness,llmail_capability,tools_broken,status" > "$SUMMARY_CSV"
+echo "alpha,layers,policy,fujitsu_baseline_asr,fujitsu_cb_asr,fujitsu_delta,agentdojo_diff,agentdojo_benign_match,agentdojo_harmful_resist,llmail_baseline_asr,llmail_cb_asr,llmail_delta,llmail_usefulness,llmail_capability,llmail_target_acc,llmail_json_parse_fail,tools_broken,status" > "$SUMMARY_CSV"
 
 for run_dir in "$SWEEP_DIR"/a*; do
     if [[ -d "$run_dir" ]]; then
@@ -747,6 +747,8 @@ for run_dir in "$SWEEP_DIR"/a*; do
         llmail_delta="N/A"
         llmail_useful="N/A"
         llmail_capability="N/A"
+        llmail_target_acc="N/A"
+        llmail_json_parse_fail="N/A"
         tools_broken="N/A"
         status="unknown"
 
@@ -776,7 +778,7 @@ print(diff, bmr, hrr)
         fi
 
         if [[ -f "$run_dir/eval/llmail_eval.json" ]]; then
-            read llmail_baseline llmail_cb llmail_delta llmail_useful llmail_capability tools_broken < <(python3 -c "
+            read llmail_baseline llmail_cb llmail_delta llmail_useful llmail_capability llmail_target_acc llmail_json_parse_fail tools_broken < <(python3 -c "
 import json
 with open('$run_dir/eval/llmail_eval.json') as f:
     r = json.load(f)
@@ -785,12 +787,14 @@ cb = r.get('cb_model', {}).get('llmail_attack', {}).get('attack_success_rate', '
 d = r.get('delta', {}).get('llmail_attack_asr', 'N/A')
 u = r.get('cb_model', {}).get('llmail_usefulness', {}).get('usefulness_rate', 'N/A')
 cap = r.get('cb_model', {}).get('llmail_capability', {}).get('capability_retention', 'N/A')
+ta = r.get('cb_model', {}).get('llmail_attack', {}).get('target_accuracy_rate', 'N/A')
+jpf = r.get('diagnostics', {}).get('llmail_json_parse_failure_rate', 'N/A')
 tb = r.get('diagnostics', {}).get('tools_broken', 'N/A')
-print(bl, cb, d, u, cap, tb)
-" 2>/dev/null || echo "N/A N/A N/A N/A N/A N/A")
+print(bl, cb, d, u, cap, ta, jpf, tb)
+" 2>/dev/null || echo "N/A N/A N/A N/A N/A N/A N/A N/A")
         fi
 
-        echo "$alpha,$layers,$policy,$fujitsu_baseline,$fujitsu_cb,$fujitsu_delta,$agentdojo_diff,$agentdojo_benign_match,$agentdojo_harmful_resist,$llmail_baseline,$llmail_cb,$llmail_delta,$llmail_useful,$llmail_capability,$tools_broken,$status" >> "$SUMMARY_CSV"
+        echo "$alpha,$layers,$policy,$fujitsu_baseline,$fujitsu_cb,$fujitsu_delta,$agentdojo_diff,$agentdojo_benign_match,$agentdojo_harmful_resist,$llmail_baseline,$llmail_cb,$llmail_delta,$llmail_useful,$llmail_capability,$llmail_target_acc,$llmail_json_parse_fail,$tools_broken,$status" >> "$SUMMARY_CSV"
     fi
 done
 
@@ -847,6 +851,12 @@ try:
             print(f'  LLMail Usefulness: {llmail_useful}')
         if llmail_cap != 'N/A':
             print(f'  LLMail Capability: {llmail_cap}')
+        llmail_ta = best[1].get('llmail_target_acc', 'N/A')
+        llmail_jpf = best[1].get('llmail_json_parse_fail', 'N/A')
+        if llmail_ta != 'N/A':
+            print(f'  LLMail Target Accuracy: {llmail_ta}')
+        if llmail_jpf != 'N/A' and llmail_jpf != '0' and llmail_jpf != '0.0':
+            print(f'  LLMail JSON Parse Fail: {llmail_jpf}')
         if tb != 'N/A':
             print(f'  Tools Broken: {tb}')
 except Exception as e:

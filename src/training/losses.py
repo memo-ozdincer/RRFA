@@ -66,6 +66,10 @@ def _masked_mean_per_sample(
     if mask is None:
         return values.mean(dim=1)
     mask_f = mask.float()
+    # Unsqueeze mask for broadcasting with 3D hidden states [B, T, H]
+    if values.dim() == 3 and mask_f.dim() == 2:
+        denom = mask_f.sum(dim=1, keepdim=True).clamp_min(1e-8)  # [B, 1]
+        return (values * mask_f.unsqueeze(-1)).sum(dim=1) / denom  # [B, H]
     denom = mask_f.sum(dim=1).clamp_min(1e-8)
     return (values * mask_f).sum(dim=1) / denom
 
