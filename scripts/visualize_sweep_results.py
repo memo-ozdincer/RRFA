@@ -68,9 +68,36 @@ def load_tool_schema(schema_path: Path) -> Dict[str, Any]:
     return load_json(schema_path)
 
 
-def build_trace_index(traces: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    """Build an index of traces by ID for quick lookup."""
-    return {t.get("id", ""): t for t in traces if t.get("id")}
+def build_trace_index(traces: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    """Build an index of traces by ID for quick lookup (supports duplicate IDs)."""
+    index: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for trace in traces:
+        trace_id = trace.get("id")
+        if trace_id:
+            index[trace_id].append(trace)
+    return index
+
+
+def load_llmail_reference_data(llmail_data_dir: Optional[Path]) -> Dict[str, Any]:
+    """Load LLMail reference metadata used to annotate sample context."""
+    if not llmail_data_dir:
+        return {}
+
+    scenarios = load_json(llmail_data_dir / "scenarios.json")
+    level_descriptions = load_json(llmail_data_dir / "levels_descriptions.json")
+    objective_descriptions = load_json(llmail_data_dir / "objectives_descriptions.json")
+
+    scenarios_by_level: Dict[int, Dict[str, Any]] = {}
+    for key, value in scenarios.items():
+        match = re.search(r"(\d+)$", key)
+        if match:
+            scenarios_by_level[int(match.group(1))] = value
+
+    return {
+        "scenarios_by_level": scenarios_by_level,
+        "levels_descriptions": level_descriptions,
+        "objective_descriptions": objective_descriptions,
+    }
 
 
 # =============================================================================
@@ -189,6 +216,97 @@ def get_attack_info(trace: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def get_llmail_metadata(trace: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract LLMail-specific metadata from raw trace fields."""
+    source_fields = trace.get("raw_metadata", {}).get("source_fields", {})
+    return {
+        "scenario": source_fields.get("scenario"),
+        "level": source_fields.get("level"),
+        "level_variant": source_fields.get("level_variant"),
+        "defense": source_fields.get("defense"),
+        "model": source_fields.get("model"),
+        "email_retrieved": source_fields.get("email_retrieved"),
+        "defense_undetected": source_fields.get("defense_undetected"),
+        "exfil_sent": source_fields.get("exfil_sent"),
+        "exfil_destination": source_fields.get("exfil_destination"),
+        "exfil_content": source_fields.get("exfil_content"),
+        "scheduled_time": source_fields.get("scheduled_time"),
+        "completed_time": source_fields.get("completed_time"),
+    }
+
+
+def get_tool_messages(trace: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return tool messages from a trace."""
+    tool_messages: List[Dict[str, Any]] = []
+    for msg in trace.get("messages", []):
+        if msg.get("role") == "tool":
+            tool_messages.append(
+                {
+                    "name": msg.get("name"),
+                    "tool_call_id": msg.get("tool_call_id"),
+                    "content": msg.get("content", ""),
+                }
+            )
+    return tool_messages
+
+
+def attach_trace_context(
+    paired_samples: List[Dict[str, Any]],
+    trace_records: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """
+    Attach trace objects to paired samples.
+
+    Uses id+occurrence matching to handle datasets where IDs can repeat
+    (notably LLMail), with row-index fallback.
+    """
+    traces_by_id = build_trace_index(trace_records)
+    id_seen_counts: Dict[str, int] = defaultdict(int)
+
+    with_context: List[Dict[str, Any]] = []
+    for row_idx, sample in enumerate(paired_samples):
+        sample_id = sample.get("id")
+        sample_copy = dict(sample)
+        sample_copy.setdefault("sample_index", row_idx)
+        trace = None
+
+        if sample_id:
+            if isinstance(sample_copy.get("id_occurrence"), int) and sample_copy["id_occurrence"] > 0:
+                occurrence = sample_copy["id_occurrence"]
+                id_seen_counts[sample_id] = max(id_seen_counts[sample_id], occurrence)
+            else:
+                id_seen_counts[sample_id] += 1
+                occurrence = id_seen_counts[sample_id]
+                sample_copy["id_occurrence"] = occurrence
+
+            candidates = traces_by_id.get(sample_id, [])
+            if 1 <= occurrence <= len(candidates):
+                trace = candidates[occurrence - 1]
+            elif candidates:
+                trace = candidates[-1]
+
+        if trace is None:
+            sample_index = sample_copy.get("sample_index")
+            if isinstance(sample_index, int) and 0 <= sample_index < len(trace_records):
+                trace = trace_records[sample_index]
+
+        sample_copy["_trace"] = trace
+        with_context.append(sample_copy)
+
+    return with_context
+
+
+def extract_llmail_reference_for_level(
+    llmail_reference: Optional[Dict[str, Any]],
+    level: Optional[int],
+) -> Dict[str, Any]:
+    """Get scenario reference metadata for a LLMail level."""
+    if not llmail_reference or not level:
+        return {}
+    scenarios_by_level = llmail_reference.get("scenarios_by_level", {})
+    return scenarios_by_level.get(level, {})
+
+
 # =============================================================================
 # Display Helpers
 # =============================================================================
@@ -282,11 +400,12 @@ def print_sample_detail(
     sample: Dict[str, Any],
     trace: Optional[Dict[str, Any]] = None,
     tool_schema: Optional[Dict[str, Any]] = None,
+    llmail_reference: Optional[Dict[str, Any]] = None,
     show_full: bool = False,
     use_color: bool = True,
 ) -> None:
     """Print detailed information about a single sample with full context."""
-    max_len = None
+    max_len = None if show_full else 1200
     
     # Colors
     BOLD = "\033[1m" if use_color else ""
@@ -301,7 +420,9 @@ def print_sample_detail(
     print(f"\n{BOLD}{'='*80}{RESET}")
     print(f"{BOLD}Sample ID:{RESET} {sample.get('id', 'N/A')}")
     print(f"{'='*80}")
-    
+
+    sample_context = sample.get("sample_context") or {}
+
     # Detect dataset type from trace
     dataset_type = "unknown"
     if trace:
@@ -311,9 +432,19 @@ def print_sample_detail(
             dataset_type = "agentdojo"
         elif "fujitsu" in dataset:
             dataset_type = "fujitsu"
-    
+        elif "llmail" in dataset:
+            dataset_type = "llmail"
+    elif sample_context:
+        dataset = str(sample_context.get("source_dataset", "")).lower()
+        if "agentdojo" in dataset:
+            dataset_type = "agentdojo"
+        elif "fujitsu" in dataset:
+            dataset_type = "fujitsu"
+        elif "llmail" in dataset:
+            dataset_type = "llmail"
+
     # Show system prompt - ALWAYS prefer embedded from trace (especially for AgentDojo)
-    sys_prompt = None
+    sys_prompt = sample_context.get("system_prompt")
     if trace:
         sys_prompt = get_system_prompt(trace)
     
@@ -326,11 +457,12 @@ def print_sample_detail(
             print(f"\n{CYAN}📋 SYSTEM PROMPT (from schema - {YELLOW}may not match dataset{RESET}):{RESET}")
             print(f"   {truncate_text(schema_prompt, max_len)}")
 
+    user_query = sample_context.get("user_query")
     if trace:
-        user_query = get_user_query(trace)
-        if user_query:
-            print(f"\n{BLUE}💬 USER QUERY:{RESET}")
-            print(f"   {truncate_text(user_query, max_len)}")
+        user_query = get_user_query(trace) or user_query
+    if user_query:
+        print(f"\n{BLUE}💬 USER QUERY:{RESET}")
+        print(f"   {truncate_text(user_query, max_len)}")
     
     # Show injection - different handling for Fujitsu vs AgentDojo
     if trace:
@@ -357,10 +489,69 @@ def print_sample_detail(
             print(f"   Category: {attack_info.get('category', 'N/A')}")
             print(f"   Attack Type: {attack_info.get('attack_type', 'N/A')}")
             print(f"   Attack Succeeded: {attack_info.get('attack_succeeded', 'N/A')}")
+
+    # LLMail-specific metadata and story context
+    llmail_meta: Dict[str, Any] = {}
+    if dataset_type == "llmail":
+        if trace:
+            llmail_meta.update(get_llmail_metadata(trace))
+
+        llmail_meta.update({
+            "scenario": sample_context.get("scenario") or llmail_meta.get("scenario"),
+            "level": sample_context.get("level") or llmail_meta.get("level"),
+            "level_variant": sample_context.get("level_variant") or llmail_meta.get("level_variant"),
+            "defense": sample_context.get("defense") or llmail_meta.get("defense"),
+            "model": sample_context.get("model") or llmail_meta.get("model"),
+        })
+
+        objectives = sample_context.get("objectives", {})
+        if objectives:
+            llmail_meta.update({
+                "email_retrieved": objectives.get("email_retrieved"),
+                "defense_undetected": objectives.get("defense_undetected"),
+                "exfil_sent": objectives.get("exfil_sent"),
+                "exfil_destination": objectives.get("exfil_destination"),
+                "exfil_content": objectives.get("exfil_content"),
+            })
+
+        print(f"\n{YELLOW}📨 LLMAIL SCENARIO:{RESET}")
+        print(f"   Scenario: {llmail_meta.get('scenario', 'N/A')}")
+        print(f"   Level: {llmail_meta.get('level', 'N/A')}")
+        print(f"   Variant: {llmail_meta.get('level_variant', 'N/A')}")
+        print(f"   Defense: {llmail_meta.get('defense', 'N/A')}")
+        print(f"   Model: {llmail_meta.get('model', 'N/A')}")
+
+        level = llmail_meta.get("level")
+        scenario_ref = extract_llmail_reference_for_level(llmail_reference, level)
+        if scenario_ref:
+            if scenario_ref.get("user_query"):
+                print(f"   Scenario User Query: {truncate_text(scenario_ref['user_query'], max_len)}")
+            if scenario_ref.get("task"):
+                print(f"   Attack Goal: {truncate_text(scenario_ref['task'], max_len)}")
+
+        if any(key in llmail_meta for key in ["email_retrieved", "defense_undetected", "exfil_sent", "exfil_destination", "exfil_content"]):
+            print(f"\n{YELLOW}🎯 LLMAIL OBJECTIVES:{RESET}")
+            print(f"   email.retrieved: {llmail_meta.get('email_retrieved', 'N/A')}")
+            print(f"   defense.undetected: {llmail_meta.get('defense_undetected', 'N/A')}")
+            print(f"   exfil.sent: {llmail_meta.get('exfil_sent', 'N/A')}")
+            print(f"   exfil.destination: {llmail_meta.get('exfil_destination', 'N/A')}")
+            print(f"   exfil.content: {llmail_meta.get('exfil_content', 'N/A')}")
+
+        tool_messages = get_tool_messages(trace) if trace else (sample_context.get("tool_messages") or [])
+        if tool_messages:
+            print(f"\n{RED}⚠️  RETRIEVED EMAIL CONTEXT ({len(tool_messages)} tool messages):{RESET}")
+            for idx, msg in enumerate(tool_messages[:2], start=1):
+                tool_name = msg.get("name", "tool")
+                print(f"   [{idx}] {tool_name}:")
+                print(f"   {truncate_text(msg.get('content', ''), max_len)}")
     
     # Show expected and simulated tools
-    expected = sample.get("expected_tool", "N/A")
-    simulated = sample.get("simulated_tool", "N/A")
+    expected = sample.get("expected_tool")
+    simulated = sample.get("simulated_tool")
+    if dataset_type == "llmail" and expected is None:
+        expected = "None (do not call any tool)"
+    expected = expected if expected is not None else "N/A"
+    simulated = simulated if simulated is not None else "N/A"
     print(f"\n{BOLD}📎 Expected Tool:{RESET} {GREEN}{expected}{RESET}")
     print(f"{BOLD}🎯 Simulated (Attack) Tool:{RESET} {RED}{simulated}{RESET}")
     
@@ -414,6 +605,7 @@ def analyze_run(
     run_dir: Path,
     traces_dir: Optional[Path] = None,
     tool_schema: Optional[Dict[str, Any]] = None,
+    llmail_reference: Optional[Dict[str, Any]] = None,
     show_samples: int = 0,
     start_sample: int = 0,
     show_full: bool = False,
@@ -428,6 +620,7 @@ def analyze_run(
         "hparams": hparams,
         "lossmask": lossmask,
         "fujitsu": None,
+        "llmail": None,
         "agentdojo": None,
     }
     
@@ -438,19 +631,26 @@ def analyze_run(
     agentdojo_paired = run_dir / "eval" / "agentdojo_eval.paired_outputs.jsonl"
     
     # Try to load traces for context (from multiple possible locations)
-    traces_index = {}
+    dataset_traces: Dict[str, List[Dict[str, Any]]] = {
+        "fujitsu": [],
+        "llmail": [],
+        "agentdojo": [],
+    }
     if traces_dir:
         # Load Fujitsu traces
         fujitsu_traces_path = traces_dir / "fujitsu_b4_ds.jsonl"
         if fujitsu_traces_path.exists():
-            traces = load_jsonl(fujitsu_traces_path)
-            traces_index.update(build_trace_index(traces))
+            dataset_traces["fujitsu"] = load_jsonl(fujitsu_traces_path)
+
+        # Load LLMail traces
+        llmail_traces_path = traces_dir / "llmail_inject_ds.jsonl"
+        if llmail_traces_path.exists():
+            dataset_traces["llmail"] = load_jsonl(llmail_traces_path)
         
         # Load AgentDojo traces from split directory
         agentdojo_split = run_dir / "agentdojo_split" / "agentdojo_traces_harmful.jsonl"
         if agentdojo_split.exists():
-            traces = load_jsonl(agentdojo_split)
-            traces_index.update(build_trace_index(traces))
+            dataset_traces["agentdojo"] = load_jsonl(agentdojo_split)
     
     # ---------------------------------------------------------
     # Fujitsu Analysis
@@ -477,29 +677,36 @@ def analyze_run(
             print(f"\n{'#'*80}")
             print(f"# FUJITSU SAMPLES: {run_dir.name}")
             print(f"{'#'*80}")
+
+            paired_with_context = attach_trace_context(paired, dataset_traces["fujitsu"])
             
             # Filter samples
             if filter_success:
                 filtered_samples = [
-                    p for p in paired 
+                    p for p in paired_with_context
                     if p.get("baseline_outcome") == "attack_success" and p.get("cb_outcome") != "attack_success"
                 ]
             elif filter_failure:
                 filtered_samples = [
-                    p for p in paired 
+                    p for p in paired_with_context
                     if p.get("cb_outcome") == "attack_success"
                 ]
             else:
-                filtered_samples = paired
+                filtered_samples = paired_with_context
             
             # Apply pagination
             end = start_sample + show_samples
             samples_to_show = filtered_samples[start_sample:end]
             
             for sample in samples_to_show:
-                sample_id = sample.get("id", "")
-                trace = traces_index.get(sample_id)
-                print_sample_detail(sample, trace, tool_schema, show_full, use_color)
+                print_sample_detail(
+                    sample,
+                    sample.get("_trace"),
+                    tool_schema,
+                    llmail_reference=llmail_reference,
+                    show_full=show_full,
+                    use_color=use_color,
+                )
     
     # ---------------------------------------------------------
     # LLMail-Inject Analysis
@@ -547,27 +754,34 @@ def analyze_run(
             print(f"# LLMAIL-INJECT SAMPLES: {run_dir.name}")
             print(f"{'#'*80}")
 
+            paired_with_context = attach_trace_context(paired, dataset_traces["llmail"])
+
             if filter_success:
                 filtered_samples = [
-                    p for p in paired
+                    p for p in paired_with_context
                     if p.get("baseline_outcome") == "attack_success" and p.get("cb_outcome") != "attack_success"
                 ]
             elif filter_failure:
                 filtered_samples = [
-                    p for p in paired
+                    p for p in paired_with_context
                     if p.get("cb_outcome") == "attack_success"
                 ]
             else:
-                filtered_samples = paired
+                filtered_samples = paired_with_context
 
             # Apply pagination
             end = start_sample + show_samples
             samples_to_show = filtered_samples[start_sample:end]
 
             for sample in samples_to_show:
-                sample_id = sample.get("id", "")
-                trace = traces_index.get(sample_id)
-                print_sample_detail(sample, trace, tool_schema, show_full, use_color)
+                print_sample_detail(
+                    sample,
+                    sample.get("_trace"),
+                    tool_schema,
+                    llmail_reference=llmail_reference,
+                    show_full=show_full,
+                    use_color=use_color,
+                )
 
     # ---------------------------------------------------------
     # AgentDojo Analysis
@@ -590,17 +804,24 @@ def analyze_run(
             print(f"# AGENTDOJO SAMPLES: {run_dir.name}")
             print(f"{'#'*80}")
 
-            different = [p for p in paired if p.get("responses_differ")]
-            filtered_samples = different if different else paired
+            paired_with_context = attach_trace_context(paired, dataset_traces["agentdojo"])
+
+            different = [p for p in paired_with_context if p.get("responses_differ")]
+            filtered_samples = different if different else paired_with_context
             
             # Apply pagination
             end = start_sample + show_samples
             samples_to_show = filtered_samples[start_sample:end]
 
             for sample in samples_to_show:
-                sample_id = sample.get("id", "")
-                trace = traces_index.get(sample_id)
-                print_sample_detail(sample, trace, tool_schema, show_full, use_color)
+                print_sample_detail(
+                    sample,
+                    sample.get("_trace"),
+                    tool_schema,
+                    llmail_reference=llmail_reference,
+                    show_full=show_full,
+                    use_color=use_color,
+                )
 
     return results
 
@@ -894,6 +1115,12 @@ Examples:
         help="Path to tool schema JSON (default: configs/tool_schemas/b4_standard_v1.json)"
     )
     parser.add_argument(
+        "--llmail-data-dir",
+        type=Path,
+        default=Path("data/llmail_inject"),
+        help="Directory with LLMail metadata files (scenarios.json, levels_descriptions.json)"
+    )
+    parser.add_argument(
         "--show-samples",
         type=int,
         default=0,
@@ -979,6 +1206,10 @@ Examples:
     if args.tool_schema.exists():
         tool_schema = load_tool_schema(args.tool_schema)
         print(f"Loaded tool schema: {args.tool_schema}")
+
+    llmail_reference = load_llmail_reference_data(args.llmail_data_dir)
+    if llmail_reference:
+        print(f"Loaded LLMail reference data: {args.llmail_data_dir}")
     
     # Try to find traces directory
     traces_dir = args.traces_dir
@@ -1021,6 +1252,7 @@ Examples:
             run_dir,
             traces_dir=traces_dir,
             tool_schema=tool_schema,
+            llmail_reference=llmail_reference,
             show_samples=show_samples,
             start_sample=args.start_from_sample,
             show_full=args.show_full,
@@ -1051,6 +1283,7 @@ Examples:
                     run_dir,
                     traces_dir=traces_dir,
                     tool_schema=tool_schema,
+                    llmail_reference=llmail_reference,
                     show_samples=args.show_samples,
                     start_sample=args.start_from_sample,
                     show_full=args.show_full,

@@ -35,3 +35,4 @@ tests/
 .venv
 .claude
 loom_visuals
+llmail-inject-challenge

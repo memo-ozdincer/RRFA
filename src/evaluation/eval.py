@@ -36,6 +36,7 @@ import json
 import logging
 import os
 import re
+from collections import defaultdict
 
 # CRITICAL FIX: Ensure HOME is redirected to cache directory
 # Use CACHE_ROOT environment variable if set, otherwise use a sensible default
@@ -850,6 +851,87 @@ def get_tool_flip_info(sample: Dict[str, Any]) -> Tuple[str, str]:
     return expected_tool, simulated_tool
 
 
+def _extract_sample_context(sample: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract compact context fields so paired outputs remain self-contained."""
+    source = sample.get("source", {})
+    task = sample.get("task", {})
+    labels = sample.get("labels", {})
+    source_fields = sample.get("raw_metadata", {}).get("source_fields", {})
+    messages = sample.get("messages", [])
+
+    system_prompt = None
+    user_query = None
+    tool_messages = []
+
+    for message in messages:
+        role = message.get("role")
+        if role == "system" and system_prompt is None:
+            system_prompt = message.get("content")
+        elif role == "user" and user_query is None:
+            user_query = message.get("content")
+        elif role == "tool":
+            tool_messages.append(
+                {
+                    "name": message.get("name"),
+                    "tool_call_id": message.get("tool_call_id"),
+                    "content": message.get("content"),
+                }
+            )
+
+    objectives = {
+        "email_retrieved": source_fields.get("email_retrieved"),
+        "defense_undetected": source_fields.get("defense_undetected"),
+        "exfil_sent": source_fields.get("exfil_sent"),
+        "exfil_destination": source_fields.get("exfil_destination"),
+        "exfil_content": source_fields.get("exfil_content"),
+    }
+    objectives = {k: v for k, v in objectives.items() if v is not None}
+
+    context = {
+        "source_dataset": source.get("dataset"),
+        "source_subset": source.get("subset"),
+        "record_locator": source.get("record_locator"),
+        "task_family": task.get("family"),
+        "task_name": task.get("name"),
+        "task_variant": task.get("variant"),
+        "label_category": labels.get("category"),
+        "label_attack_succeeded": labels.get("attack_succeeded"),
+        "scenario": source_fields.get("scenario"),
+        "level": source_fields.get("level"),
+        "level_variant": source_fields.get("level_variant"),
+        "defense": source_fields.get("defense"),
+        "model": source_fields.get("model"),
+        "objectives": objectives or None,
+        "system_prompt": system_prompt,
+        "user_query": user_query,
+        "tool_messages": tool_messages or None,
+    }
+    return {k: v for k, v in context.items() if v is not None}
+
+
+def _build_detail_pair_index(details: List[Dict[str, Any]]) -> Dict[Tuple[Any, ...], Dict[str, Any]]:
+    """Index detail records by (id, occurrence) to handle duplicate IDs safely."""
+    id_counts: Dict[str, int] = defaultdict(int)
+    index: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+
+    for row_idx, detail in enumerate(details):
+        sample_id = detail.get("id")
+        if sample_id is None:
+            key = ("row", row_idx)
+            occurrence = row_idx + 1
+        else:
+            id_counts[sample_id] += 1
+            occurrence = id_counts[sample_id]
+            key = ("id", sample_id, occurrence)
+        index[key] = {
+            "row_idx": row_idx,
+            "id_occurrence": occurrence,
+            "detail": detail,
+        }
+
+    return index
+
+
 # =============================================================================
 # Evaluation Functions
 # =============================================================================
@@ -960,6 +1042,7 @@ def evaluate_tool_flip_asr(
             "outcome": outcome,
             "response_full": response,  # Full response for analysis
             "response_preview": response[:500] if len(response) > 500 else response,
+            "sample_context": _extract_sample_context(sample),
         })
     
     total = len(results)
@@ -1280,6 +1363,7 @@ def evaluate_llmail_attack(
             "outcome": outcome,
             "response_full": response,
             "response_preview": response[:500] if len(response) > 500 else response,
+            "sample_context": _extract_sample_context(sample),
         })
 
     total = len(results)
@@ -1477,6 +1561,7 @@ def evaluate_generation_comparison(
             "is_valid_json": is_valid_json,
             "response_preview": response[:500] if len(response) > 500 else response,
             "response_full": response,
+            "sample_context": _extract_sample_context(sample),
         })
 
     return {
@@ -1534,15 +1619,34 @@ def build_paired_outputs(
     baseline_details = baseline_results.get("details", [])
     cb_details = cb_results.get("details", [])
 
-    cb_by_id = {d.get("id"): d for d in cb_details}
+    cb_index = _build_detail_pair_index(cb_details)
+    baseline_id_counts: Dict[str, int] = defaultdict(int)
     paired = []
-    for b in baseline_details:
+    unmatched = 0
+    for row_idx, b in enumerate(baseline_details):
         b_id = b.get("id")
-        c = cb_by_id.get(b_id)
+
+        if b_id is None:
+            id_occurrence = row_idx + 1
+            key = ("row", row_idx)
+        else:
+            baseline_id_counts[b_id] += 1
+            id_occurrence = baseline_id_counts[b_id]
+            key = ("id", b_id, id_occurrence)
+
+        matched = cb_index.get(key)
+        c = matched["detail"] if matched else None
+        if c is None and row_idx < len(cb_details):
+            c = cb_details[row_idx]
+
         if c is None:
+            unmatched += 1
             continue
-        paired.append({
+
+        pair_record = {
             "id": b_id,
+            "sample_index": row_idx,
+            "id_occurrence": id_occurrence,
             "expected_tool": b.get("expected_tool"),
             "simulated_tool": b.get("simulated_tool"),
             "baseline_observed_tool": b.get("observed_tool"),
@@ -1551,7 +1655,23 @@ def build_paired_outputs(
             "cb_outcome": c.get("outcome"),
             "baseline_response": b.get("response_full") or b.get("response_preview"),
             "cb_response": c.get("response_full") or c.get("response_preview"),
-        })
+        }
+
+        sample_context = b.get("sample_context") or c.get("sample_context")
+        if sample_context:
+            pair_record["sample_context"] = sample_context
+            if sample_context.get("source_dataset"):
+                pair_record["source_dataset"] = sample_context.get("source_dataset")
+            if sample_context.get("source_subset"):
+                pair_record["source_subset"] = sample_context.get("source_subset")
+
+        paired.append(pair_record)
+
+    if unmatched > 0:
+        logger.warning(
+            "Tool-flip pairing: %d samples could not be paired by id+occurrence or row index",
+            unmatched,
+        )
     return paired
 
 
@@ -1563,22 +1683,26 @@ def build_generation_paired_outputs(
     baseline_details = baseline_results.get("details", [])
     cb_details = cb_results.get("details", [])
 
-    # Debug: check for None IDs
-    baseline_none_ids = sum(1 for d in baseline_details if d.get("id") is None)
-    cb_none_ids = sum(1 for d in cb_details if d.get("id") is None)
-    if baseline_none_ids > 0 or cb_none_ids > 0:
-        logger.warning(f"Generation pairing: {baseline_none_ids}/{len(baseline_details)} baseline and "
-                      f"{cb_none_ids}/{len(cb_details)} CB samples have None IDs")
-
-    cb_by_id = {d.get("id"): d for d in cb_details if d.get("id") is not None}
+    cb_index = _build_detail_pair_index(cb_details)
+    baseline_id_counts: Dict[str, int] = defaultdict(int)
     paired = []
     unmatched = 0
-    for b in baseline_details:
+    for row_idx, b in enumerate(baseline_details):
         b_id = b.get("id")
+
         if b_id is None:
-            unmatched += 1
-            continue
-        c = cb_by_id.get(b_id)
+            id_occurrence = row_idx + 1
+            key = ("row", row_idx)
+        else:
+            baseline_id_counts[b_id] += 1
+            id_occurrence = baseline_id_counts[b_id]
+            key = ("id", b_id, id_occurrence)
+
+        matched = cb_index.get(key)
+        c = matched["detail"] if matched else None
+        if c is None and row_idx < len(cb_details):
+            c = cb_details[row_idx]
+
         if c is None:
             unmatched += 1
             continue
@@ -1590,6 +1714,8 @@ def build_generation_paired_outputs(
 
         paired.append({
             "id": b_id,
+            "sample_index": row_idx,
+            "id_occurrence": id_occurrence,
             "category": b.get("category"),
             "attack_succeeded_label": b.get("attack_succeeded_label"),
             "baseline_observed_tool": b.get("observed_tool"),
@@ -1599,10 +1725,14 @@ def build_generation_paired_outputs(
             "responses_differ": responses_differ,
             "baseline_response": b_resp,
             "cb_response": c_resp,
+            "sample_context": b.get("sample_context") or c.get("sample_context"),
         })
 
     if unmatched > 0:
-        logger.warning(f"Generation pairing: {unmatched} samples could not be paired (missing or mismatched IDs)")
+        logger.warning(
+            "Generation pairing: %d samples could not be paired by id+occurrence or row index",
+            unmatched,
+        )
 
     return paired
 
@@ -2101,7 +2231,14 @@ def main():
             clean_results = {k: v for k, v in results.items()}
             for key in ["baseline", "cb_model"]:
                 if key in clean_results:
-                    for metric_key in ["tool_flip_asr", "forced_function_call", "capability_retention"]:
+                    for metric_key in [
+                        "tool_flip_asr",
+                        "forced_function_call",
+                        "capability_retention",
+                        "generation_comparison",
+                        "llmail_attack",
+                        "llmail_usefulness",
+                    ]:
                         if metric_key in clean_results[key]:
                             clean_results[key][metric_key] = {
                                 k: v for k, v in clean_results[key][metric_key].items()
@@ -2121,7 +2258,14 @@ def main():
         with open(details_path, "w", encoding="utf-8") as f:
             for key in ["baseline", "cb_model"]:
                 if key in results:
-                    for metric_key in ["tool_flip_asr", "forced_function_call", "capability_retention", "generation_comparison"]:
+                    for metric_key in [
+                        "tool_flip_asr",
+                        "forced_function_call",
+                        "capability_retention",
+                        "generation_comparison",
+                        "llmail_attack",
+                        "llmail_usefulness",
+                    ]:
                         if metric_key in results[key] and "details" in results[key][metric_key]:
                             for detail in results[key][metric_key]["details"]:
                                 record = {"model": key, "metric": metric_key, **detail}
@@ -2136,9 +2280,12 @@ def main():
             baseline_tool_samples = results["baseline"]["tool_flip_asr"]["total_samples"]
             has_baseline_gen = "generation_comparison" in results["baseline"]
             has_cb_gen = "generation_comparison" in results["cb_model"]
+            has_baseline_llmail = "llmail_attack" in results["baseline"]
+            has_cb_llmail = "llmail_attack" in results["cb_model"]
 
             logger.info(f"Paired output selection: tool_flip_samples={baseline_tool_samples}, "
-                       f"baseline_gen_compare={has_baseline_gen}, cb_gen_compare={has_cb_gen}")
+                       f"baseline_gen_compare={has_baseline_gen}, cb_gen_compare={has_cb_gen}, "
+                       f"baseline_llmail={has_baseline_llmail}, cb_llmail={has_cb_llmail}")
 
             if baseline_tool_samples > 0:
                 paired = build_paired_outputs(
@@ -2156,8 +2303,19 @@ def main():
                     results["cb_model"]["generation_comparison"],
                 )
                 logger.info(f"Built {len(paired)} pairs from generation_comparison")
+            elif has_baseline_llmail and has_cb_llmail:
+                baseline_llmail_count = results["baseline"]["llmail_attack"]["total_samples"]
+                cb_llmail_count = results["cb_model"]["llmail_attack"]["total_samples"]
+                logger.info(f"Building pairs from llmail_attack: baseline={baseline_llmail_count}, cb={cb_llmail_count}")
+                paired = build_paired_outputs(
+                    results["baseline"]["llmail_attack"],
+                    results["cb_model"]["llmail_attack"],
+                )
+                logger.info(f"Built {len(paired)} pairs from llmail_attack")
             else:
-                logger.warning("No paired outputs available - neither tool_flip nor generation_comparison data")
+                logger.warning(
+                    "No paired outputs available - missing tool_flip, generation_comparison, and llmail_attack data"
+                )
                 paired = []
 
             with open(paired_path, "w", encoding="utf-8") as f:
