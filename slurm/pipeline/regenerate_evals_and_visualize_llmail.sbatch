@@ -66,6 +66,11 @@ VIS_TOP_N="${VIS_TOP_N:-3}"
 VIS_COMPARE_SAMPLES="${VIS_COMPARE_SAMPLES:-5}"
 VIS_FILTER="${VIS_FILTER:-success}"          # success|failure|none
 VIS_NO_COLOR="${VIS_NO_COLOR:-true}"
+VIS_ONLY_DATASET="${VIS_ONLY_DATASET:-llmail}"  # all|fujitsu|agentdojo|llmail
+VIS_COMPARE_DATASET="${VIS_COMPARE_DATASET:-$VIS_ONLY_DATASET}"
+if [[ "$VIS_COMPARE_DATASET" == "all" ]]; then
+    VIS_COMPARE_DATASET="llmail"
+fi
 
 TRACES_DIR="${TRACES_DIR:-$CB_SCRATCH/data/traces}"
 FUJITSU_DS_TRACES="$TRACES_DIR/fujitsu_b4_ds.jsonl"
@@ -294,11 +299,12 @@ VIS_ARGS=(
     "$SWEEP_DIR"
     --traces-dir "$TRACES_DIR"
     --llmail-data-dir "$REPO_DIR/data/llmail_inject"
+    --only-dataset "$VIS_ONLY_DATASET"
     --show-samples "$VIS_SHOW_SAMPLES"
     --samples-best-only
     --top-n "$VIS_TOP_N"
     --compare-samples "$VIS_COMPARE_SAMPLES"
-    --compare-dataset llmail
+    --compare-dataset "$VIS_COMPARE_DATASET"
     --csv "$SWEEP_DIR/llmail_eval_regen_summary.csv"
 )
 

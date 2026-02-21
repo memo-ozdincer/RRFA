@@ -606,6 +606,7 @@ def analyze_run(
     traces_dir: Optional[Path] = None,
     tool_schema: Optional[Dict[str, Any]] = None,
     llmail_reference: Optional[Dict[str, Any]] = None,
+    only_dataset: str = "all",
     show_samples: int = 0,
     start_sample: int = 0,
     show_full: bool = False,
@@ -655,7 +656,7 @@ def analyze_run(
     # ---------------------------------------------------------
     # Fujitsu Analysis
     # ---------------------------------------------------------
-    if fujitsu_eval_json.exists():
+    if only_dataset in ("all", "fujitsu") and fujitsu_eval_json.exists():
         eval_data = load_json(fujitsu_eval_json)
         paired = load_jsonl(fujitsu_paired)
         
@@ -714,7 +715,7 @@ def analyze_run(
     llmail_eval_json = run_dir / "eval" / "llmail_eval.json"
     llmail_paired = run_dir / "eval" / "llmail_eval.paired_outputs.jsonl"
     
-    if llmail_eval_json.exists():
+    if only_dataset in ("all", "llmail") and llmail_eval_json.exists():
         eval_data = load_json(llmail_eval_json)
         paired = load_jsonl(llmail_paired)
 
@@ -786,7 +787,7 @@ def analyze_run(
     # ---------------------------------------------------------
     # AgentDojo Analysis
     # ---------------------------------------------------------
-    if agentdojo_eval_json.exists():
+    if only_dataset in ("all", "agentdojo") and agentdojo_eval_json.exists():
         eval_data = load_json(agentdojo_eval_json)
         paired = load_jsonl(agentdojo_paired)
 
@@ -830,10 +831,17 @@ def analyze_run(
 # Summary Display
 # =============================================================================
 
-def get_best_runs(runs: List[Dict[str, Any]], top_n: int = 5) -> List[Dict[str, Any]]:
-    """Return top runs by lowest CB ASR."""
-    valid_runs = [r for r in runs if r.get("fujitsu") and r["fujitsu"].get("cb_asr") is not None]
-    return sorted(valid_runs, key=lambda r: r["fujitsu"]["cb_asr"])[:top_n]
+def get_best_runs(
+    runs: List[Dict[str, Any]],
+    top_n: int = 5,
+    metric_dataset: str = "fujitsu",
+) -> List[Dict[str, Any]]:
+    """Return top runs by lowest CB ASR for dataset with ASR metrics."""
+    valid_runs = [
+        r for r in runs
+        if r.get(metric_dataset) and r[metric_dataset].get("cb_asr") is not None
+    ]
+    return sorted(valid_runs, key=lambda r: r[metric_dataset]["cb_asr"])[:top_n]
 
 def print_summary_table(runs: List[Dict[str, Any]], use_color: bool = True) -> None:
     """Print a summary table of all runs."""
@@ -902,34 +910,39 @@ def print_summary_table(runs: List[Dict[str, Any]], use_color: bool = True) -> N
         )
 
 
-def print_best_runs(runs: List[Dict[str, Any]], top_n: int = 5, use_color: bool = True) -> None:
-    """Print the best performing runs."""
+def print_best_runs(
+    runs: List[Dict[str, Any]],
+    top_n: int = 5,
+    use_color: bool = True,
+    metric_dataset: str = "fujitsu",
+) -> None:
+    """Print the best performing runs by dataset metric."""
     BOLD = "\033[1m" if use_color else ""
     GREEN = "\033[92m" if use_color else ""
     RESET = "\033[0m" if use_color else ""
-    by_cb_asr = get_best_runs(runs, top_n=top_n)
+    by_cb_asr = get_best_runs(runs, top_n=top_n, metric_dataset=metric_dataset)
     if not by_cb_asr:
-        print("\nNo valid runs found with Fujitsu metrics.")
+        print(f"\nNo valid runs found with {metric_dataset} metrics.")
         return
     
     
     print(f"\n{BOLD}{'='*80}{RESET}")
-    print(f"{BOLD}TOP {top_n} RUNS BY LOWEST CB ASR{RESET}")
+    print(f"{BOLD}TOP {top_n} RUNS BY LOWEST {metric_dataset.upper()} CB ASR{RESET}")
     print(f"{'='*80}")
     
     for i, run in enumerate(by_cb_asr[:top_n], 1):
-        fujitsu = run["fujitsu"]
+        metric = run[metric_dataset]
         hparams = run.get("hparams") or {}
         lossmask = run.get("lossmask") or "N/A"
         hparams_str = ",".join(f"{k}{v}" for k, v in sorted(hparams.items())) or "N/A"
         print(f"\n{GREEN}{i}. {run['run_name']}{RESET}")
         print(f"   Hparams: {hparams_str}")
         print(f"   Lossmask: {lossmask}")
-        print(f"   Baseline ASR: {fujitsu['baseline_asr']:.1f}% → "
-              f"CB ASR: {fujitsu['cb_asr']:.1f}% "
-              f"(Reduction: {fujitsu['baseline_asr'] - fujitsu['cb_asr']:.1f}pp)")
-        print(f"   Improvements: {fujitsu.get('improvements', 0)}, "
-              f"Regressions: {fujitsu.get('regressions', 0)}")
+        print(f"   Baseline ASR: {metric['baseline_asr']:.1f}% → "
+              f"CB ASR: {metric['cb_asr']:.1f}% "
+              f"(Reduction: {metric['baseline_asr'] - metric['cb_asr']:.1f}pp)")
+        print(f"   Improvements: {metric.get('improvements', 0)}, "
+              f"Regressions: {metric.get('regressions', 0)}")
         agentdojo = run.get("agentdojo", {})
         if agentdojo:
             print(f"   AgentDojo Diff Rate: {agentdojo.get('diff_rate', 0):.1f}%")
@@ -1189,6 +1202,13 @@ Examples:
         choices=["fujitsu", "agentdojo", "llmail"],
         help="Dataset to use for comparison"
     )
+    parser.add_argument(
+        "--only-dataset",
+        type=str,
+        default="all",
+        choices=["all", "fujitsu", "agentdojo", "llmail"],
+        help="Restrict analysis/visualization to a single dataset"
+    )
     
     args = parser.parse_args()
     
@@ -1253,6 +1273,7 @@ Examples:
             traces_dir=traces_dir,
             tool_schema=tool_schema,
             llmail_reference=llmail_reference,
+            only_dataset=args.only_dataset,
             show_samples=show_samples,
             start_sample=args.start_from_sample,
             show_full=args.show_full,
@@ -1264,7 +1285,8 @@ Examples:
     
     # Print summary
     print_summary_table(all_results, use_color)
-    print_best_runs(all_results, args.top_n, use_color)
+    best_metric_dataset = "llmail" if args.only_dataset == "llmail" else "fujitsu"
+    print_best_runs(all_results, args.top_n, use_color, metric_dataset=best_metric_dataset)
     
     # Plot metrics
     plot_metrics(all_results)
@@ -1275,7 +1297,7 @@ Examples:
 
     # Optionally show samples only for best runs
     if args.show_samples > 0 and args.samples_best_only:
-        best_runs = get_best_runs(all_results, top_n=args.top_n)
+        best_runs = get_best_runs(all_results, top_n=args.top_n, metric_dataset=best_metric_dataset)
         best_names = {r.get("run_name") for r in best_runs}
         for run_dir in run_dirs:
             if run_dir.name in best_names:
@@ -1284,6 +1306,7 @@ Examples:
                     traces_dir=traces_dir,
                     tool_schema=tool_schema,
                     llmail_reference=llmail_reference,
+                    only_dataset=args.only_dataset,
                     show_samples=args.show_samples,
                     start_sample=args.start_from_sample,
                     show_full=args.show_full,
