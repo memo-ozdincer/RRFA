@@ -70,6 +70,10 @@
 #   LLMAIL_CONTEXT_MODE, LLMAIL_EXCLUDE_NOT_RETRIEVED, LLMAIL_SCENARIOS_PATH
 #   STRICT_SIMULATED_MATCH, SKIP_LLMAIL_NOT_RETRIEVED, LIMIT_GEN, LLMAIL_LIMIT
 #   LLMAIL_RETRIEVED_ONLY
+#   LLMAIL_RETAIN_MODE (none|generated|synthetic) - how to get LLMail retain data
+#     none:      no LLMail retain set (LLMail used as CB set only)
+#     generated: use model-generated DR completions (default)
+#     synthetic: use deterministic synthetic benign send-email traces
 # =============================================================================
 
 set -euo pipefail
@@ -220,6 +224,7 @@ echo "  SKIP_LLMAIL_NOT_RETRIEVED: $SKIP_LLMAIL_NOT_RETRIEVED"
 echo "  LIMIT_GEN: ${LIMIT_GEN:-<none>}"
 echo "  LLMAIL_LIMIT: ${LLMAIL_LIMIT:-<none>}"
 echo "  LLMAIL_RETRIEVED_ONLY: $LLMAIL_RETRIEVED_ONLY"
+echo "  LLMAIL_RETAIN_MODE: $LLMAIL_RETAIN_MODE"
 echo "  EVAL_MERGE_ADAPTER: $EVAL_MERGE_ADAPTER"
 echo "  LMP_POLICY: $LMP_POLICY"
 echo "  TOTAL_STEPS: $TOTAL_STEPS"
@@ -454,6 +459,22 @@ if [[ "$SKIP_GENERATE" != "true" ]]; then
             "llmail_inject"
     fi
 
+    # Generate synthetic LLMail DR if requested
+    if dataset_enabled "llmail_inject" && [[ "$LLMAIL_RETAIN_MODE" == "synthetic" ]]; then
+        SYNTHETIC_DR="$TRACES_DIR/llmail_synthetic_dr.jsonl"
+        if [[ -f "$SYNTHETIC_DR" ]]; then
+            echo "Synthetic LLMail DR already exists: $SYNTHETIC_DR ($(wc -l < "$SYNTHETIC_DR") lines)"
+        else
+            echo "Generating synthetic LLMail DR traces..."
+            python src/data_generation/generate_completions.py \
+                --mode synthetic_dr \
+                --tool-schema "$LLMAIL_TOOL_SCHEMA" \
+                --output "$SYNTHETIC_DR" \
+                --synthetic-split train
+            echo "  Synthetic DR: $SYNTHETIC_DR ($(wc -l < "$SYNTHETIC_DR") lines)"
+        fi
+    fi
+
     echo ""
 fi
 
@@ -647,14 +668,47 @@ if [[ "$SKIP_TRAIN" != "true" ]]; then
         fi
     fi
 
-    # LLMail DR (benign)
-    if dataset_enabled "llmail_inject" && [[ -f "$RENDERS_DIR/llmail_inject_dr.jsonl" ]]; then
-        if [[ -n "$BENIGN_RENDERS" ]]; then
-            BENIGN_RENDERS="$BENIGN_RENDERS,$RENDERS_DIR/llmail_inject_dr.jsonl"
-            BENIGN_LOSSMASKS="$BENIGN_LOSSMASKS,$LOSSMASKS_DIR/llmail_inject_dr.jsonl"
-        else
-            BENIGN_RENDERS="$RENDERS_DIR/llmail_inject_dr.jsonl"
-            BENIGN_LOSSMASKS="$LOSSMASKS_DIR/llmail_inject_dr.jsonl"
+    # LLMail DR (benign) -- controlled by LLMAIL_RETAIN_MODE
+    # - "generated": use model-generated DR (default, existing behavior)
+    # - "synthetic": use deterministic synthetic benign send-email traces
+    # - "none": no LLMail retain data (LLMail as CB set only)
+    LLMAIL_RETAIN_FILE=""
+    LLMAIL_RETAIN_LOSSMASK=""
+    if dataset_enabled "llmail_inject"; then
+        case "$LLMAIL_RETAIN_MODE" in
+            generated)
+                if [[ -f "$RENDERS_DIR/llmail_inject_dr.jsonl" ]]; then
+                    LLMAIL_RETAIN_FILE="$RENDERS_DIR/llmail_inject_dr.jsonl"
+                    LLMAIL_RETAIN_LOSSMASK="$LOSSMASKS_DIR/llmail_inject_dr.jsonl"
+                fi
+                ;;
+            synthetic)
+                if [[ -f "$RENDERS_DIR/llmail_synthetic_dr.jsonl" ]]; then
+                    LLMAIL_RETAIN_FILE="$RENDERS_DIR/llmail_synthetic_dr.jsonl"
+                    LLMAIL_RETAIN_LOSSMASK="$LOSSMASKS_DIR/llmail_synthetic_dr.jsonl"
+                else
+                    echo "  WARNING: Synthetic LLMail DR renders not found; was SKIP_GENERATE=true?"
+                fi
+                ;;
+            none)
+                echo "  LLMail retain mode: none (CB set only, no retain data)"
+                ;;
+            *)
+                echo "  WARNING: Unknown LLMAIL_RETAIN_MODE=$LLMAIL_RETAIN_MODE, defaulting to generated"
+                if [[ -f "$RENDERS_DIR/llmail_inject_dr.jsonl" ]]; then
+                    LLMAIL_RETAIN_FILE="$RENDERS_DIR/llmail_inject_dr.jsonl"
+                    LLMAIL_RETAIN_LOSSMASK="$LOSSMASKS_DIR/llmail_inject_dr.jsonl"
+                fi
+                ;;
+        esac
+        if [[ -n "$LLMAIL_RETAIN_FILE" ]]; then
+            if [[ -n "$BENIGN_RENDERS" ]]; then
+                BENIGN_RENDERS="$BENIGN_RENDERS,$LLMAIL_RETAIN_FILE"
+                BENIGN_LOSSMASKS="$BENIGN_LOSSMASKS,$LLMAIL_RETAIN_LOSSMASK"
+            else
+                BENIGN_RENDERS="$LLMAIL_RETAIN_FILE"
+                BENIGN_LOSSMASKS="$LLMAIL_RETAIN_LOSSMASK"
+            fi
         fi
     fi
 
