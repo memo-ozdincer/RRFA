@@ -67,6 +67,9 @@
 #   OUTPUT_BASE, MODEL, TOKENIZER, DTYPE, LORA_R, LORA_ALPHA,
 #   NO_WANDB, JUDGE_PROVIDER, JUDGE_MODEL, EVAL_LIMIT
 #   LLMAIL_TOOL_SCHEMA (tool schema used for LLMail generation/eval)
+#   LLMAIL_CONTEXT_MODE, LLMAIL_EXCLUDE_NOT_RETRIEVED, LLMAIL_SCENARIOS_PATH
+#   STRICT_SIMULATED_MATCH, SKIP_LLMAIL_NOT_RETRIEVED, LIMIT_GEN, LLMAIL_LIMIT
+#   LLMAIL_RETRIEVED_ONLY
 # =============================================================================
 
 set -euo pipefail
@@ -95,7 +98,7 @@ source "$VENV_DIR/bin/activate"
 # Cache Setup
 # =============================================================================
 CACHE_DIR="$CB_SCRATCH/cache"
-mkdir -p "$CACHE_DIR"/{hf/hub,hf/datasets,torch,wandb}
+mkdir -p "$CACHE_DIR"/{hf/hub,hf/datasets,torch,wandb,triton}
 mkdir -p "$CB_SCRATCH/logs"
 
 export HF_HOME="$CACHE_DIR/hf"
@@ -103,6 +106,10 @@ export HF_HUB_CACHE="$CACHE_DIR/hf/hub"
 export HF_DATASETS_CACHE="$CACHE_DIR/hf/datasets"
 export TORCH_HOME="$CACHE_DIR/torch"
 export WANDB_DIR="$CACHE_DIR/wandb"
+export TRITON_CACHE_DIR="$CACHE_DIR/triton"
+export XDG_CACHE_HOME="$CACHE_DIR"
+export DS_TRITON_CACHE_DIR="$TRITON_CACHE_DIR"
+mkdir -p "$TRITON_CACHE_DIR" "$TRITON_CACHE_DIR/autotune"
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 
@@ -119,7 +126,7 @@ echo ""
 
 # Dataset selection
 DATASETS="${DATASETS:-agentdojo,fujitsu_b4,llmail_inject}"
-DATASET_CONFIG="${DATASET_CONFIG:-$REPO_DIR/configs/dataset_config.yaml}"
+DATASET_CONFIG="${DATASET_CONFIG:-configs/dataset_config.yaml}"
 
 # Stage control
 SKIP_ETL_A="${SKIP_ETL_A:-false}"
@@ -141,20 +148,27 @@ EVAL_DIR="$CB_SCRATCH/eval"
 mkdir -p "$TRACES_DIR" "$RENDERS_DIR" "$LOSSMASKS_DIR" "$MODELS_DIR" "$EVAL_DIR"
 
 # Default data paths
-FUJITSU_B4_PATH="${FUJITSU_B4_PATH:-$REPO_DIR/data/fujitsu/orchestrator_attacks_combined_deduplicated.jsonl}"
-AGENTDOJO_PATH="${AGENTDOJO_PATH:-$REPO_DIR/data/agent_dojo/agentdojo_spotlight_extract.jsonl}"
-LLMAIL_INJECT_PATH="${LLMAIL_INJECT_PATH:-$REPO_DIR/data/llmail_inject/raw_submissions_phase1.jsonl}"
+FUJITSU_B4_PATH="${FUJITSU_B4_PATH:-data/fujitsu/orchestrator_attacks_combined_deduplicated.jsonl}"
+AGENTDOJO_PATH="${AGENTDOJO_PATH:-data/agent_dojo/agentdojo_spotlight_extract.jsonl}"
+LLMAIL_INJECT_PATH="${LLMAIL_INJECT_PATH:-data/llmail_inject/raw_submissions_phase1.jsonl}"
 
 # Model/tokenizer
 MODEL="${MODEL:-meta-llama/Llama-3.1-8B-Instruct}"
 TOKENIZER="${TOKENIZER:-$MODEL}"
-TOOL_SCHEMA="${TOOL_SCHEMA:-$REPO_DIR/configs/tool_schemas/b4_standard_v1.json}"
-LLMAIL_TOOL_SCHEMA="${LLMAIL_TOOL_SCHEMA:-$REPO_DIR/configs/tool_schemas/llmail_inject_v1.json}"
+TOOL_SCHEMA="${TOOL_SCHEMA:-configs/tool_schemas/b4_standard_v1.json}"
+LLMAIL_TOOL_SCHEMA="${LLMAIL_TOOL_SCHEMA:-configs/tool_schemas/llmail_inject_challenge_v2.json}"
+LLMAIL_CONTEXT_MODE="${LLMAIL_CONTEXT_MODE:-tool_message_retrieval}"
+LLMAIL_EXCLUDE_NOT_RETRIEVED="${LLMAIL_EXCLUDE_NOT_RETRIEVED:-true}"
+LLMAIL_SCENARIOS_PATH="${LLMAIL_SCENARIOS_PATH:-data/llmail_inject/scenarios.json}"
 
 # Generation settings
 TEMPERATURE_DS="${TEMPERATURE_DS:-0.7}"
 TEMPERATURE_DR="${TEMPERATURE_DR:-0.3}"
 USE_VLLM="${USE_VLLM:-true}"
+STRICT_SIMULATED_MATCH="${STRICT_SIMULATED_MATCH:-true}"
+SKIP_LLMAIL_NOT_RETRIEVED="${SKIP_LLMAIL_NOT_RETRIEVED:-true}"
+LIMIT_GEN="${LIMIT_GEN:-}"
+LLMAIL_LIMIT="${LLMAIL_LIMIT:-}"
 
 # Training settings
 TOTAL_STEPS="${TOTAL_STEPS:-300}"
@@ -190,11 +204,23 @@ JUDGE_MODEL="${JUDGE_MODEL:-gpt-4o-mini}"
 
 # Eval settings
 EVAL_LIMIT="${EVAL_LIMIT:-100}"
+LLMAIL_RETRIEVED_ONLY="${LLMAIL_RETRIEVED_ONLY:-true}"
+EVAL_MERGE_ADAPTER="${EVAL_MERGE_ADAPTER:-true}"
 
 echo "Configuration:"
 echo "  DATASETS: $DATASETS"
 echo "  OUTPUT_BASE: $OUTPUT_BASE"
 echo "  LLMAIL_INJECT_PATH: $LLMAIL_INJECT_PATH"
+echo "  LLMAIL_TOOL_SCHEMA: $LLMAIL_TOOL_SCHEMA"
+echo "  LLMAIL_CONTEXT_MODE: $LLMAIL_CONTEXT_MODE"
+echo "  LLMAIL_EXCLUDE_NOT_RETRIEVED: $LLMAIL_EXCLUDE_NOT_RETRIEVED"
+echo "  LLMAIL_SCENARIOS_PATH: $LLMAIL_SCENARIOS_PATH"
+echo "  STRICT_SIMULATED_MATCH: $STRICT_SIMULATED_MATCH"
+echo "  SKIP_LLMAIL_NOT_RETRIEVED: $SKIP_LLMAIL_NOT_RETRIEVED"
+echo "  LIMIT_GEN: ${LIMIT_GEN:-<none>}"
+echo "  LLMAIL_LIMIT: ${LLMAIL_LIMIT:-<none>}"
+echo "  LLMAIL_RETRIEVED_ONLY: $LLMAIL_RETRIEVED_ONLY"
+echo "  EVAL_MERGE_ADAPTER: $EVAL_MERGE_ADAPTER"
 echo "  LMP_POLICY: $LMP_POLICY"
 echo "  TOTAL_STEPS: $TOTAL_STEPS"
 echo "  ALPHA_MAX: $ALPHA_MAX"
@@ -210,6 +236,22 @@ echo "  SKIP_SPLIT: $SKIP_SPLIT"
 echo "  SKIP_TRAIN: $SKIP_TRAIN"
 echo "  SKIP_EVAL: $SKIP_EVAL"
 echo ""
+
+# Parse datasets once and expose helper for dataset-aware stages.
+IFS=',' read -ra DATASET_ARRAY <<< "$DATASETS"
+for i in "${!DATASET_ARRAY[@]}"; do
+    DATASET_ARRAY[$i]="$(echo "${DATASET_ARRAY[$i]}" | xargs)"
+done
+
+dataset_enabled() {
+    local needle="$1"
+    for d in "${DATASET_ARRAY[@]}"; do
+        if [[ "$d" == "$needle" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
 
 # =============================================================================
 # Resolve Tokenizer to Local Cache
@@ -245,11 +287,7 @@ if [[ "$SKIP_ETL_A" != "true" ]]; then
     echo "Stage 1: ETL_A (Raw -> Traces)"
     echo "========================================"
 
-    IFS=',' read -ra DATASET_ARRAY <<< "$DATASETS"
-
     for dataset in "${DATASET_ARRAY[@]}"; do
-        dataset=$(echo "$dataset" | xargs)  # Trim whitespace
-
         case "$dataset" in
             agentdojo)
                 if [[ -f "$AGENTDOJO_PATH" ]]; then
@@ -260,7 +298,7 @@ if [[ "$SKIP_ETL_A" != "true" ]]; then
                         --agentdojo "$AGENTDOJO_PATH" \
                         --output "$OUTPUT_FILE" \
                         --split train \
-                        --injection-patterns-file "$REPO_DIR/configs/injection_patterns.json"
+                        --injection-patterns-file "configs/injection_patterns.json"
 
                     echo "  Output: $OUTPUT_FILE ($(wc -l < "$OUTPUT_FILE") lines)"
                 else
@@ -294,7 +332,10 @@ if [[ "$SKIP_ETL_A" != "true" ]]; then
                         --llmail-inject "$LLMAIL_INJECT_PATH" \
                         --output "$OUTPUT_FILE" \
                         --split train \
-                        --tool-schema "$LLMAIL_TOOL_SCHEMA"
+                        --tool-schema "$LLMAIL_TOOL_SCHEMA" \
+                        --llmail-context-mode "$LLMAIL_CONTEXT_MODE" \
+                        --llmail-exclude-not-retrieved "$LLMAIL_EXCLUDE_NOT_RETRIEVED" \
+                        --llmail-scenarios-path "$LLMAIL_SCENARIOS_PATH"
 
                     echo "  Output: $OUTPUT_FILE ($(wc -l < "$OUTPUT_FILE") lines)"
                 else
@@ -329,6 +370,7 @@ if [[ "$SKIP_GENERATE" != "true" ]]; then
         local ds_output="$3"
         local dr_output="$4"
         local dataset_tool_schema="$5"
+        local dataset_key="$6"
 
         if [[ ! -f "$skeleton_file" ]]; then
             return
@@ -346,6 +388,19 @@ if [[ "$SKIP_GENERATE" != "true" ]]; then
             return
         fi
 
+        local LIMIT_ARGS=()
+        if [[ -n "$LIMIT_GEN" ]]; then
+            LIMIT_ARGS+=(--limit "$LIMIT_GEN")
+        fi
+
+        local DS_EXTRA_ARGS=()
+        local DR_EXTRA_ARGS=()
+        if [[ "$dataset_key" == "llmail_inject" ]]; then
+            DS_EXTRA_ARGS+=(--strict-simulated-match "$STRICT_SIMULATED_MATCH")
+            DS_EXTRA_ARGS+=(--skip-llmail-not-retrieved "$SKIP_LLMAIL_NOT_RETRIEVED")
+            DR_EXTRA_ARGS+=(--skip-llmail-not-retrieved "$SKIP_LLMAIL_NOT_RETRIEVED")
+        fi
+
         if [[ "$need_ds" == "true" ]]; then
             echo "Generating $dataset_name DS traces..."
             python src/data_generation/generate_completions.py \
@@ -356,6 +411,8 @@ if [[ "$SKIP_GENERATE" != "true" ]]; then
                 --mode ds \
                 --temperature-ds "$TEMPERATURE_DS" \
                 --max-model-len "$MAX_MODEL_LEN" \
+                "${LIMIT_ARGS[@]}" \
+                "${DS_EXTRA_ARGS[@]}" \
                 "${VLLM_ARGS[@]}"
             echo "  DS output: $ds_output ($(wc -l < "$ds_output") lines)"
         fi
@@ -370,24 +427,32 @@ if [[ "$SKIP_GENERATE" != "true" ]]; then
                 --mode dr \
                 --temperature-dr "$TEMPERATURE_DR" \
                 --max-model-len "$MAX_MODEL_LEN" \
+                "${LIMIT_ARGS[@]}" \
+                "${DR_EXTRA_ARGS[@]}" \
                 "${VLLM_ARGS[@]}"
             echo "  DR output: $dr_output ($(wc -l < "$dr_output") lines)"
         fi
     }
 
-    generate_ds_dr_dataset \
-        "Fujitsu B4" \
-        "$TRACES_DIR/fujitsu_b4_skeletons.jsonl" \
-        "$TRACES_DIR/fujitsu_b4_ds.jsonl" \
-        "$TRACES_DIR/fujitsu_b4_dr.jsonl" \
-        "$TOOL_SCHEMA"
+    if dataset_enabled "fujitsu_b4"; then
+        generate_ds_dr_dataset \
+            "Fujitsu B4" \
+            "$TRACES_DIR/fujitsu_b4_skeletons.jsonl" \
+            "$TRACES_DIR/fujitsu_b4_ds.jsonl" \
+            "$TRACES_DIR/fujitsu_b4_dr.jsonl" \
+            "$TOOL_SCHEMA" \
+            "fujitsu_b4"
+    fi
 
-    generate_ds_dr_dataset \
-        "LLMail-Inject" \
-        "$TRACES_DIR/llmail_inject_skeleton.jsonl" \
-        "$TRACES_DIR/llmail_inject_ds.jsonl" \
-        "$TRACES_DIR/llmail_inject_dr.jsonl" \
-        "$LLMAIL_TOOL_SCHEMA"
+    if dataset_enabled "llmail_inject"; then
+        generate_ds_dr_dataset \
+            "LLMail-Inject" \
+            "$TRACES_DIR/llmail_inject_skeleton.jsonl" \
+            "$TRACES_DIR/llmail_inject_ds.jsonl" \
+            "$TRACES_DIR/llmail_inject_dr.jsonl" \
+            "$LLMAIL_TOOL_SCHEMA" \
+            "llmail_inject"
+    fi
 
     echo ""
 fi
@@ -455,8 +520,29 @@ if [[ "$SKIP_ETL_B" != "true" ]]; then
                 continue
             fi
 
+            # Respect DATASETS selection even if stale files are present in traces dir.
+            if [[ "$basename" == fujitsu_* ]]; then
+                if ! dataset_enabled "fujitsu_b4"; then
+                    continue
+                fi
+            fi
+            if [[ "$basename" == llmail_* ]]; then
+                if ! dataset_enabled "llmail_inject"; then
+                    continue
+                fi
+            fi
+            if [[ "$basename" == agentdojo_* ]]; then
+                if ! dataset_enabled "agentdojo"; then
+                    continue
+                fi
+            fi
+
             render_out="$RENDERS_DIR/${basename}.jsonl"
             lossmask_out="$LOSSMASKS_DIR/${basename}.jsonl"
+            ETL_B_LIMIT_ARGS=()
+            if [[ -n "$LLMAIL_LIMIT" && "$basename" == llmail_inject_* ]]; then
+                ETL_B_LIMIT_ARGS+=(--limit "$LLMAIL_LIMIT")
+            fi
 
             echo "Processing: $basename"
             python src/schemas/tools/ETL_B.py \
@@ -465,7 +551,8 @@ if [[ "$SKIP_ETL_B" != "true" ]]; then
                 --lossmask-out "$lossmask_out" \
                 --tokenizer "$TOKENIZER" \
                 --max-length 4096 \
-                --policy-override "$LMP_POLICY"
+                --policy-override "$LMP_POLICY" \
+                "${ETL_B_LIMIT_ARGS[@]}"
 
             echo "  Render: $render_out ($(wc -l < "$render_out") lines)"
             echo "  Lossmask: $lossmask_out ($(wc -l < "$lossmask_out") lines)"
@@ -482,11 +569,7 @@ if [[ "$SKIP_SPLIT" != "true" ]]; then
     echo "Stage 5: Split into CB/Retain Sets"
     echo "========================================"
 
-    IFS=',' read -ra DATASET_ARRAY <<< "$DATASETS"
-
     for dataset in "${DATASET_ARRAY[@]}"; do
-        dataset=$(echo "$dataset" | xargs)
-
         case "$dataset" in
             agentdojo)
                 TRACE_FILE="$TRACES_DIR/agentdojo_complete.jsonl"
@@ -542,19 +625,19 @@ if [[ "$SKIP_TRAIN" != "true" ]]; then
     BENIGN_LOSSMASKS=""
 
     # Fujitsu DS (harmful)
-    if [[ -f "$RENDERS_DIR/fujitsu_b4_ds.jsonl" ]]; then
+    if dataset_enabled "fujitsu_b4" && [[ -f "$RENDERS_DIR/fujitsu_b4_ds.jsonl" ]]; then
         HARMFUL_RENDERS="$RENDERS_DIR/fujitsu_b4_ds.jsonl"
         HARMFUL_LOSSMASKS="$LOSSMASKS_DIR/fujitsu_b4_ds.jsonl"
     fi
 
     # Fujitsu DR (benign)
-    if [[ -f "$RENDERS_DIR/fujitsu_b4_dr.jsonl" ]]; then
+    if dataset_enabled "fujitsu_b4" && [[ -f "$RENDERS_DIR/fujitsu_b4_dr.jsonl" ]]; then
         BENIGN_RENDERS="$RENDERS_DIR/fujitsu_b4_dr.jsonl"
         BENIGN_LOSSMASKS="$LOSSMASKS_DIR/fujitsu_b4_dr.jsonl"
     fi
 
     # LLMail DS (harmful)
-    if [[ -f "$RENDERS_DIR/llmail_inject_ds.jsonl" ]]; then
+    if dataset_enabled "llmail_inject" && [[ -f "$RENDERS_DIR/llmail_inject_ds.jsonl" ]]; then
         if [[ -n "$HARMFUL_RENDERS" ]]; then
             HARMFUL_RENDERS="$HARMFUL_RENDERS,$RENDERS_DIR/llmail_inject_ds.jsonl"
             HARMFUL_LOSSMASKS="$HARMFUL_LOSSMASKS,$LOSSMASKS_DIR/llmail_inject_ds.jsonl"
@@ -565,7 +648,7 @@ if [[ "$SKIP_TRAIN" != "true" ]]; then
     fi
 
     # LLMail DR (benign)
-    if [[ -f "$RENDERS_DIR/llmail_inject_dr.jsonl" ]]; then
+    if dataset_enabled "llmail_inject" && [[ -f "$RENDERS_DIR/llmail_inject_dr.jsonl" ]]; then
         if [[ -n "$BENIGN_RENDERS" ]]; then
             BENIGN_RENDERS="$BENIGN_RENDERS,$RENDERS_DIR/llmail_inject_dr.jsonl"
             BENIGN_LOSSMASKS="$BENIGN_LOSSMASKS,$LOSSMASKS_DIR/llmail_inject_dr.jsonl"
@@ -577,7 +660,7 @@ if [[ "$SKIP_TRAIN" != "true" ]]; then
 
     # AgentDojo split
     AGENTDOJO_SPLIT="$OUTPUT_BASE/split/agentdojo"
-    if [[ -f "$AGENTDOJO_SPLIT/agentdojo_renders_cb.jsonl" ]]; then
+    if dataset_enabled "agentdojo" && [[ -f "$AGENTDOJO_SPLIT/agentdojo_renders_cb.jsonl" ]]; then
         if [[ -n "$HARMFUL_RENDERS" ]]; then
             HARMFUL_RENDERS="$HARMFUL_RENDERS,$AGENTDOJO_SPLIT/agentdojo_renders_cb.jsonl"
             HARMFUL_LOSSMASKS="$HARMFUL_LOSSMASKS,$AGENTDOJO_SPLIT/agentdojo_lossmasks_cb.jsonl"
@@ -587,7 +670,7 @@ if [[ "$SKIP_TRAIN" != "true" ]]; then
         fi
     fi
 
-    if [[ -f "$AGENTDOJO_SPLIT/agentdojo_renders_retain.jsonl" ]]; then
+    if dataset_enabled "agentdojo" && [[ -f "$AGENTDOJO_SPLIT/agentdojo_renders_retain.jsonl" ]]; then
         if [[ -n "$BENIGN_RENDERS" ]]; then
             BENIGN_RENDERS="$BENIGN_RENDERS,$AGENTDOJO_SPLIT/agentdojo_renders_retain.jsonl"
             BENIGN_LOSSMASKS="$BENIGN_LOSSMASKS,$AGENTDOJO_SPLIT/agentdojo_lossmasks_retain.jsonl"
@@ -690,9 +773,13 @@ if [[ "$SKIP_EVAL" != "true" ]]; then
 
         if [[ -n "$ADAPTER_PATH" ]]; then
             EVAL_OUTPUT="$EVAL_DIR/eval_$(date +%Y%m%d_%H%M%S).json"
+            EVAL_COMMON_ARGS=()
+            if [[ "$EVAL_MERGE_ADAPTER" == "true" ]]; then
+                EVAL_COMMON_ARGS+=(--merge-adapter)
+            fi
 
             # Evaluate on Fujitsu DS
-            if [[ -f "$TRACES_DIR/fujitsu_b4_ds.jsonl" ]]; then
+            if dataset_enabled "fujitsu_b4" && [[ -f "$TRACES_DIR/fujitsu_b4_ds.jsonl" ]]; then
                 echo "Evaluating on Fujitsu DS..."
                 python src/evaluation/eval.py \
                     --baseline "$MODEL" \
@@ -701,11 +788,12 @@ if [[ "$SKIP_EVAL" != "true" ]]; then
                     --tool-schema "$TOOL_SCHEMA" \
                     --output "$EVAL_OUTPUT" \
                     --limit "$EVAL_LIMIT" \
+                    "${EVAL_COMMON_ARGS[@]}" \
                     --dtype "$DTYPE"
             fi
 
             # Evaluate on LLMail DS
-            if [[ -f "$TRACES_DIR/llmail_inject_ds.jsonl" ]]; then
+            if dataset_enabled "llmail_inject" && [[ -f "$TRACES_DIR/llmail_inject_ds.jsonl" ]]; then
                 LLMAIL_EVAL="${EVAL_OUTPUT%.json}_llmail.json"
                 echo "Evaluating on LLMail-Inject DS..."
                 python src/evaluation/eval.py \
@@ -715,12 +803,14 @@ if [[ "$SKIP_EVAL" != "true" ]]; then
                     --tool-schema "$LLMAIL_TOOL_SCHEMA" \
                     --output "$LLMAIL_EVAL" \
                     --limit "$EVAL_LIMIT" \
+                    --llmail-retrieved-only "$LLMAIL_RETRIEVED_ONLY" \
+                    "${EVAL_COMMON_ARGS[@]}" \
                     --dtype "$DTYPE"
             fi
 
             # Evaluate on AgentDojo harmful
             AGENTDOJO_HARMFUL="$OUTPUT_BASE/split/agentdojo/agentdojo_traces_cb.jsonl"
-            if [[ -f "$AGENTDOJO_HARMFUL" ]]; then
+            if dataset_enabled "agentdojo" && [[ -f "$AGENTDOJO_HARMFUL" ]]; then
                 AGENTDOJO_EVAL="${EVAL_OUTPUT%.json}_agentdojo.json"
                 echo "Evaluating on AgentDojo (harmful)..."
                 python src/evaluation/eval.py \
@@ -731,6 +821,7 @@ if [[ "$SKIP_EVAL" != "true" ]]; then
                     --output "$AGENTDOJO_EVAL" \
                     --use-sample-context \
                     --limit "$EVAL_LIMIT" \
+                    "${EVAL_COMMON_ARGS[@]}" \
                     --dtype "$DTYPE"
             fi
 

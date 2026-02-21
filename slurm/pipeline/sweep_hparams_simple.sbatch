@@ -76,13 +76,17 @@ echo "  Logging: Compatible with scripts/visualize_sweep_results.py"
 # =============================================================================
 CB_SCRATCH="/scratch/memoozd/cb-scratch"
 CACHE_DIR="$CB_SCRATCH/cache"
-mkdir -p "$CACHE_DIR"/{hf/hub,hf/datasets,torch,wandb}
+mkdir -p "$CACHE_DIR"/{hf/hub,hf/datasets,torch,wandb,triton}
 
 export HF_HOME="$CACHE_DIR/hf"
 export HF_HUB_CACHE="$CACHE_DIR/hf/hub"
 export HF_DATASETS_CACHE="$CACHE_DIR/hf/datasets"
 export TORCH_HOME="$CACHE_DIR/torch"
 export WANDB_DIR="$CACHE_DIR/wandb"
+export TRITON_CACHE_DIR="$CACHE_DIR/triton"
+export XDG_CACHE_HOME="$CACHE_DIR"
+export DS_TRITON_CACHE_DIR="$TRITON_CACHE_DIR"
+mkdir -p "$TRITON_CACHE_DIR" "$TRITON_CACHE_DIR/autotune"
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 

@@ -79,13 +79,13 @@ fi
 TRACES_DIR="${TRACES_DIR:-$CB_SCRATCH/data/traces}"
 FUJITSU_DS_TRACES="$TRACES_DIR/fujitsu_b4_ds.jsonl"
 LLMAIL_DS_TRACES="$TRACES_DIR/llmail_inject_ds.jsonl"
-LLMAIL_TOOL_SCHEMA="${LLMAIL_TOOL_SCHEMA:-$REPO_DIR/configs/tool_schemas/llmail_inject_challenge_v2.json}"
+LLMAIL_TOOL_SCHEMA="${LLMAIL_TOOL_SCHEMA:-configs/tool_schemas/llmail_inject_challenge_v2.json}"
 LLMAIL_RETRIEVED_ONLY="${LLMAIL_RETRIEVED_ONLY:-true}"
 if [[ -z "${VIS_TOOL_SCHEMA:-}" ]]; then
     if [[ "${VIS_ONLY_DATASET:-llmail}" == "llmail" ]]; then
         VIS_TOOL_SCHEMA="$LLMAIL_TOOL_SCHEMA"
     else
-        VIS_TOOL_SCHEMA="$REPO_DIR/configs/tool_schemas/b4_standard_v1.json"
+        VIS_TOOL_SCHEMA="configs/tool_schemas/b4_standard_v1.json"
     fi
 fi
 
@@ -124,6 +124,9 @@ export HF_DATASETS_CACHE="$CACHE_DIR/hf/datasets"
 export TORCH_HOME="$CACHE_DIR/torch"
 export WANDB_DIR="$CACHE_DIR/wandb"
 export TRITON_CACHE_DIR="$CACHE_DIR/triton"
+export XDG_CACHE_HOME="$CACHE_DIR"
+export DS_TRITON_CACHE_DIR="$TRITON_CACHE_DIR"
+mkdir -p "$TRITON_CACHE_DIR" "$TRITON_CACHE_DIR/autotune"
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 
@@ -176,7 +179,7 @@ run_eval() {
                 --baseline "$TOKENIZER" \
                 --cb-adapter "$adapter_path" \
                 --eval-data "$FUJITSU_DS_TRACES" \
-                --tool-schema "$REPO_DIR/configs/tool_schemas/b4_standard_v1.json" \
+                --tool-schema "configs/tool_schemas/b4_standard_v1.json" \
                 --output "$out" \
                 --limit "$LIMIT_EVAL" \
                 --merge-adapter \
@@ -212,7 +215,7 @@ run_eval() {
                 --baseline "$TOKENIZER" \
                 --cb-adapter "$adapter_path" \
                 --eval-data "$agentdojo_eval_data" \
-                --tool-schema "$REPO_DIR/configs/tool_schemas/b4_standard_v1.json" \
+                --tool-schema "configs/tool_schemas/b4_standard_v1.json" \
                 --output "$out" \
                 --use-sample-context \
                 --limit "$LIMIT_EVAL" \
