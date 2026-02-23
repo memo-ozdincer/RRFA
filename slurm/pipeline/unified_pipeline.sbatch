@@ -886,7 +886,12 @@ if [[ "$SKIP_EVAL" != "true" ]]; then
         fi
 
         if [[ -n "$ADAPTER_PATH" ]]; then
-            EVAL_OUTPUT="$EVAL_DIR/eval_$(date +%Y%m%d_%H%M%S).json"
+            # Write eval directly to visualizer-compatible directory
+            # (single source of truth — no duplication)
+            VIS_RUN_DIR="$OUTPUT_BASE/run_${RUN_ID}"
+            VIS_EVAL_DIR="$VIS_RUN_DIR/eval"
+            mkdir -p "$VIS_EVAL_DIR"
+
             EVAL_COMMON_ARGS=()
             if [[ "$EVAL_MERGE_ADAPTER" == "true" ]]; then
                 EVAL_COMMON_ARGS+=(--merge-adapter)
@@ -900,7 +905,7 @@ if [[ "$SKIP_EVAL" != "true" ]]; then
                     --cb-adapter "$ADAPTER_PATH" \
                     --eval-data "$TRACES_DIR/fujitsu_b4_ds.jsonl" \
                     --tool-schema "$TOOL_SCHEMA" \
-                    --output "$EVAL_OUTPUT" \
+                    --output "$VIS_EVAL_DIR/fujitsu_eval.json" \
                     --limit "$EVAL_LIMIT" \
                     "${EVAL_COMMON_ARGS[@]}" \
                     --dtype "$DTYPE"
@@ -908,14 +913,13 @@ if [[ "$SKIP_EVAL" != "true" ]]; then
 
             # Evaluate on LLMail DS
             if dataset_enabled "llmail_inject" && [[ -f "$TRACES_DIR/llmail_inject_ds.jsonl" ]]; then
-                LLMAIL_EVAL="${EVAL_OUTPUT%.json}_llmail.json"
                 echo "Evaluating on LLMail-Inject DS..."
                 python src/evaluation/eval.py \
                     --baseline "$MODEL" \
                     --cb-adapter "$ADAPTER_PATH" \
                     --eval-data "$TRACES_DIR/llmail_inject_ds.jsonl" \
                     --tool-schema "$LLMAIL_TOOL_SCHEMA" \
-                    --output "$LLMAIL_EVAL" \
+                    --output "$VIS_EVAL_DIR/llmail_eval.json" \
                     --limit "$EVAL_LIMIT" \
                     --llmail-retrieved-only "$LLMAIL_RETRIEVED_ONLY" \
                     "${EVAL_COMMON_ARGS[@]}" \
@@ -925,51 +929,17 @@ if [[ "$SKIP_EVAL" != "true" ]]; then
             # Evaluate on AgentDojo harmful
             AGENTDOJO_HARMFUL="$OUTPUT_BASE/split/agentdojo/agentdojo_traces_cb.jsonl"
             if dataset_enabled "agentdojo" && [[ -f "$AGENTDOJO_HARMFUL" ]]; then
-                AGENTDOJO_EVAL="${EVAL_OUTPUT%.json}_agentdojo.json"
                 echo "Evaluating on AgentDojo (harmful)..."
                 python src/evaluation/eval.py \
                     --baseline "$MODEL" \
                     --cb-adapter "$ADAPTER_PATH" \
                     --eval-data "$AGENTDOJO_HARMFUL" \
                     --tool-schema "$TOOL_SCHEMA" \
-                    --output "$AGENTDOJO_EVAL" \
+                    --output "$VIS_EVAL_DIR/agentdojo_eval.json" \
                     --use-sample-context \
                     --limit "$EVAL_LIMIT" \
                     "${EVAL_COMMON_ARGS[@]}" \
                     --dtype "$DTYPE"
-            fi
-
-            echo ""
-            echo "Evaluation results: $EVAL_OUTPUT"
-
-            # ---------------------------------------------------------------
-            # Create visualizer-compatible run directory
-            # ---------------------------------------------------------------
-            # The visualizer (scripts/visualize_sweep_results.py) expects:
-            #   <run_dir>/eval/fujitsu_eval.json
-            #   <run_dir>/eval/llmail_eval.json
-            #   <run_dir>/eval/agentdojo_eval.json
-            #   (plus .paired_outputs.jsonl siblings)
-            # We create a single-run directory that mimics this structure.
-            VIS_RUN_DIR="$OUTPUT_BASE/run_${RUN_ID}"
-            VIS_EVAL_DIR="$VIS_RUN_DIR/eval"
-            mkdir -p "$VIS_EVAL_DIR"
-
-            # Link/copy eval files into visualizer layout
-            if [[ -f "$EVAL_OUTPUT" ]]; then
-                cp "$EVAL_OUTPUT" "$VIS_EVAL_DIR/fujitsu_eval.json" 2>/dev/null || true
-                PAIRED="${EVAL_OUTPUT%.json}.paired_outputs.jsonl"
-                [[ -f "$PAIRED" ]] && cp "$PAIRED" "$VIS_EVAL_DIR/fujitsu_eval.paired_outputs.jsonl" 2>/dev/null || true
-            fi
-            if [[ -f "${LLMAIL_EVAL:-}" ]]; then
-                cp "$LLMAIL_EVAL" "$VIS_EVAL_DIR/llmail_eval.json" 2>/dev/null || true
-                PAIRED="${LLMAIL_EVAL%.json}.paired_outputs.jsonl"
-                [[ -f "$PAIRED" ]] && cp "$PAIRED" "$VIS_EVAL_DIR/llmail_eval.paired_outputs.jsonl" 2>/dev/null || true
-            fi
-            if [[ -f "${AGENTDOJO_EVAL:-}" ]]; then
-                cp "$AGENTDOJO_EVAL" "$VIS_EVAL_DIR/agentdojo_eval.json" 2>/dev/null || true
-                PAIRED="${AGENTDOJO_EVAL%.json}.paired_outputs.jsonl"
-                [[ -f "$PAIRED" ]] && cp "$PAIRED" "$VIS_EVAL_DIR/agentdojo_eval.paired_outputs.jsonl" 2>/dev/null || true
             fi
 
             # Write run metadata for the visualizer
@@ -987,8 +957,8 @@ if [[ "$SKIP_EVAL" != "true" ]]; then
 RUNEOF
 
             echo ""
-            echo "Visualizer-compatible run directory: $VIS_RUN_DIR"
-            echo "  Usage: python scripts/visualize_sweep_results.py $VIS_RUN_DIR"
+            echo "Eval output: $VIS_EVAL_DIR"
+            echo "  Visualize: python scripts/visualize_sweep_results.py $VIS_RUN_DIR"
         fi
     fi
 fi

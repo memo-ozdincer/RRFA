@@ -20,10 +20,10 @@
 #   ADAPTER_PATH  - path to LoRA adapter (e.g. /scratch/.../models/cb_*/final)
 #
 # Optional env vars:
-#   EVAL_DATASETS        - comma-separated: fujitsu,llmail,agentdojo (default: all)
+#   EVAL_DATASETS        - comma-separated: llmail,agentdojo,fujitsu (default: llmail,agentdojo)
 #   TRACES_DIR           - where trace files live (default: auto-detect)
 #   VIS_DIR              - output directory for visualizer (default: auto)
-#   LIMIT_EVAL           - eval sample cap per dataset (default: 100)
+#   LIMIT_EVAL           - eval sample cap per dataset (default: 50)
 #   RUN_LABEL            - human-readable label for this run (default: basename of adapter)
 #   SKIP_VISUALIZE       - set to "true" to skip visualization step
 #
@@ -107,12 +107,12 @@ else
     exit 1
 fi
 
-# Datasets to evaluate
-EVAL_DATASETS="${EVAL_DATASETS:-fujitsu,llmail,agentdojo}"
+# Datasets to evaluate (default: llmail + agentdojo, like normal runs)
+EVAL_DATASETS="${EVAL_DATASETS:-llmail,agentdojo}"
 IFS=',' read -ra EVAL_DATASET_ARRAY <<< "$EVAL_DATASETS"
 
 # Eval settings
-LIMIT_EVAL="${LIMIT_EVAL:-100}"
+LIMIT_EVAL="${LIMIT_EVAL:-50}"
 DTYPE="${DTYPE:-bfloat16}"
 RUN_LABEL="${RUN_LABEL:-$(basename "$(dirname "$RESOLVED_ADAPTER")" 2>/dev/null || basename "$RESOLVED_ADAPTER")}"
 
