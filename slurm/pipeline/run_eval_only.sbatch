@@ -48,6 +48,7 @@
 
 set -euo pipefail
 
+ADAPTER_PATH=/scratch/memoozd/cb-scratch/models/cb_20260223_113325
 PROJECT_DIR="/project/def-zhijing/memoozd"
 CB_SCRATCH="/scratch/memoozd/cb-scratch"
 REPO_DIR="$PROJECT_DIR/rrfa"
