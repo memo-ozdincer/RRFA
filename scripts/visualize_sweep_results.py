@@ -1106,10 +1106,11 @@ def plot_metrics(runs: List[Dict[str, Any]]) -> None:
         fujitsu = run.get("fujitsu", {})
         if not fujitsu: continue
         
-        asr = fujitsu.get("cb_asr", 0)
+        asr = fujitsu.get("cb_asr")
+        if asr is None: continue
         alpha = run.get("hparams", {}).get("a", "?")
         layers = run.get("lossmask", "?")
-        
+
         bar_len = int((asr / max_asr) * 40)
         bar = "█" * bar_len
         print(f"  a={alpha:<4} {layers:<20}: {bar} {asr:.1f}%")
@@ -1120,10 +1121,11 @@ def plot_metrics(runs: List[Dict[str, Any]]) -> None:
         agentdojo = run.get("agentdojo", {})
         if not agentdojo: continue
         
-        diff = agentdojo.get("diff_rate", 0)
+        diff = agentdojo.get("diff_rate")
+        if diff is None: continue
         alpha = run.get("hparams", {}).get("a", "?")
         layers = run.get("lossmask", "?")
-        
+
         bar_len = int((diff / 100.0) * 40)
         bar = "█" * bar_len
         print(f"  a={alpha:<4} {layers:<20}: {bar} {diff:.1f}%")
@@ -1134,7 +1136,8 @@ def plot_metrics(runs: List[Dict[str, Any]]) -> None:
         llmail = run.get("llmail", {})
         if not llmail: continue
 
-        asr = llmail.get("cb_asr", 0)
+        asr = llmail.get("cb_asr")
+        if asr is None: continue
         alpha = run.get("hparams", {}).get("a", "?")
         layers = run.get("lossmask", "?")
 
