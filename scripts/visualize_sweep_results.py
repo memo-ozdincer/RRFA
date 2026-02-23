@@ -1095,8 +1095,8 @@ def plot_metrics(runs: List[Dict[str, Any]]) -> None:
     
     # Sort runs by alpha then layers
     sorted_runs = sorted(runs, key=lambda r: (
-        float(r.get("hparams", {}).get("a", 0)),
-        r.get("lossmask", "")
+        float(r.get("hparams", {}).get("a") or 0),
+        r.get("lossmask") or ""
     ))
     
     # 1. Fujitsu CB ASR vs Alpha
@@ -1108,8 +1108,8 @@ def plot_metrics(runs: List[Dict[str, Any]]) -> None:
         
         asr = fujitsu.get("cb_asr")
         if asr is None: continue
-        alpha = run.get("hparams", {}).get("a", "?")
-        layers = run.get("lossmask", "?")
+        alpha = run.get("hparams", {}).get("a") or "?"
+        layers = run.get("lossmask") or "?"
 
         bar_len = int((asr / max_asr) * 40)
         bar = "█" * bar_len
@@ -1120,11 +1120,11 @@ def plot_metrics(runs: List[Dict[str, Any]]) -> None:
     for run in sorted_runs:
         agentdojo = run.get("agentdojo", {})
         if not agentdojo: continue
-        
+
         diff = agentdojo.get("diff_rate")
         if diff is None: continue
-        alpha = run.get("hparams", {}).get("a", "?")
-        layers = run.get("lossmask", "?")
+        alpha = run.get("hparams", {}).get("a") or "?"
+        layers = run.get("lossmask") or "?"
 
         bar_len = int((diff / 100.0) * 40)
         bar = "█" * bar_len
@@ -1138,8 +1138,8 @@ def plot_metrics(runs: List[Dict[str, Any]]) -> None:
 
         asr = llmail.get("cb_asr")
         if asr is None: continue
-        alpha = run.get("hparams", {}).get("a", "?")
-        layers = run.get("lossmask", "?")
+        alpha = run.get("hparams", {}).get("a") or "?"
+        layers = run.get("lossmask") or "?"
 
         bar_len = int((asr / 100.0) * 40)
         bar = "█" * bar_len
@@ -1154,8 +1154,8 @@ def plot_metrics(runs: List[Dict[str, Any]]) -> None:
             cap = llmail.get("capability_retention")
             if cap is None: continue
 
-            alpha = run.get("hparams", {}).get("a", "?")
-            layers = run.get("lossmask", "?")
+            alpha = run.get("hparams", {}).get("a") or "?"
+            layers = run.get("lossmask") or "?"
             cap_pct = cap * 100 if isinstance(cap, (int, float)) else 0
 
             bar_len = int((cap_pct / 100.0) * 40)
