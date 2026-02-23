@@ -28,14 +28,16 @@ export DATASETS="${DATASETS:-llmail_inject}"
 export OUTPUT_BASE="${OUTPUT_BASE:-/scratch/memoozd/cb-scratch/data_llmail_only}"
 
 # LLMail retain mode: how LLMail benign data is sourced for training.
-#   "generated"  - use model-generated DR completions (default)
-#   "synthetic"  - use deterministic synthetic benign send-email traces
-#   "none"       - no LLMail retain data (LLMail used as CB set only)
+#   "generated"       - use model-generated DR completions
+#   "synthetic"       - use deterministic synthetic benign send-email traces (50 golden)
+#   "contextualized"  - scenario-grounded retain traces with model inference (recommended)
+#   "none"            - no LLMail retain data (LLMail used as CB set only)
 # Variant recipes:
-#   LLMAIL_RETAIN_MODE=none      → LLMail only as CB set, no retain data
-#   LLMAIL_RETAIN_MODE=synthetic → LLMail only CB + synthetic retain (recommended)
-#   LLMAIL_RETAIN_MODE=generated → LLMail only CB + model-generated retain
-export LLMAIL_RETAIN_MODE="${LLMAIL_RETAIN_MODE:-synthetic}"
+#   LLMAIL_RETAIN_MODE=none            → LLMail only as CB set, no retain data
+#   LLMAIL_RETAIN_MODE=synthetic       → LLMail only CB + 50 golden traces
+#   LLMAIL_RETAIN_MODE=generated       → LLMail only CB + model-generated retain
+#   LLMAIL_RETAIN_MODE=contextualized  → LLMail only CB + scenario-grounded retain (recommended)
+export LLMAIL_RETAIN_MODE="${LLMAIL_RETAIN_MODE:-contextualized}"
 
 # LLMail challenge-faithful defaults
 export LLMAIL_TOOL_SCHEMA="${LLMAIL_TOOL_SCHEMA:-configs/tool_schemas/llmail_inject_challenge_v2.json}"

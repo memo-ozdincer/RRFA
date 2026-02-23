@@ -28,13 +28,15 @@ export DATASETS="${DATASETS:-agentdojo,fujitsu_b4,llmail_inject}"
 export OUTPUT_BASE="${OUTPUT_BASE:-/scratch/memoozd/cb-scratch/data_all}"
 
 # LLMail retain mode: how LLMail benign data is sourced for training.
-#   "generated"  - use model-generated DR completions (default)
-#   "synthetic"  - use deterministic synthetic benign send-email traces
-#   "none"       - no LLMail retain data (LLMail used as CB set only)
+#   "generated"       - use model-generated DR completions (default)
+#   "synthetic"       - use deterministic synthetic benign send-email traces (50 golden)
+#   "contextualized"  - scenario-grounded retain traces with model inference (recommended)
+#   "none"            - no LLMail retain data (LLMail used as CB set only)
 # Variant recipes:
-#   LLMAIL_RETAIN_MODE=none      → all data + LLMail as CB set only
-#   LLMAIL_RETAIN_MODE=synthetic → all data + LLMail CB + synthetic retain
-#   LLMAIL_RETAIN_MODE=generated → all data + LLMail CB + model-generated retain (default)
+#   LLMAIL_RETAIN_MODE=none            → all data + LLMail as CB set only
+#   LLMAIL_RETAIN_MODE=synthetic       → all data + LLMail CB + 50 golden traces
+#   LLMAIL_RETAIN_MODE=generated       → all data + LLMail CB + model-generated retain (default)
+#   LLMAIL_RETAIN_MODE=contextualized  → all data + LLMail CB + scenario-grounded retain
 export LLMAIL_RETAIN_MODE="${LLMAIL_RETAIN_MODE:-generated}"
 
 # LLMail challenge-faithful defaults

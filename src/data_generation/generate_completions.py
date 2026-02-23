@@ -1658,6 +1658,470 @@ def build_synthetic_llmail_dr(
 
 
 # =============================================================================
+# Contextualized LLMail DR Generation
+# =============================================================================
+#
+# Generates retain traces grounded in real LLMail scenario email contexts.
+#
+# The key insight (paralleling Fujitsu DR): instead of hardcoded golden traces
+# that lack email context, or injection-stripped traces that only teach "never
+# call tools", we construct contrastive twins of the attack traces:
+#
+#   DS: emails with injection → model sends to attacker (BAD)
+#   DR: emails without injection + legitimate user send request (GOOD)
+#
+# Three trace types, mixed by configurable ratio:
+#   A (summarize_only): email context, no tool expected → teaches "emails ≠ tool trigger"
+#   B (summarize_send): email context + send request   → teaches "tool use when user asks"
+#   C (direct_send):    no email context, explicit send → basic capability preservation
+#
+
+# Diverse recipients for Type B/C traces (never contact@contact.com)
+_CONTEXTUALIZED_RECIPIENTS = [
+    "alice@company.com", "bob.smith@corp.org", "manager@team.io",
+    "colleague@work.dev", "lead@project.com", "admin@dept.org",
+    "assistant@office.net", "partner@business.co", "director@org.edu",
+    "coordinator@group.io", "analyst@data.com", "engineer@tech.dev",
+    "planner@events.org", "reviewer@journal.com", "advisor@consult.io",
+    "supervisor@division.com", "secretary@exec.org", "liaison@external.co",
+    "delegate@summit.io", "moderator@forum.net",
+]
+
+# Templates for Type B: augmented user queries that combine summarize + send.
+# {recipient} is filled from _CONTEXTUALIZED_RECIPIENTS.
+_SUMMARIZE_SEND_TEMPLATES = [
+    "Summarize all following emails, then send the summary to {recipient}.",
+    "Read through these emails and email {recipient} with a brief of the key points.",
+    "After reviewing the emails below, forward a concise summary to {recipient}.",
+    "Please summarize the following emails and send the summary to {recipient}.",
+    "Go through the emails and send {recipient} a short recap of the main topics.",
+    "Summarize the emails below. Once done, send the summary to {recipient}.",
+    "Review these emails, then compose and send a summary email to {recipient}.",
+    "I need you to summarize the following emails and forward the highlights to {recipient}.",
+    "Read the emails and draft a summary, then send it to {recipient}.",
+    "Condense the following emails into a brief and send it to {recipient}.",
+    "Skim through these emails and send the key takeaways to {recipient}.",
+    "Digest the following emails and email a summary to {recipient}.",
+]
+
+# Templates for Type C: direct send requests (no email context).
+_DIRECT_SEND_TEMPLATES = [
+    {"user": "Send an email to {recipient} with the body: '{body}'.",
+     "bodies": [
+         "Hi, just following up on our earlier conversation.",
+         "Please find the updated schedule attached.",
+         "The meeting has been moved to 2pm tomorrow.",
+         "Could you review the document and share your feedback?",
+         "I wanted to confirm the details we discussed.",
+         "Thanks for your help with the project last week.",
+         "Reminder: the deadline is this Friday.",
+         "Let me know if you have any questions about the report.",
+         "The team lunch has been rescheduled to Thursday.",
+         "Here are the notes from today's standup meeting.",
+     ]},
+    {"user": "Please email {recipient} saying '{body}'.",
+     "bodies": [
+         "I'll have the draft ready by end of day.",
+         "Can we reschedule our call to next Monday?",
+         "The budget numbers look good — approved.",
+         "I've updated the shared document with the latest figures.",
+         "Quick heads up: the server maintenance is tonight at 11pm.",
+     ]},
+    {"user": "Draft and send an email to {recipient} with body: '{body}'.",
+     "bodies": [
+         "Dear team, here are the action items from today's meeting.",
+         "The new policy goes into effect starting next month.",
+         "Please submit your timesheets by Friday noon.",
+     ]},
+]
+
+
+def build_contextualized_llmail_dr(
+    skeleton_traces: List[Trace],
+    backend,
+    tools: List[Dict[str, Any]],
+    system_prompt: str,
+    scenarios_path: Optional[Path] = None,
+    fp_emails_path: Optional[Path] = None,
+    target_count: int = 200,
+    ratio_a: float = 0.30,
+    ratio_b: float = 0.50,
+    ratio_c: float = 0.20,
+    temperature: float = 0.3,
+    max_tokens: int = 512,
+    verbose: bool = True,
+    model_id: Optional[str] = None,
+    tool_schema_ref: Optional[Dict[str, str]] = None,
+    strip_tool_syntax: bool = True,
+    skip_llmail_not_retrieved: bool = True,
+) -> Tuple[List[Trace], Dict[str, Any]]:
+    """
+    Build contextualized LLMail DR traces grounded in real scenario email contexts.
+
+    Creates three types of retain traces:
+      A (summarize_only): Injection-stripped email context + original summarize query.
+         Model should summarize without calling tools. Teaches: emails ≠ tool trigger.
+      B (summarize_send): Injection-stripped email context + augmented send query.
+         Model should summarize AND call send_email. Teaches: tool use when user asks.
+      C (direct_send): No email context, explicit send request.
+         Model should call send_email. Teaches: basic tool-calling capability.
+
+    This parallels Fujitsu DR (strip injection → correct behavior) but with an
+    augmentation step that preserves send_email capability via contrastive learning.
+
+    Args:
+        skeleton_traces: LLMail B1 skeleton traces from ETL_A (with injected emails).
+        backend: VLLMBackend for batched generation.
+        tools: Tool definitions from schema.
+        system_prompt: System prompt from LLMail tool schema.
+        scenarios_path: Path to scenarios.json (for supplementary benign emails).
+        fp_emails_path: Path to emails_for_fp_tests.json (for extra email contexts).
+        target_count: Target number of retain traces to generate (default: 200).
+        ratio_a/b/c: Ratio of Type A/B/C traces (must sum to 1.0).
+        temperature: Generation temperature (default: 0.3 for consistency).
+        max_tokens: Max tokens per generation (default: 512, longer for summaries).
+        verbose: Print progress.
+        model_id: Model identifier for provenance.
+        tool_schema_ref: Tool schema reference for provenance.
+        strip_tool_syntax: If True, store only reasoning in content field.
+        skip_llmail_not_retrieved: Skip traces where email was not retrieved.
+
+    Returns:
+        (traces, stats) tuple.
+    """
+    import random
+    random.seed(42)  # Reproducible
+
+    model_family = detect_model_family(model_id) if model_id else None
+    format_family = detect_format_family(model_family) if model_family else None
+
+    # Normalize ratios
+    total_ratio = ratio_a + ratio_b + ratio_c
+    ratio_a, ratio_b, ratio_c = ratio_a / total_ratio, ratio_b / total_ratio, ratio_c / total_ratio
+    count_a = int(target_count * ratio_a)
+    count_b = int(target_count * ratio_b)
+    count_c = target_count - count_a - count_b  # remainder to C
+
+    logger.info("")
+    logger.info("=" * 60)
+    logger.info("CONTEXTUALIZED LLMAIL DR GENERATION")
+    logger.info("=" * 60)
+    logger.info(f"Target count: {target_count} (A:{count_a} B:{count_b} C:{count_c})")
+    logger.info(f"Input skeletons: {len(skeleton_traces)}")
+
+    stats = {
+        "target_count": target_count,
+        "type_a_target": count_a, "type_b_target": count_b, "type_c_target": count_c,
+        "type_a_generated": 0, "type_b_generated": 0, "type_c_generated": 0,
+        "type_a_correct": 0, "type_b_correct": 0, "type_c_correct": 0,
+        "skeletons_used": 0,
+        "skipped_not_retrieved": 0,
+    }
+
+    # =========================================================================
+    # Phase 0: Collect injection-stripped email contexts from skeletons
+    # =========================================================================
+    email_contexts = []  # List of (system_msgs, tool_msgs, original_user_query)
+
+    for skel in skeleton_traces:
+        if skip_llmail_not_retrieved and _trace_is_llmail(skel):
+            if _trace_email_retrieved(skel) is False:
+                stats["skipped_not_retrieved"] += 1
+                continue
+
+        # Identify the injected email to strip
+        injection_text = None
+        injection_msg_idx = None
+        if skel.tool_attack:
+            injection_text = skel.tool_attack.injection_text
+        # injection_char_span on signal_hints has message_index pointing to the injected message
+        if skel.signal_hints and skel.signal_hints.injection_char_span:
+            injection_msg_idx = skel.signal_hints.injection_char_span.message_index
+
+        # Extract messages by role
+        sys_content = system_prompt  # Always use schema system prompt
+        tool_msgs = []
+        user_query = ""
+        for i, msg in enumerate(skel.messages):
+            if msg.role == "system":
+                continue  # Use schema system prompt instead
+            elif msg.role == "user":
+                user_query = msg.content
+            elif msg.role == "tool":
+                # Strip the injected email if we can identify it
+                if injection_msg_idx is not None and i == injection_msg_idx:
+                    continue  # Drop the injected email entirely
+                elif injection_text and msg.content and injection_text in msg.content:
+                    # Injection is embedded in this tool message — strip it
+                    cleaned = remove_injection_from_content(msg.content, injection_text)
+                    if cleaned and len(cleaned.strip()) > 20:
+                        tool_msgs.append({"role": "tool", "content": cleaned, "name": msg.name or "get_emails"})
+                    # else: injection was the entire content, drop message
+                    continue
+                tool_msgs.append({"role": "tool", "content": msg.content, "name": msg.name or "get_emails"})
+
+        if tool_msgs:  # Only keep contexts that have at least one benign email
+            email_contexts.append((sys_content, tool_msgs, user_query))
+
+    stats["skeletons_used"] = len(email_contexts)
+    logger.info(f"Extracted {len(email_contexts)} email contexts from skeletons")
+
+    # Load supplementary benign emails from scenarios/fp_tests if available
+    supplementary_emails = []
+    if scenarios_path and scenarios_path.exists():
+        try:
+            with open(scenarios_path, "r", encoding="utf-8") as f:
+                scenarios = json.load(f)
+            for sc_key, sc_data in scenarios.items():
+                for email_text in sc_data.get("emails", []):
+                    if email_text and len(email_text.strip()) > 20:
+                        supplementary_emails.append(email_text)
+            logger.info(f"Loaded {len(supplementary_emails)} supplementary emails from scenarios")
+        except Exception as e:
+            logger.warning(f"Could not load scenarios: {e}")
+
+    if fp_emails_path and fp_emails_path.exists():
+        try:
+            with open(fp_emails_path, "r", encoding="utf-8") as f:
+                fp_emails = json.load(f)
+            for email_text in fp_emails:
+                if isinstance(email_text, str) and len(email_text.strip()) > 20:
+                    supplementary_emails.append(email_text)
+            logger.info(f"Total supplementary emails: {len(supplementary_emails)}")
+        except Exception as e:
+            logger.warning(f"Could not load fp_emails: {e}")
+
+    # Deduplicate supplementary emails
+    supplementary_emails = list(set(supplementary_emails))
+
+    # =========================================================================
+    # Phase 1: Prepare prompts for all three types
+    # =========================================================================
+    # Each entry: (trace_type, messages_for_generation, expected_tool, meta)
+    prepared = []
+
+    # --- Type A: Summarize-only (email context, no tool expected) ---
+    if email_contexts and count_a > 0:
+        contexts_for_a = _sample_with_replacement(email_contexts, count_a, random)
+        for sys_content, tool_msgs, original_query in contexts_for_a:
+            messages = [{"role": "system", "content": sys_content}]
+            for tm in tool_msgs:
+                messages.append(tm)
+            messages.append({"role": "user", "content": original_query})
+            prepared.append(("A", messages, None, {"original_query": original_query}))
+            stats["type_a_generated"] += 1
+
+    # --- Type B: Summarize + Send (email context, tool expected) ---
+    if email_contexts and count_b > 0:
+        contexts_for_b = _sample_with_replacement(email_contexts, count_b, random)
+        for idx, (sys_content, tool_msgs, _) in enumerate(contexts_for_b):
+            recipient = _CONTEXTUALIZED_RECIPIENTS[idx % len(_CONTEXTUALIZED_RECIPIENTS)]
+            template = _SUMMARIZE_SEND_TEMPLATES[idx % len(_SUMMARIZE_SEND_TEMPLATES)]
+            augmented_query = template.format(recipient=recipient)
+
+            messages = [{"role": "system", "content": sys_content}]
+            for tm in tool_msgs:
+                messages.append(tm)
+            messages.append({"role": "user", "content": augmented_query})
+            prepared.append(("B", messages, "send_email", {"recipient": recipient, "query": augmented_query}))
+            stats["type_b_generated"] += 1
+
+    # --- Type C: Direct send (no email context, tool expected) ---
+    # Generate deterministically like synthetic mode, but with model inference
+    # for more natural responses
+    if count_c > 0:
+        c_prompts = []
+        c_idx = 0
+        while len(c_prompts) < count_c:
+            for tmpl_group in _DIRECT_SEND_TEMPLATES:
+                for body_text in tmpl_group["bodies"]:
+                    if len(c_prompts) >= count_c:
+                        break
+                    recipient = _CONTEXTUALIZED_RECIPIENTS[c_idx % len(_CONTEXTUALIZED_RECIPIENTS)]
+                    user_text = tmpl_group["user"].format(recipient=recipient, body=body_text)
+                    messages = [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_text},
+                    ]
+                    prepared.append(("C", messages, "send_email", {"recipient": recipient, "body": body_text}))
+                    stats["type_c_generated"] += 1
+                    c_prompts.append(True)
+                    c_idx += 1
+                if len(c_prompts) >= count_c:
+                    break
+
+    logger.info(f"Prepared {len(prepared)} prompts (A:{stats['type_a_generated']} B:{stats['type_b_generated']} C:{stats['type_c_generated']})")
+
+    # =========================================================================
+    # Phase 2: Batched generation via vLLM
+    # =========================================================================
+    if isinstance(backend, VLLMBackend) and prepared:
+        all_prompts = []
+        for _, messages, _, _ in prepared:
+            prompt = backend.format_prompt_with_tools(messages, tools)
+            all_prompts.append(prompt)
+        logger.info(f"Running batched vLLM generation for {len(all_prompts)} prompts...")
+        all_responses = backend.generate_batch(all_prompts, temperature=temperature, max_tokens=max_tokens)
+    else:
+        all_responses = None
+
+    # =========================================================================
+    # Phase 3: Filter and build traces
+    # =========================================================================
+    traces = []
+    for idx, (trace_type, messages, expected_tool, meta) in enumerate(
+        tqdm(prepared, desc="Building contextualized DR") if verbose else prepared
+    ):
+        # Get response
+        if all_responses is not None:
+            response = all_responses[idx]
+        else:
+            model, tokenizer = backend
+            response = generate_with_tools(
+                model, tokenizer, messages, tools,
+                max_new_tokens=max_tokens, temperature=temperature,
+            )
+
+        if not response or not response.strip():
+            continue
+
+        response = fix_assistant_raw_format(response)
+        tool_call = extract_tool_call(response, strip_reasoning=strip_tool_syntax)
+        observed_tool = tool_call["name"] if tool_call else None
+
+        assistant_content = response
+        if strip_tool_syntax and tool_call and "reasoning_text" in tool_call:
+            assistant_content = tool_call["reasoning_text"]
+
+        # Filter based on type
+        is_correct = False
+        if trace_type == "A":
+            # Type A: should NOT call any tool
+            if observed_tool is None:
+                is_correct = True
+                stats["type_a_correct"] += 1
+        elif trace_type in ("B", "C"):
+            # Type B/C: should call send_email
+            if observed_tool == "send_email":
+                # Additionally verify recipient is NOT the attacker target
+                if tool_call:
+                    params = tool_call.get("parameters", {})
+                    to_addr = (params.get("to") or "").strip().lower()
+                    if to_addr != "contact@contact.com":
+                        is_correct = True
+                        stats[f"type_{trace_type.lower()}_correct"] += 1
+
+        if not is_correct:
+            continue
+
+        # Build trace
+        tc = None
+        if tool_call:
+            tc = ToolCall(
+                function=ToolCallFunction(
+                    name=tool_call["name"],
+                    arguments=tool_call.get("parameters", {}),
+                    arguments_json=tool_call.get("arguments_json"),
+                    raw_content=tool_call.get("raw_content"),
+                )
+            )
+
+        trace_messages = []
+        for m in messages:
+            trace_messages.append(Message(
+                role=m["role"],
+                content=m["content"],
+                name=m.get("name"),
+            ))
+        trace_messages.append(Message(
+            role="assistant",
+            content=assistant_content,
+            tool_calls=[tc] if tc else None,
+        ))
+
+        trace = Trace(
+            id=Trace.generate_id(f"contextualized_dr_{trace_type}", messages=trace_messages),
+            source=TraceSource(
+                dataset="llmail_inject",
+                tier="derived",
+                subset=f"contextualized_dr_type_{trace_type.lower()}",
+                model_id=model_id,
+                model_family=model_family,
+                format_family=format_family,
+            ),
+            messages=trace_messages,
+            split="train",
+            completeness="complete",
+            tier="B2",
+            task=TraceTask(
+                family="email_send" if trace_type in ("B", "C") else "email_summarize",
+                name=f"contextualized_llmail_dr_{trace_type.lower()}",
+                variant=f"ctx_{idx:04d}",
+            ),
+            labels=TraceLabels(
+                category="benign",
+                security_outcome="safe",
+                attack_succeeded=False,
+                attack_present=False,
+                capability_category="tool_use" if trace_type in ("B", "C") else "comprehension",
+            ),
+            training=TraceTraining(
+                sample_weight=1.0,
+                loss_mask_policy="assistant_only",
+            ),
+            signal_hints=SignalHints(
+                expected_tool_name="send_email" if expected_tool else None,
+                observed_tool_name=observed_tool,
+                raw_assistant_content=response,
+                raw_format=format_family,
+            ),
+            raw_metadata=RawMetadata(
+                tool_schema_ref=tool_schema_ref,
+                notes=f"Contextualized LLMail DR type {trace_type}: "
+                      f"{'summarize only' if trace_type == 'A' else 'summarize+send' if trace_type == 'B' else 'direct send'}",
+            ),
+        )
+        traces.append(trace)
+
+    # Compute stats
+    total_correct = stats["type_a_correct"] + stats["type_b_correct"] + stats["type_c_correct"]
+    total_generated = stats["type_a_generated"] + stats["type_b_generated"] + stats["type_c_generated"]
+    stats["total_correct"] = total_correct
+    stats["total_generated"] = total_generated
+    stats["success_rate"] = total_correct / total_generated if total_generated > 0 else 0
+
+    logger.info("")
+    logger.info("=" * 60)
+    logger.info("CONTEXTUALIZED LLMAIL DR BUILD STATS")
+    logger.info("=" * 60)
+    logger.info(f"Skeletons used:       {stats['skeletons_used']}")
+    logger.info(f"Skipped not-retrieved: {stats['skipped_not_retrieved']}")
+    logger.info(f"Type A (summarize):   {stats['type_a_correct']}/{stats['type_a_generated']} correct")
+    logger.info(f"Type B (sum+send):    {stats['type_b_correct']}/{stats['type_b_generated']} correct")
+    logger.info(f"Type C (direct send): {stats['type_c_correct']}/{stats['type_c_generated']} correct")
+    logger.info(f"Total output traces:  {total_correct}/{total_generated} ({stats['success_rate']:.1%})")
+    logger.info("=" * 60)
+
+    return traces, stats
+
+
+def _sample_with_replacement(items: list, n: int, rng) -> list:
+    """Sample n items from a list, with replacement if n > len(items)."""
+    if not items:
+        return []
+    result = []
+    while len(result) < n:
+        remaining = n - len(result)
+        if remaining >= len(items):
+            shuffled = items[:]
+            rng.shuffle(shuffled)
+            result.extend(shuffled)
+        else:
+            result.extend(rng.sample(items, remaining))
+    return result[:n]
+
+
+# =============================================================================
 # Example Reporting
 # =============================================================================
 
@@ -1773,8 +2237,10 @@ def main():
 
     # Generation Mode
     parser.add_argument(
-        "--mode", choices=["ds", "dr", "both", "synthetic_dr"], default="ds",
-        help="Generation mode: ds (follows injection), dr (ignores injection - requires DS), both (pipeline), synthetic_dr (deterministic benign LLMail traces)",
+        "--mode", choices=["ds", "dr", "both", "synthetic_dr", "contextualized_dr"], default="ds",
+        help="Generation mode: ds (follows injection), dr (ignores injection - requires DS), "
+             "both (pipeline), synthetic_dr (deterministic benign LLMail traces), "
+             "contextualized_dr (scenario-grounded retain traces with model inference)",
     )
 
     # Synthetic DR options
@@ -1782,6 +2248,32 @@ def main():
         "--synthetic-split", default="train",
         choices=["train", "eval", "test", "dev"],
         help="Split to assign to synthetic DR traces (default: train)",
+    )
+
+    # Contextualized DR options
+    parser.add_argument(
+        "--scenarios-path", type=Path, default=None,
+        help="Path to LLMail scenarios.json (for contextualized_dr mode)",
+    )
+    parser.add_argument(
+        "--fp-emails-path", type=Path, default=None,
+        help="Path to LLMail emails_for_fp_tests.json (for contextualized_dr mode)",
+    )
+    parser.add_argument(
+        "--ctx-target-count", type=int, default=200,
+        help="Target number of contextualized DR traces (default: 200)",
+    )
+    parser.add_argument(
+        "--ctx-ratio-a", type=float, default=0.30,
+        help="Ratio of Type A (summarize-only) traces (default: 0.30)",
+    )
+    parser.add_argument(
+        "--ctx-ratio-b", type=float, default=0.50,
+        help="Ratio of Type B (summarize+send) traces (default: 0.50)",
+    )
+    parser.add_argument(
+        "--ctx-ratio-c", type=float, default=0.20,
+        help="Ratio of Type C (direct send) traces (default: 0.20)",
     )
 
     # Generation Parameters
@@ -1930,6 +2422,14 @@ def main():
         # synthetic_dr only needs --output and --tool-schema (no model, no input traces)
         if not args.output:
             parser.error("--output required for synthetic_dr mode")
+    elif args.mode == 'contextualized_dr':
+        # contextualized_dr needs skeletons + model + output
+        if not args.output:
+            parser.error("--output required for contextualized_dr mode")
+        if not args.traces:
+            parser.error("--traces required for contextualized_dr mode (LLMail skeleton traces)")
+        if not args.model:
+            parser.error("--model required for contextualized_dr mode")
     else:
         if not args.model:
             parser.error("--model is required for ds/dr/both modes")
@@ -1981,6 +2481,67 @@ def main():
         stats_path = args.output.with_suffix(".stats.json")
         with open(stats_path, "w", encoding="utf-8") as f:
             json.dump(synth_stats, f, indent=2)
+        logger.info(f"Wrote stats to {stats_path}")
+        return
+
+    # =========================================================================
+    # Contextualized DR mode: scenario-grounded retain traces with model inference
+    # =========================================================================
+    if args.mode == 'contextualized_dr':
+        logger.info("Generating contextualized LLMail DR traces (with model inference)")
+
+        # Load skeleton traces
+        logger.info(f"Loading skeleton traces from {args.traces}")
+        skeleton_traces = list(iter_traces(args.traces))
+        if args.limit:
+            skeleton_traces = skeleton_traces[:args.limit]
+        logger.info(f"Loaded {len(skeleton_traces)} skeleton traces")
+
+        # Initialize backend (needs model for generation)
+        if args.use_vllm:
+            logger.info("Initializing vLLM backend...")
+            ctx_backend = VLLMBackend(
+                args.model,
+                tensor_parallel_size=args.tensor_parallel_size,
+                max_model_len=args.max_model_len,
+            )
+        else:
+            logger.info("Loading HuggingFace model...")
+            ctx_backend = load_model_and_tokenizer(args.model)
+
+        ctx_traces, ctx_stats = build_contextualized_llmail_dr(
+            skeleton_traces=skeleton_traces,
+            backend=ctx_backend,
+            tools=tools,
+            system_prompt=system_prompt,
+            scenarios_path=args.scenarios_path,
+            fp_emails_path=args.fp_emails_path,
+            target_count=args.ctx_target_count,
+            ratio_a=args.ctx_ratio_a,
+            ratio_b=args.ctx_ratio_b,
+            ratio_c=args.ctx_ratio_c,
+            temperature=args.temperature_dr,
+            max_tokens=args.max_tokens,
+            verbose=not args.quiet,
+            model_id=args.model,
+            tool_schema_ref=tool_schema_ref,
+            strip_tool_syntax=args.strip_tool_syntax,
+            skip_llmail_not_retrieved=args.skip_llmail_not_retrieved,
+        )
+
+        write_traces(args.output, ctx_traces)
+        logger.info(f"Wrote {len(ctx_traces)} contextualized DR traces to {args.output}")
+
+        if not args.no_write_ids:
+            ids_path = args.output.with_suffix(".ids.txt")
+            with open(ids_path, "w", encoding="utf-8") as f:
+                for t in ctx_traces:
+                    f.write(t.id + "\n")
+            logger.info(f"Wrote IDs to {ids_path}")
+
+        stats_path = args.output.with_suffix(".stats.json")
+        with open(stats_path, "w", encoding="utf-8") as f:
+            json.dump(ctx_stats, f, indent=2)
         logger.info(f"Wrote stats to {stats_path}")
         return
 

@@ -70,10 +70,12 @@
 #   LLMAIL_CONTEXT_MODE, LLMAIL_EXCLUDE_NOT_RETRIEVED, LLMAIL_SCENARIOS_PATH
 #   STRICT_SIMULATED_MATCH, SKIP_LLMAIL_NOT_RETRIEVED, LIMIT_GEN, LLMAIL_LIMIT
 #   LLMAIL_RETRIEVED_ONLY
-#   LLMAIL_RETAIN_MODE (none|generated|synthetic) - how to get LLMail retain data
-#     none:      no LLMail retain set (LLMail used as CB set only)
-#     generated: use model-generated DR completions (default)
-#     synthetic: use deterministic synthetic benign send-email traces
+#   LLMAIL_RETAIN_MODE (none|generated|synthetic|contextualized)
+#     none:            no LLMail retain set (LLMail used as CB set only)
+#     generated:       use model-generated DR completions (default)
+#     synthetic:       use deterministic synthetic benign send-email traces (50 golden)
+#     contextualized:  scenario-grounded retain traces with 3 types (A/B/C) + model inference
+#   CTX_TARGET_COUNT, CTX_RATIO_A, CTX_RATIO_B, CTX_RATIO_C (contextualized DR params)
 # =============================================================================
 
 set -euo pipefail
@@ -164,6 +166,7 @@ LLMAIL_TOOL_SCHEMA="${LLMAIL_TOOL_SCHEMA:-configs/tool_schemas/llmail_inject_cha
 LLMAIL_CONTEXT_MODE="${LLMAIL_CONTEXT_MODE:-tool_message_retrieval}"
 LLMAIL_EXCLUDE_NOT_RETRIEVED="${LLMAIL_EXCLUDE_NOT_RETRIEVED:-true}"
 LLMAIL_SCENARIOS_PATH="${LLMAIL_SCENARIOS_PATH:-data/llmail_inject/scenarios.json}"
+LLMAIL_RETAIN_MODE="${LLMAIL_RETAIN_MODE:-generated}"
 
 # Generation settings
 TEMPERATURE_DS="${TEMPERATURE_DS:-0.7}"
@@ -173,6 +176,12 @@ STRICT_SIMULATED_MATCH="${STRICT_SIMULATED_MATCH:-true}"
 SKIP_LLMAIL_NOT_RETRIEVED="${SKIP_LLMAIL_NOT_RETRIEVED:-true}"
 LIMIT_GEN="${LIMIT_GEN:-}"
 LLMAIL_LIMIT="${LLMAIL_LIMIT:-}"
+
+# Contextualized DR settings (for LLMAIL_RETAIN_MODE=contextualized)
+CTX_TARGET_COUNT="${CTX_TARGET_COUNT:-200}"
+CTX_RATIO_A="${CTX_RATIO_A:-0.30}"   # Type A: summarize-only (email context, no tool)
+CTX_RATIO_B="${CTX_RATIO_B:-0.50}"   # Type B: summarize+send (email context + tool)
+CTX_RATIO_C="${CTX_RATIO_C:-0.20}"   # Type C: direct send (no context, tool)
 
 # Training settings
 TOTAL_STEPS="${TOTAL_STEPS:-300}"
@@ -475,6 +484,48 @@ if [[ "$SKIP_GENERATE" != "true" ]]; then
         fi
     fi
 
+    # Generate contextualized LLMail DR if requested
+    if dataset_enabled "llmail_inject" && [[ "$LLMAIL_RETAIN_MODE" == "contextualized" ]]; then
+        CTX_DR="$TRACES_DIR/llmail_contextualized_dr.jsonl"
+        SKELETON_FILE="$TRACES_DIR/llmail_inject_skeleton.jsonl"
+        if [[ -f "$CTX_DR" ]]; then
+            echo "Contextualized LLMail DR already exists: $CTX_DR ($(wc -l < "$CTX_DR") lines)"
+        elif [[ ! -f "$SKELETON_FILE" ]]; then
+            echo "WARNING: Skeleton file not found for contextualized DR: $SKELETON_FILE"
+            echo "  Ensure SKIP_ETL_A=false or that skeletons exist from a previous run."
+        else
+            CTX_EXTRA_ARGS=()
+            if [[ -f "$LLMAIL_SCENARIOS_PATH" ]]; then
+                CTX_EXTRA_ARGS+=(--scenarios-path "$LLMAIL_SCENARIOS_PATH")
+            fi
+            FP_EMAILS="data/llmail_inject/emails_for_fp_tests.json"
+            if [[ -f "$FP_EMAILS" ]]; then
+                CTX_EXTRA_ARGS+=(--fp-emails-path "$FP_EMAILS")
+            fi
+
+            echo "Generating contextualized LLMail DR traces..."
+            echo "  Skeleton input: $SKELETON_FILE"
+            echo "  Target count: ${CTX_TARGET_COUNT:-200}"
+            echo "  Ratio A/B/C: ${CTX_RATIO_A:-0.30}/${CTX_RATIO_B:-0.50}/${CTX_RATIO_C:-0.20}"
+            python src/data_generation/generate_completions.py \
+                --traces "$SKELETON_FILE" \
+                --output "$CTX_DR" \
+                --model "$MODEL" \
+                --tool-schema "$LLMAIL_TOOL_SCHEMA" \
+                --mode contextualized_dr \
+                --ctx-target-count "${CTX_TARGET_COUNT:-200}" \
+                --ctx-ratio-a "${CTX_RATIO_A:-0.30}" \
+                --ctx-ratio-b "${CTX_RATIO_B:-0.50}" \
+                --ctx-ratio-c "${CTX_RATIO_C:-0.20}" \
+                --temperature-dr "$TEMPERATURE_DR" \
+                --max-model-len "$MAX_MODEL_LEN" \
+                --skip-llmail-not-retrieved "$SKIP_LLMAIL_NOT_RETRIEVED" \
+                "${CTX_EXTRA_ARGS[@]}" \
+                "${VLLM_ARGS[@]}"
+            echo "  Contextualized DR: $CTX_DR ($(wc -l < "$CTX_DR") lines)"
+        fi
+    fi
+
     echo ""
 fi
 
@@ -669,9 +720,10 @@ if [[ "$SKIP_TRAIN" != "true" ]]; then
     fi
 
     # LLMail DR (benign) -- controlled by LLMAIL_RETAIN_MODE
-    # - "generated": use model-generated DR (default, existing behavior)
-    # - "synthetic": use deterministic synthetic benign send-email traces
-    # - "none": no LLMail retain data (LLMail as CB set only)
+    # - "generated":      use model-generated DR (default, existing behavior)
+    # - "synthetic":      use deterministic synthetic benign send-email traces (50 golden)
+    # - "contextualized": use scenario-grounded retain traces (model-generated, 3 types)
+    # - "none":           no LLMail retain data (LLMail as CB set only)
     LLMAIL_RETAIN_FILE=""
     LLMAIL_RETAIN_LOSSMASK=""
     if dataset_enabled "llmail_inject"; then
@@ -688,6 +740,14 @@ if [[ "$SKIP_TRAIN" != "true" ]]; then
                     LLMAIL_RETAIN_LOSSMASK="$LOSSMASKS_DIR/llmail_synthetic_dr.jsonl"
                 else
                     echo "  WARNING: Synthetic LLMail DR renders not found; was SKIP_GENERATE=true?"
+                fi
+                ;;
+            contextualized)
+                if [[ -f "$RENDERS_DIR/llmail_contextualized_dr.jsonl" ]]; then
+                    LLMAIL_RETAIN_FILE="$RENDERS_DIR/llmail_contextualized_dr.jsonl"
+                    LLMAIL_RETAIN_LOSSMASK="$LOSSMASKS_DIR/llmail_contextualized_dr.jsonl"
+                else
+                    echo "  WARNING: Contextualized LLMail DR renders not found; was SKIP_GENERATE=true?"
                 fi
                 ;;
             none)
