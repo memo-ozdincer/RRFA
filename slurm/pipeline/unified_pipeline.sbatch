@@ -881,6 +881,54 @@ if [[ "$SKIP_EVAL" != "true" ]]; then
 
             echo ""
             echo "Evaluation results: $EVAL_OUTPUT"
+
+            # ---------------------------------------------------------------
+            # Create visualizer-compatible run directory
+            # ---------------------------------------------------------------
+            # The visualizer (scripts/visualize_sweep_results.py) expects:
+            #   <run_dir>/eval/fujitsu_eval.json
+            #   <run_dir>/eval/llmail_eval.json
+            #   <run_dir>/eval/agentdojo_eval.json
+            #   (plus .paired_outputs.jsonl siblings)
+            # We create a single-run directory that mimics this structure.
+            VIS_RUN_DIR="$OUTPUT_BASE/run_${RUN_ID}"
+            VIS_EVAL_DIR="$VIS_RUN_DIR/eval"
+            mkdir -p "$VIS_EVAL_DIR"
+
+            # Link/copy eval files into visualizer layout
+            if [[ -f "$EVAL_OUTPUT" ]]; then
+                cp "$EVAL_OUTPUT" "$VIS_EVAL_DIR/fujitsu_eval.json" 2>/dev/null || true
+                PAIRED="${EVAL_OUTPUT%.json}.paired_outputs.jsonl"
+                [[ -f "$PAIRED" ]] && cp "$PAIRED" "$VIS_EVAL_DIR/fujitsu_eval.paired_outputs.jsonl" 2>/dev/null || true
+            fi
+            if [[ -f "${LLMAIL_EVAL:-}" ]]; then
+                cp "$LLMAIL_EVAL" "$VIS_EVAL_DIR/llmail_eval.json" 2>/dev/null || true
+                PAIRED="${LLMAIL_EVAL%.json}.paired_outputs.jsonl"
+                [[ -f "$PAIRED" ]] && cp "$PAIRED" "$VIS_EVAL_DIR/llmail_eval.paired_outputs.jsonl" 2>/dev/null || true
+            fi
+            if [[ -f "${AGENTDOJO_EVAL:-}" ]]; then
+                cp "$AGENTDOJO_EVAL" "$VIS_EVAL_DIR/agentdojo_eval.json" 2>/dev/null || true
+                PAIRED="${AGENTDOJO_EVAL%.json}.paired_outputs.jsonl"
+                [[ -f "$PAIRED" ]] && cp "$PAIRED" "$VIS_EVAL_DIR/agentdojo_eval.paired_outputs.jsonl" 2>/dev/null || true
+            fi
+
+            # Write run metadata for the visualizer
+            cat > "$VIS_RUN_DIR/run_info.json" <<RUNEOF
+{
+    "run_id": "$RUN_ID",
+    "model": "$MODEL",
+    "adapter_path": "$ADAPTER_PATH",
+    "datasets": "$DATASETS",
+    "llmail_retain_mode": "${LLMAIL_RETAIN_MODE:-N/A}",
+    "traces_dir": "$TRACES_DIR",
+    "output_base": "$OUTPUT_BASE",
+    "timestamp": "$(date -Iseconds)"
+}
+RUNEOF
+
+            echo ""
+            echo "Visualizer-compatible run directory: $VIS_RUN_DIR"
+            echo "  Usage: python scripts/visualize_sweep_results.py $VIS_RUN_DIR"
         fi
     fi
 fi
@@ -899,5 +947,11 @@ echo "  Renders: $RENDERS_DIR"
 echo "  Lossmasks: $LOSSMASKS_DIR"
 echo "  Models: $MODELS_DIR"
 echo "  Eval: $EVAL_DIR"
+if [[ -n "${VIS_RUN_DIR:-}" ]]; then
+echo "  Visualizer: $VIS_RUN_DIR"
+echo ""
+echo "To visualize results:"
+echo "  python scripts/visualize_sweep_results.py $VIS_RUN_DIR"
+fi
 echo ""
 echo "Finished at: $(date)"

@@ -702,7 +702,11 @@ def analyze_run(
             dataset_traces["llmail"] = load_jsonl(llmail_traces_path)
         
         # Load AgentDojo traces from split directory
+        # Sweep layout: run_dir/agentdojo_split/
+        # Unified layout: OUTPUT_BASE/split/agentdojo/ (traces_dir sibling)
         agentdojo_split = run_dir / "agentdojo_split" / "agentdojo_traces_harmful.jsonl"
+        if not agentdojo_split.exists():
+            agentdojo_split = traces_dir.parent / "split" / "agentdojo" / "agentdojo_traces_cb.jsonl"
         if agentdojo_split.exists():
             dataset_traces["agentdojo"] = load_jsonl(agentdojo_split)
     
@@ -782,12 +786,26 @@ def analyze_run(
         llmail_filtered_out = eval_data.get("llmail_filtered_out_not_retrieved")
 
         if baseline_la:
+            # New metrics from eval improvements
+            cb_cap = eval_data.get("cb_model", {}).get("llmail_capability", {})
+            diag = eval_data.get("diagnostics", {})
+            stage1 = eval_data.get("stage1_gates", {})
+
             results["llmail"] = {
                 "baseline_asr": baseline_la.get("attack_success_rate", 0) * 100,
                 "cb_asr": cb_la.get("attack_success_rate", 0) * 100,
                 "delta": delta.get("llmail_attack_asr", 0) * 100,
                 "refusal_rate": cb_la.get("refusal_rate", 0) * 100,
                 "usefulness": cb_lu.get("usefulness_rate", 0) * 100,
+                "capability_retention": cb_cap.get("capability_retention", None),
+                "no_tool_rate": cb_cap.get("no_tool_rate", None),
+                "json_parse_failure_rate": cb_cap.get("json_parse_failure_rate", None),
+                "target_accuracy_rate": cb_la.get("target_accuracy_rate", None),
+                "partial_neutralization_rate": cb_la.get("partial_neutralization_rate", None),
+                "tools_broken": diag.get("tools_broken"),
+                "llmail_tools_broken": diag.get("llmail_tools_broken"),
+                "stage1_gates": stage1,
+                "stage1_passed": eval_data.get("stage1_passed"),
                 "total": len(paired),
                 "retrieved_only": llmail_retrieved_only,
                 "filtered_not_retrieved": llmail_filtered_out,
@@ -919,27 +937,28 @@ def print_summary_table(runs: List[Dict[str, Any]], use_color: bool = True) -> N
     # Header
     header = (
         f"{'Run Name':<35} {'Hparams':<18} {'Lossmask':<28} "
-        f"{'Base ASR':<10} {'CB ASR':<8} {'Reduct':<10} {'AgentDojo':<10} {'LLMail':<10}"
+        f"{'Base ASR':<10} {'CB ASR':<8} {'Reduct':<10} {'AgentDojo':<10} "
+        f"{'LLMail':<10} {'LL Cap':<8} {'LL TgtAcc':<10}"
     )
     print(f"{BOLD}{header}{RESET}")
-    print(f"{'-'*150}")
-    
+    print(f"{'-'*170}")
+
     for run in runs:
         run_name = run.get("run_name", "?")
         hparams = run.get("hparams") or {}
         lossmask = run.get("lossmask") or "N/A"
         hparams_str = ",".join(f"{k}{v}" for k, v in sorted(hparams.items())) or "N/A"
-        
+
         fujitsu = run.get("fujitsu", {})
         if fujitsu:
             base_asr = fujitsu.get("baseline_asr", 0)
             cb_asr = fujitsu.get("cb_asr", 0)
             reduction = base_asr - cb_asr
-            
+
             base_str = f"{base_asr:.1f}%"
             cb_str = f"{cb_asr:.1f}%"
             red_str = f"{reduction:.1f}pp"
-            
+
             # Color code based on reduction
             if reduction > 50:
                 red_str = f"{GREEN}{red_str}{RESET}"
@@ -947,14 +966,14 @@ def print_summary_table(runs: List[Dict[str, Any]], use_color: bool = True) -> N
                 red_str = f"{RED}{red_str}{RESET}"
         else:
             base_str = cb_str = red_str = "N/A"
-        
+
         agentdojo = run.get("agentdojo", {})
         if agentdojo:
             diff_rate = agentdojo.get("diff_rate", 0)
             agent_str = f"{diff_rate:.1f}%"
         else:
             agent_str = "N/A"
-            
+
         llmail = run.get("llmail", {})
         if llmail:
             llmail_base = llmail.get("baseline_asr", 0)
@@ -963,12 +982,23 @@ def print_summary_table(runs: List[Dict[str, Any]], use_color: bool = True) -> N
             llmail_str = f"{llmail_cb:.1f}%"
             if llmail_red > 50:
                 llmail_str = f"{GREEN}{llmail_str}{RESET}"
+
+            cap = llmail.get("capability_retention")
+            cap_str = f"{cap*100:.0f}%" if isinstance(cap, (int, float)) else "N/A"
+            if isinstance(cap, (int, float)) and cap < 0.30:
+                cap_str = f"{RED}{cap_str}{RESET}"
+
+            ta = llmail.get("target_accuracy_rate")
+            ta_str = f"{ta*100:.0f}%" if isinstance(ta, (int, float)) else "N/A"
         else:
             llmail_str = "N/A"
-        
+            cap_str = "N/A"
+            ta_str = "N/A"
+
         print(
             f"{run_name:<35} {hparams_str:<18} {lossmask:<28} "
-            f"{base_str:<10} {cb_str:<8} {red_str:<10} {agent_str:<10} {llmail_str:<10}"
+            f"{base_str:<10} {cb_str:<8} {red_str:<10} {agent_str:<10} "
+            f"{llmail_str:<10} {cap_str:<8} {ta_str:<10}"
         )
 
 
@@ -1010,6 +1040,33 @@ def print_best_runs(
                 print(f"   LLMail Usefulness: {metric.get('usefulness', 0):.1f}%")
             if metric.get("refusal_rate") is not None:
                 print(f"   LLMail Refusal Rate: {metric.get('refusal_rate', 0):.1f}%")
+            if metric.get("capability_retention") is not None:
+                cap = metric["capability_retention"]
+                cap_str = f"{cap*100:.1f}%" if isinstance(cap, (int, float)) else str(cap)
+                print(f"   LLMail Capability Retention: {cap_str}")
+            if metric.get("target_accuracy_rate") is not None:
+                ta = metric["target_accuracy_rate"]
+                ta_str = f"{ta*100:.1f}%" if isinstance(ta, (int, float)) else str(ta)
+                print(f"   LLMail Target Accuracy: {ta_str}")
+            if metric.get("partial_neutralization_rate") is not None and metric.get("partial_neutralization_rate", 0) > 0:
+                pn = metric["partial_neutralization_rate"]
+                pn_str = f"{pn*100:.1f}%" if isinstance(pn, (int, float)) else str(pn)
+                print(f"   LLMail Partial Neutralization: {pn_str}")
+            if metric.get("json_parse_failure_rate") is not None and metric.get("json_parse_failure_rate", 0) > 0:
+                jpf = metric["json_parse_failure_rate"]
+                jpf_str = f"{jpf*100:.1f}%" if isinstance(jpf, (int, float)) else str(jpf)
+                print(f"   LLMail JSON Parse Failures: {jpf_str}")
+            if metric.get("tools_broken"):
+                print(f"   ** TOOLS BROKEN **")
+            if metric.get("llmail_tools_broken"):
+                print(f"   ** LLMAIL TOOLS BROKEN **")
+            if metric.get("stage1_passed") is not None:
+                status = "PASSED" if metric["stage1_passed"] else "FAILED"
+                print(f"   Stage-1 Gates: {status}")
+                gates = metric.get("stage1_gates", {})
+                for gate, passed in gates.items():
+                    g_status = "PASS" if passed else "FAIL"
+                    print(f"     {g_status} {gate}")
             if metric.get("retrieved_only") is not None:
                 print(f"   Retrieved-only filter: {metric.get('retrieved_only')} "
                       f"(filtered_not_retrieved={metric.get('filtered_not_retrieved', 'N/A')})")
@@ -1076,14 +1133,32 @@ def plot_metrics(runs: List[Dict[str, Any]]) -> None:
     for run in sorted_runs:
         llmail = run.get("llmail", {})
         if not llmail: continue
-        
+
         asr = llmail.get("cb_asr", 0)
         alpha = run.get("hparams", {}).get("a", "?")
         layers = run.get("lossmask", "?")
-        
+
         bar_len = int((asr / 100.0) * 40)
         bar = "█" * bar_len
         print(f"  a={alpha:<4} {layers:<20}: {bar} {asr:.1f}%")
+
+    # 4. LLMail Capability Retention (higher is better)
+    has_cap = any(run.get("llmail", {}).get("capability_retention") is not None for run in sorted_runs)
+    if has_cap:
+        print("\n4. LLMail Capability Retention (higher is better):")
+        for run in sorted_runs:
+            llmail = run.get("llmail", {})
+            cap = llmail.get("capability_retention")
+            if cap is None: continue
+
+            alpha = run.get("hparams", {}).get("a", "?")
+            layers = run.get("lossmask", "?")
+            cap_pct = cap * 100 if isinstance(cap, (int, float)) else 0
+
+            bar_len = int((cap_pct / 100.0) * 40)
+            bar = "█" * bar_len
+            marker = " ← BROKEN" if cap_pct < 30 else ""
+            print(f"  a={alpha:<4} {layers:<20}: {bar} {cap_pct:.1f}%{marker}")
 
 
 def compare_samples(
@@ -1316,11 +1391,19 @@ Examples:
     # Try to find traces directory
     traces_dir = args.traces_dir
     if traces_dir is None:
-        # Try common locations
+        # Try common locations (including unified pipeline layout)
         possible_traces = [
             Path("/scratch/memoozd/cb-scratch/data/traces"),
             args.sweep_dir.parent.parent / "data" / "traces",
+            args.sweep_dir.parent / "traces",   # unified pipeline: OUTPUT_BASE/traces
+            args.sweep_dir / "traces",           # if sweep_dir IS OUTPUT_BASE
         ]
+        # Also check run_info.json for the traces_dir hint
+        run_info_path = args.sweep_dir / "run_info.json"
+        if run_info_path.exists():
+            run_info = load_json(run_info_path)
+            if run_info.get("traces_dir"):
+                possible_traces.insert(0, Path(run_info["traces_dir"]))
         for p in possible_traces:
             if p.exists():
                 traces_dir = p
@@ -1328,16 +1411,32 @@ Examples:
                 break
     
     # Find run directories
+    # Mode 1: sweep directory with a* subdirs (from sweep_hparams.sbatch)
+    # Mode 2: single run directory with eval/ inside (from unified_pipeline.sbatch)
+    # Mode 3: directory containing run_* subdirs (from unified_pipeline.sbatch)
     run_dirs = sorted([
         d for d in args.sweep_dir.iterdir()
         if d.is_dir() and d.name.startswith("a")  # Run dirs start with alpha param
     ])
-    
+
     if not run_dirs:
-        print("No run directories found in sweep directory.")
-        sys.exit(1)
-    
-    print(f"Found {len(run_dirs)} runs")
+        # Check for run_* subdirs (unified pipeline with multiple runs)
+        run_dirs = sorted([
+            d for d in args.sweep_dir.iterdir()
+            if d.is_dir() and d.name.startswith("run_")
+        ])
+
+    if not run_dirs:
+        # Check if this is itself a single run directory (has eval/ subdir)
+        eval_subdir = args.sweep_dir / "eval"
+        if eval_subdir.is_dir():
+            run_dirs = [args.sweep_dir]
+        else:
+            print("No run directories found in sweep directory.")
+            print("Expected: a* subdirs (sweep), run_* subdirs (unified), or eval/ subdir (single run)")
+            sys.exit(1)
+
+    print(f"Found {len(run_dirs)} run(s)")
     
     # Filter to specific run if requested
     if args.run:
@@ -1367,7 +1466,23 @@ Examples:
     
     # Print summary
     print_summary_table(all_results, use_color)
-    best_metric_dataset = "llmail" if args.only_dataset == "llmail" else "fujitsu"
+
+    # Auto-detect best metric dataset: prefer fujitsu, fall back to llmail
+    if args.only_dataset == "llmail":
+        best_metric_dataset = "llmail"
+    elif args.only_dataset != "all":
+        best_metric_dataset = args.only_dataset
+    else:
+        # Check which datasets have data
+        has_fujitsu = any(r.get("fujitsu") for r in all_results)
+        has_llmail = any(r.get("llmail") for r in all_results)
+        if has_fujitsu:
+            best_metric_dataset = "fujitsu"
+        elif has_llmail:
+            best_metric_dataset = "llmail"
+        else:
+            best_metric_dataset = "fujitsu"
+
     print_best_runs(all_results, args.top_n, use_color, metric_dataset=best_metric_dataset)
     
     # Plot metrics
@@ -1403,7 +1518,9 @@ Examples:
             writer = csv.writer(f)
             writer.writerow([
                 "run_name", "baseline_asr", "cb_asr", "reduction",
-                "improvements", "regressions", "agentdojo_diff_rate", "llmail_cb_asr"
+                "improvements", "regressions", "agentdojo_diff_rate",
+                "llmail_cb_asr", "llmail_capability", "llmail_target_acc",
+                "llmail_json_parse_fail", "tools_broken", "stage1_passed",
             ])
             for r in all_results:
                 fujitsu = r.get("fujitsu") or {}
@@ -1418,6 +1535,11 @@ Examples:
                     fujitsu.get("regressions", "") if fujitsu else "",
                     agentdojo.get("diff_rate", "") if agentdojo else "",
                     llmail.get("cb_asr", "") if llmail else "",
+                    llmail.get("capability_retention", "") if llmail else "",
+                    llmail.get("target_accuracy_rate", "") if llmail else "",
+                    llmail.get("json_parse_failure_rate", "") if llmail else "",
+                    llmail.get("tools_broken", "") if llmail else "",
+                    llmail.get("stage1_passed", "") if llmail else "",
                 ])
         print(f"\nExported results to: {args.csv}")
 
