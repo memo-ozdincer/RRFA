@@ -306,7 +306,7 @@ if [[ "$EVAL_OK" -gt 0 ]]; then
     python scripts/visualize_sweep_results.py "$VIS_DIR" \
         --traces-dir "$TRACES_DIR" \
         --no-color \
-        --show-samples 999 \
+        --show-samples 50 \
         --show-full \
         --csv "$VIS_DIR/eval_summary.csv" \
         2>&1 | tee "$VIS_DIR/visualization.txt"
