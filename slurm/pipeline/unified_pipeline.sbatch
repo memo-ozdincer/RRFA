@@ -47,7 +47,7 @@
 # Config knobs (pass with `VAR=value sbatch ...`)
 # -----------------------------------------------------------------------------
 # Dataset selection:
-#   DATASETS, DATASET_CONFIG, FUJITSU_B4_PATH, AGENTDOJO_PATH, LLMAIL_INJECT_PATH
+#   DATASETS, DATASET_CONFIG, FUJITSU_B4_PATH, AGENTDOJO_PATH
 #
 # Stage toggles:
 #   SKIP_ETL_A, SKIP_GENERATE, SKIP_JUDGE, SKIP_ETL_B, SKIP_SPLIT, SKIP_TRAIN, SKIP_EVAL
@@ -66,16 +66,7 @@
 # Runtime/logging:
 #   OUTPUT_BASE, MODEL, TOKENIZER, DTYPE, LORA_R, LORA_ALPHA,
 #   NO_WANDB, JUDGE_PROVIDER, JUDGE_MODEL, EVAL_LIMIT
-#   LLMAIL_TOOL_SCHEMA (tool schema used for LLMail generation/eval)
-#   LLMAIL_CONTEXT_MODE, LLMAIL_EXCLUDE_NOT_RETRIEVED, LLMAIL_SCENARIOS_PATH
-#   STRICT_SIMULATED_MATCH, SKIP_LLMAIL_NOT_RETRIEVED, LIMIT_GEN, LLMAIL_LIMIT
-#   LLMAIL_RETRIEVED_ONLY
-#   LLMAIL_RETAIN_MODE (none|generated|synthetic|contextualized)
-#     none:            no LLMail retain set (LLMail used as CB set only)
-#     generated:       use model-generated DR completions (default)
-#     synthetic:       use deterministic synthetic benign send-email traces (50 golden)
-#     contextualized:  scenario-grounded retain traces with 3 types (A/B/C) + model inference
-#   CTX_TARGET_COUNT, CTX_RATIO_A, CTX_RATIO_B, CTX_RATIO_C (contextualized DR params)
+#   STRICT_SIMULATED_MATCH, LIMIT_GEN
 # =============================================================================
 
 set -euo pipefail
@@ -131,7 +122,7 @@ echo ""
 # =============================================================================
 
 # Dataset selection
-DATASETS="${DATASETS:-agentdojo,fujitsu_b4,llmail_inject}"
+DATASETS="${DATASETS:-agentdojo,fujitsu_b4}"
 DATASET_CONFIG="${DATASET_CONFIG:-configs/dataset_config.yaml}"
 
 # Stage control
@@ -156,32 +147,18 @@ mkdir -p "$TRACES_DIR" "$RENDERS_DIR" "$LOSSMASKS_DIR" "$MODELS_DIR" "$EVAL_DIR"
 # Default data paths
 FUJITSU_B4_PATH="${FUJITSU_B4_PATH:-data/fujitsu/orchestrator_attacks_combined_deduplicated.jsonl}"
 AGENTDOJO_PATH="${AGENTDOJO_PATH:-data/agent_dojo/agentdojo_spotlight_extract.jsonl}"
-LLMAIL_INJECT_PATH="${LLMAIL_INJECT_PATH:-data/llmail_inject/raw_submissions_phase1.jsonl}"
 
 # Model/tokenizer
 MODEL="${MODEL:-meta-llama/Llama-3.1-8B-Instruct}"
 TOKENIZER="${TOKENIZER:-$MODEL}"
 TOOL_SCHEMA="${TOOL_SCHEMA:-configs/tool_schemas/b4_standard_v1.json}"
-LLMAIL_TOOL_SCHEMA="${LLMAIL_TOOL_SCHEMA:-configs/tool_schemas/llmail_inject_challenge_v2.json}"
-LLMAIL_CONTEXT_MODE="${LLMAIL_CONTEXT_MODE:-tool_message_retrieval}"
-LLMAIL_EXCLUDE_NOT_RETRIEVED="${LLMAIL_EXCLUDE_NOT_RETRIEVED:-true}"
-LLMAIL_SCENARIOS_PATH="${LLMAIL_SCENARIOS_PATH:-data/llmail_inject/scenarios.json}"
-LLMAIL_RETAIN_MODE="${LLMAIL_RETAIN_MODE:-generated}"
 
 # Generation settings
 TEMPERATURE_DS="${TEMPERATURE_DS:-0.7}"
 TEMPERATURE_DR="${TEMPERATURE_DR:-0.3}"
 USE_VLLM="${USE_VLLM:-true}"
 STRICT_SIMULATED_MATCH="${STRICT_SIMULATED_MATCH:-true}"
-SKIP_LLMAIL_NOT_RETRIEVED="${SKIP_LLMAIL_NOT_RETRIEVED:-true}"
 LIMIT_GEN="${LIMIT_GEN:-}"
-LLMAIL_LIMIT="${LLMAIL_LIMIT:-}"
-
-# Contextualized DR settings (for LLMAIL_RETAIN_MODE=contextualized)
-CTX_TARGET_COUNT="${CTX_TARGET_COUNT:-200}"
-CTX_RATIO_A="${CTX_RATIO_A:-0.30}"   # Type A: summarize-only (email context, no tool)
-CTX_RATIO_B="${CTX_RATIO_B:-0.50}"   # Type B: summarize+send (email context + tool)
-CTX_RATIO_C="${CTX_RATIO_C:-0.20}"   # Type C: direct send (no context, tool)
 
 # Training settings
 TOTAL_STEPS="${TOTAL_STEPS:-300}"
@@ -217,23 +194,13 @@ JUDGE_MODEL="${JUDGE_MODEL:-gpt-4o-mini}"
 
 # Eval settings
 EVAL_LIMIT="${EVAL_LIMIT:-100}"
-LLMAIL_RETRIEVED_ONLY="${LLMAIL_RETRIEVED_ONLY:-true}"
 EVAL_MERGE_ADAPTER="${EVAL_MERGE_ADAPTER:-true}"
 
 echo "Configuration:"
 echo "  DATASETS: $DATASETS"
 echo "  OUTPUT_BASE: $OUTPUT_BASE"
-echo "  LLMAIL_INJECT_PATH: $LLMAIL_INJECT_PATH"
-echo "  LLMAIL_TOOL_SCHEMA: $LLMAIL_TOOL_SCHEMA"
-echo "  LLMAIL_CONTEXT_MODE: $LLMAIL_CONTEXT_MODE"
-echo "  LLMAIL_EXCLUDE_NOT_RETRIEVED: $LLMAIL_EXCLUDE_NOT_RETRIEVED"
-echo "  LLMAIL_SCENARIOS_PATH: $LLMAIL_SCENARIOS_PATH"
 echo "  STRICT_SIMULATED_MATCH: $STRICT_SIMULATED_MATCH"
-echo "  SKIP_LLMAIL_NOT_RETRIEVED: $SKIP_LLMAIL_NOT_RETRIEVED"
 echo "  LIMIT_GEN: ${LIMIT_GEN:-<none>}"
-echo "  LLMAIL_LIMIT: ${LLMAIL_LIMIT:-<none>}"
-echo "  LLMAIL_RETRIEVED_ONLY: $LLMAIL_RETRIEVED_ONLY"
-echo "  LLMAIL_RETAIN_MODE: $LLMAIL_RETAIN_MODE"
 echo "  EVAL_MERGE_ADAPTER: $EVAL_MERGE_ADAPTER"
 echo "  LMP_POLICY: $LMP_POLICY"
 echo "  TOTAL_STEPS: $TOTAL_STEPS"
@@ -337,26 +304,6 @@ if [[ "$SKIP_ETL_A" != "true" ]]; then
                 fi
                 ;;
 
-            llmail_inject)
-                if [[ -f "$LLMAIL_INJECT_PATH" ]]; then
-                    echo "Processing LLMail-Inject..."
-                    OUTPUT_FILE="$TRACES_DIR/llmail_inject_skeleton.jsonl"
-
-                    python src/schemas/tools/ETL_A.py \
-                        --llmail-inject "$LLMAIL_INJECT_PATH" \
-                        --output "$OUTPUT_FILE" \
-                        --split train \
-                        --tool-schema "$LLMAIL_TOOL_SCHEMA" \
-                        --llmail-context-mode "$LLMAIL_CONTEXT_MODE" \
-                        --llmail-exclude-not-retrieved "$LLMAIL_EXCLUDE_NOT_RETRIEVED" \
-                        --llmail-scenarios-path "$LLMAIL_SCENARIOS_PATH"
-
-                    echo "  Output: $OUTPUT_FILE ($(wc -l < "$OUTPUT_FILE") lines)"
-                else
-                    echo "  WARNING: LLMail-Inject file not found: $LLMAIL_INJECT_PATH"
-                fi
-                ;;
-
             *)
                 echo "  WARNING: Unknown dataset: $dataset"
                 ;;
@@ -407,14 +354,6 @@ if [[ "$SKIP_GENERATE" != "true" ]]; then
             LIMIT_ARGS+=(--limit "$LIMIT_GEN")
         fi
 
-        local DS_EXTRA_ARGS=()
-        local DR_EXTRA_ARGS=()
-        if [[ "$dataset_key" == "llmail_inject" ]]; then
-            DS_EXTRA_ARGS+=(--strict-simulated-match "$STRICT_SIMULATED_MATCH")
-            DS_EXTRA_ARGS+=(--skip-llmail-not-retrieved "$SKIP_LLMAIL_NOT_RETRIEVED")
-            DR_EXTRA_ARGS+=(--skip-llmail-not-retrieved "$SKIP_LLMAIL_NOT_RETRIEVED")
-        fi
-
         if [[ "$need_ds" == "true" ]]; then
             echo "Generating $dataset_name DS traces..."
             python src/data_generation/generate_completions.py \
@@ -426,7 +365,6 @@ if [[ "$SKIP_GENERATE" != "true" ]]; then
                 --temperature-ds "$TEMPERATURE_DS" \
                 --max-model-len "$MAX_MODEL_LEN" \
                 "${LIMIT_ARGS[@]}" \
-                "${DS_EXTRA_ARGS[@]}" \
                 "${VLLM_ARGS[@]}"
             echo "  DS output: $ds_output ($(wc -l < "$ds_output") lines)"
         fi
@@ -442,7 +380,6 @@ if [[ "$SKIP_GENERATE" != "true" ]]; then
                 --temperature-dr "$TEMPERATURE_DR" \
                 --max-model-len "$MAX_MODEL_LEN" \
                 "${LIMIT_ARGS[@]}" \
-                "${DR_EXTRA_ARGS[@]}" \
                 "${VLLM_ARGS[@]}"
             echo "  DR output: $dr_output ($(wc -l < "$dr_output") lines)"
         fi
@@ -456,74 +393,6 @@ if [[ "$SKIP_GENERATE" != "true" ]]; then
             "$TRACES_DIR/fujitsu_b4_dr.jsonl" \
             "$TOOL_SCHEMA" \
             "fujitsu_b4"
-    fi
-
-    if dataset_enabled "llmail_inject"; then
-        generate_ds_dr_dataset \
-            "LLMail-Inject" \
-            "$TRACES_DIR/llmail_inject_skeleton.jsonl" \
-            "$TRACES_DIR/llmail_inject_ds.jsonl" \
-            "$TRACES_DIR/llmail_inject_dr.jsonl" \
-            "$LLMAIL_TOOL_SCHEMA" \
-            "llmail_inject"
-    fi
-
-    # Generate synthetic LLMail DR if requested
-    if dataset_enabled "llmail_inject" && [[ "$LLMAIL_RETAIN_MODE" == "synthetic" ]]; then
-        SYNTHETIC_DR="$TRACES_DIR/llmail_synthetic_dr.jsonl"
-        if [[ -f "$SYNTHETIC_DR" ]]; then
-            echo "Synthetic LLMail DR already exists: $SYNTHETIC_DR ($(wc -l < "$SYNTHETIC_DR") lines)"
-        else
-            echo "Generating synthetic LLMail DR traces..."
-            python src/data_generation/generate_completions.py \
-                --mode synthetic_dr \
-                --tool-schema "$LLMAIL_TOOL_SCHEMA" \
-                --output "$SYNTHETIC_DR" \
-                --synthetic-split train
-            echo "  Synthetic DR: $SYNTHETIC_DR ($(wc -l < "$SYNTHETIC_DR") lines)"
-        fi
-    fi
-
-    # Generate contextualized LLMail DR if requested
-    if dataset_enabled "llmail_inject" && [[ "$LLMAIL_RETAIN_MODE" == "contextualized" ]]; then
-        CTX_DR="$TRACES_DIR/llmail_contextualized_dr.jsonl"
-        SKELETON_FILE="$TRACES_DIR/llmail_inject_skeleton.jsonl"
-        if [[ -f "$CTX_DR" ]]; then
-            echo "Contextualized LLMail DR already exists: $CTX_DR ($(wc -l < "$CTX_DR") lines)"
-        elif [[ ! -f "$SKELETON_FILE" ]]; then
-            echo "WARNING: Skeleton file not found for contextualized DR: $SKELETON_FILE"
-            echo "  Ensure SKIP_ETL_A=false or that skeletons exist from a previous run."
-        else
-            CTX_EXTRA_ARGS=()
-            if [[ -f "$LLMAIL_SCENARIOS_PATH" ]]; then
-                CTX_EXTRA_ARGS+=(--scenarios-path "$LLMAIL_SCENARIOS_PATH")
-            fi
-            FP_EMAILS="data/llmail_inject/emails_for_fp_tests.json"
-            if [[ -f "$FP_EMAILS" ]]; then
-                CTX_EXTRA_ARGS+=(--fp-emails-path "$FP_EMAILS")
-            fi
-
-            echo "Generating contextualized LLMail DR traces..."
-            echo "  Skeleton input: $SKELETON_FILE"
-            echo "  Target count: ${CTX_TARGET_COUNT:-200}"
-            echo "  Ratio A/B/C: ${CTX_RATIO_A:-0.30}/${CTX_RATIO_B:-0.50}/${CTX_RATIO_C:-0.20}"
-            python src/data_generation/generate_completions.py \
-                --traces "$SKELETON_FILE" \
-                --output "$CTX_DR" \
-                --model "$MODEL" \
-                --tool-schema "$LLMAIL_TOOL_SCHEMA" \
-                --mode contextualized_dr \
-                --ctx-target-count "${CTX_TARGET_COUNT:-200}" \
-                --ctx-ratio-a "${CTX_RATIO_A:-0.30}" \
-                --ctx-ratio-b "${CTX_RATIO_B:-0.50}" \
-                --ctx-ratio-c "${CTX_RATIO_C:-0.20}" \
-                --temperature-dr "$TEMPERATURE_DR" \
-                --max-model-len "$MAX_MODEL_LEN" \
-                --skip-llmail-not-retrieved "$SKIP_LLMAIL_NOT_RETRIEVED" \
-                "${CTX_EXTRA_ARGS[@]}" \
-                "${VLLM_ARGS[@]}"
-            echo "  Contextualized DR: $CTX_DR ($(wc -l < "$CTX_DR") lines)"
-        fi
     fi
 
     echo ""
@@ -598,11 +467,6 @@ if [[ "$SKIP_ETL_B" != "true" ]]; then
                     continue
                 fi
             fi
-            if [[ "$basename" == llmail_* ]]; then
-                if ! dataset_enabled "llmail_inject"; then
-                    continue
-                fi
-            fi
             if [[ "$basename" == agentdojo_* ]]; then
                 if ! dataset_enabled "agentdojo"; then
                     continue
@@ -611,11 +475,6 @@ if [[ "$SKIP_ETL_B" != "true" ]]; then
 
             render_out="$RENDERS_DIR/${basename}.jsonl"
             lossmask_out="$LOSSMASKS_DIR/${basename}.jsonl"
-            ETL_B_LIMIT_ARGS=()
-            if [[ -n "$LLMAIL_LIMIT" && "$basename" == llmail_inject_* ]]; then
-                ETL_B_LIMIT_ARGS+=(--limit "$LLMAIL_LIMIT")
-            fi
-
             echo "Processing: $basename"
             python src/schemas/tools/ETL_B.py \
                 --traces "$trace_file" \
@@ -623,8 +482,7 @@ if [[ "$SKIP_ETL_B" != "true" ]]; then
                 --lossmask-out "$lossmask_out" \
                 --tokenizer "$TOKENIZER" \
                 --max-length 4096 \
-                --policy-override "$LMP_POLICY" \
-                "${ETL_B_LIMIT_ARGS[@]}"
+                --policy-override "$LMP_POLICY"
 
             echo "  Render: $render_out ($(wc -l < "$render_out") lines)"
             echo "  Lossmask: $lossmask_out ($(wc -l < "$lossmask_out") lines)"
@@ -668,11 +526,6 @@ if [[ "$SKIP_SPLIT" != "true" ]]; then
                 echo "  DR (Retain): $TRACES_DIR/fujitsu_b4_dr.jsonl"
                 ;;
 
-            llmail_inject)
-                echo "LLMail-Inject: Using existing DS/DR split"
-                echo "  DS (CB): $TRACES_DIR/llmail_inject_ds.jsonl"
-                echo "  DR (Retain): $TRACES_DIR/llmail_inject_dr.jsonl"
-                ;;
         esac
     done
     echo ""
@@ -706,70 +559,6 @@ if [[ "$SKIP_TRAIN" != "true" ]]; then
     if dataset_enabled "fujitsu_b4" && [[ -f "$RENDERS_DIR/fujitsu_b4_dr.jsonl" ]]; then
         BENIGN_RENDERS="$RENDERS_DIR/fujitsu_b4_dr.jsonl"
         BENIGN_LOSSMASKS="$LOSSMASKS_DIR/fujitsu_b4_dr.jsonl"
-    fi
-
-    # LLMail DS (harmful)
-    if dataset_enabled "llmail_inject" && [[ -f "$RENDERS_DIR/llmail_inject_ds.jsonl" ]]; then
-        if [[ -n "$HARMFUL_RENDERS" ]]; then
-            HARMFUL_RENDERS="$HARMFUL_RENDERS,$RENDERS_DIR/llmail_inject_ds.jsonl"
-            HARMFUL_LOSSMASKS="$HARMFUL_LOSSMASKS,$LOSSMASKS_DIR/llmail_inject_ds.jsonl"
-        else
-            HARMFUL_RENDERS="$RENDERS_DIR/llmail_inject_ds.jsonl"
-            HARMFUL_LOSSMASKS="$LOSSMASKS_DIR/llmail_inject_ds.jsonl"
-        fi
-    fi
-
-    # LLMail DR (benign) -- controlled by LLMAIL_RETAIN_MODE
-    # - "generated":      use model-generated DR (default, existing behavior)
-    # - "synthetic":      use deterministic synthetic benign send-email traces (50 golden)
-    # - "contextualized": use scenario-grounded retain traces (model-generated, 3 types)
-    # - "none":           no LLMail retain data (LLMail as CB set only)
-    LLMAIL_RETAIN_FILE=""
-    LLMAIL_RETAIN_LOSSMASK=""
-    if dataset_enabled "llmail_inject"; then
-        case "$LLMAIL_RETAIN_MODE" in
-            generated)
-                if [[ -f "$RENDERS_DIR/llmail_inject_dr.jsonl" ]]; then
-                    LLMAIL_RETAIN_FILE="$RENDERS_DIR/llmail_inject_dr.jsonl"
-                    LLMAIL_RETAIN_LOSSMASK="$LOSSMASKS_DIR/llmail_inject_dr.jsonl"
-                fi
-                ;;
-            synthetic)
-                if [[ -f "$RENDERS_DIR/llmail_synthetic_dr.jsonl" ]]; then
-                    LLMAIL_RETAIN_FILE="$RENDERS_DIR/llmail_synthetic_dr.jsonl"
-                    LLMAIL_RETAIN_LOSSMASK="$LOSSMASKS_DIR/llmail_synthetic_dr.jsonl"
-                else
-                    echo "  WARNING: Synthetic LLMail DR renders not found; was SKIP_GENERATE=true?"
-                fi
-                ;;
-            contextualized)
-                if [[ -f "$RENDERS_DIR/llmail_contextualized_dr.jsonl" ]]; then
-                    LLMAIL_RETAIN_FILE="$RENDERS_DIR/llmail_contextualized_dr.jsonl"
-                    LLMAIL_RETAIN_LOSSMASK="$LOSSMASKS_DIR/llmail_contextualized_dr.jsonl"
-                else
-                    echo "  WARNING: Contextualized LLMail DR renders not found; was SKIP_GENERATE=true?"
-                fi
-                ;;
-            none)
-                echo "  LLMail retain mode: none (CB set only, no retain data)"
-                ;;
-            *)
-                echo "  WARNING: Unknown LLMAIL_RETAIN_MODE=$LLMAIL_RETAIN_MODE, defaulting to generated"
-                if [[ -f "$RENDERS_DIR/llmail_inject_dr.jsonl" ]]; then
-                    LLMAIL_RETAIN_FILE="$RENDERS_DIR/llmail_inject_dr.jsonl"
-                    LLMAIL_RETAIN_LOSSMASK="$LOSSMASKS_DIR/llmail_inject_dr.jsonl"
-                fi
-                ;;
-        esac
-        if [[ -n "$LLMAIL_RETAIN_FILE" ]]; then
-            if [[ -n "$BENIGN_RENDERS" ]]; then
-                BENIGN_RENDERS="$BENIGN_RENDERS,$LLMAIL_RETAIN_FILE"
-                BENIGN_LOSSMASKS="$BENIGN_LOSSMASKS,$LLMAIL_RETAIN_LOSSMASK"
-            else
-                BENIGN_RENDERS="$LLMAIL_RETAIN_FILE"
-                BENIGN_LOSSMASKS="$LLMAIL_RETAIN_LOSSMASK"
-            fi
-        fi
     fi
 
     # AgentDojo split
@@ -911,21 +700,6 @@ if [[ "$SKIP_EVAL" != "true" ]]; then
                     --dtype "$DTYPE"
             fi
 
-            # Evaluate on LLMail DS
-            if dataset_enabled "llmail_inject" && [[ -f "$TRACES_DIR/llmail_inject_ds.jsonl" ]]; then
-                echo "Evaluating on LLMail-Inject DS..."
-                python src/evaluation/eval.py \
-                    --baseline "$MODEL" \
-                    --cb-adapter "$ADAPTER_PATH" \
-                    --eval-data "$TRACES_DIR/llmail_inject_ds.jsonl" \
-                    --tool-schema "$LLMAIL_TOOL_SCHEMA" \
-                    --output "$VIS_EVAL_DIR/llmail_eval.json" \
-                    --limit "$EVAL_LIMIT" \
-                    --llmail-retrieved-only "$LLMAIL_RETRIEVED_ONLY" \
-                    "${EVAL_COMMON_ARGS[@]}" \
-                    --dtype "$DTYPE"
-            fi
-
             # Evaluate on AgentDojo harmful
             AGENTDOJO_HARMFUL="$OUTPUT_BASE/split/agentdojo/agentdojo_traces_cb.jsonl"
             if dataset_enabled "agentdojo" && [[ -f "$AGENTDOJO_HARMFUL" ]]; then
@@ -949,7 +723,6 @@ if [[ "$SKIP_EVAL" != "true" ]]; then
     "model": "$MODEL",
     "adapter_path": "$ADAPTER_PATH",
     "datasets": "$DATASETS",
-    "llmail_retain_mode": "${LLMAIL_RETAIN_MODE:-N/A}",
     "traces_dir": "$TRACES_DIR",
     "output_base": "$OUTPUT_BASE",
     "timestamp": "$(date -Iseconds)"
@@ -980,7 +753,22 @@ echo "  Eval: $EVAL_DIR"
 if [[ -n "${VIS_RUN_DIR:-}" ]]; then
 echo "  Visualizer: $VIS_RUN_DIR"
 echo ""
-echo "To visualize results:"
+
+# Full trace visualization (per-sample details)
+echo "Running full trace visualization..."
+python scripts/visualize_sweep_results.py "$VIS_RUN_DIR" \
+    --traces-dir "$TRACES_DIR" \
+    --no-color \
+    --show-samples 50 \
+    --show-full \
+    --csv "$VIS_RUN_DIR/eval_summary.csv" \
+    2>&1 | tee "$VIS_RUN_DIR/visualization.txt"
+
+echo ""
+echo "Visualization:  $VIS_RUN_DIR/visualization.txt"
+echo "Summary CSV:    $VIS_RUN_DIR/eval_summary.csv"
+echo ""
+echo "To re-visualize later:"
 echo "  python scripts/visualize_sweep_results.py $VIS_RUN_DIR"
 fi
 echo ""

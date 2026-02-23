@@ -18,7 +18,7 @@
 #   - `ALPHAS` (alpha_max for legacy schedules)
 #
 # For each configuration: ETL_B (policy) -> train -> eval.
-# LLMail-Inject DS/DR traces are auto-included if present in $CB_SCRATCH/data/traces.
+# Evaluates on Fujitsu + AgentDojo and produces full trace visualization.
 #
 # -----------------------------------------------------------------------------
 # Common run recipes
@@ -52,8 +52,6 @@
 #   LIMIT_EVAL, NUM_EXAMPLES, SHOW_EXAMPLES
 #
 # Data limits:
-#   LLMAIL_LIMIT (cap number of LLMail samples, e.g. 3000)
-#
 # Core training:
 #   LOSS_MODE, LOSS_WEIGHTING, BATCH_SIZE, LEARNING_RATE, WARMUP_STEPS,
 #   MAX_SEQ_LENGTH, MAX_MODEL_LEN, DTYPE, LORA_R, LORA_ALPHA
@@ -147,10 +145,7 @@ LORA_R="${LORA_R:-16}"
 LORA_ALPHA="${LORA_ALPHA:-32}"
 MAX_SEQ_LENGTH="${MAX_SEQ_LENGTH:-4096}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
-LLMAIL_LIMIT="${LLMAIL_LIMIT:-}"  # empty = no limit; e.g. 3000
 DTYPE="${DTYPE:-bfloat16}"
-LLMAIL_TOOL_SCHEMA="${LLMAIL_TOOL_SCHEMA:-$REPO_DIR/configs/tool_schemas/llmail_inject_challenge_v2.json}"
-LLMAIL_RETRIEVED_ONLY="${LLMAIL_RETRIEVED_ONLY:-true}"
 LOSS_MODE="${LOSS_MODE:-triplet_full}"
 LOSS_WEIGHTING="${LOSS_WEIGHTING:-dual}"
 TRIPLET_ALPHA_BENIGN="${TRIPLET_ALPHA_BENIGN:-0.5}"
@@ -178,7 +173,6 @@ echo "  LIMIT_EVAL: $LIMIT_EVAL"
 echo "  NUM_EXAMPLES: $NUM_EXAMPLES"
 echo "  SHOW_EXAMPLES: $SHOW_EXAMPLES"
 echo "  QUICK_TEST: $QUICK_TEST"
-echo "  LLMAIL_RETRIEVED_ONLY: $LLMAIL_RETRIEVED_ONLY"
 echo ""
 
 # =============================================================================
@@ -188,8 +182,6 @@ TRACES_DIR="$CB_SCRATCH/data/traces"
 DS_TRACES="$TRACES_DIR/fujitsu_b4_ds.jsonl"
 DR_TRACES="$TRACES_DIR/fujitsu_b4_dr.jsonl"
 AGENTDOJO_TRACES="$TRACES_DIR/agentdojo_complete.jsonl"
-LLMAIL_DS_TRACES="$TRACES_DIR/llmail_inject_ds.jsonl"
-LLMAIL_DR_TRACES="$TRACES_DIR/llmail_inject_dr.jsonl"
 
 echo "Input traces (ALL used for training):"
 for trace in "$DS_TRACES" "$DR_TRACES" "$AGENTDOJO_TRACES"; do
@@ -200,16 +192,6 @@ for trace in "$DS_TRACES" "$DR_TRACES" "$AGENTDOJO_TRACES"; do
         exit 1
     fi
 done
-
-HAS_LLMAIL=false
-if [[ -f "$LLMAIL_DS_TRACES" && -f "$LLMAIL_DR_TRACES" ]]; then
-    HAS_LLMAIL=true
-    echo "  ✓ $(basename "$LLMAIL_DS_TRACES"): $(wc -l < "$LLMAIL_DS_TRACES") lines"
-    echo "  ✓ $(basename "$LLMAIL_DR_TRACES"): $(wc -l < "$LLMAIL_DR_TRACES") lines"
-    echo "  LLMail-Inject: enabled"
-else
-    echo "  LLMail-Inject: not found (optional, continuing without it)"
-fi
 echo ""
 
 # =============================================================================
@@ -316,20 +298,11 @@ for alpha in "${ALPHA_ARRAY[@]}"; do
             
             etl_start=$(date +%s)
             TRACE_FILES=("$DS_TRACES" "$DR_TRACES" "$AGENTDOJO_TRACES")
-            if [[ "$HAS_LLMAIL" == "true" ]]; then
-                TRACE_FILES+=("$LLMAIL_DS_TRACES" "$LLMAIL_DR_TRACES")
-            fi
 
             for trace_file in "${TRACE_FILES[@]}"; do
                 basename=$(basename "$trace_file" .jsonl)
                 render_out="$RUN_DIR/renders/${basename}.jsonl"
                 lossmask_out="$RUN_DIR/lossmasks/${basename}.jsonl"
-
-                # Apply LLMAIL_LIMIT to LLMail traces only
-                ETL_B_LIMIT_ARGS=()
-                if [[ -n "$LLMAIL_LIMIT" && "$basename" == llmail_inject_* ]]; then
-                    ETL_B_LIMIT_ARGS+=(--limit "$LLMAIL_LIMIT")
-                fi
 
                 echo "  Processing: $basename"
                 python src/schemas/tools/ETL_B.py \
@@ -338,8 +311,7 @@ for alpha in "${ALPHA_ARRAY[@]}"; do
                     --lossmask-out "$lossmask_out" \
                     --tokenizer "$TOKENIZER" \
                     --max-length 4096 \
-                    --policy-override "$policy" \
-                    "${ETL_B_LIMIT_ARGS[@]}" 2>&1 | tee -a "$RUN_DIR/etl_b.log"
+                    --policy-override "$policy" 2>&1 | tee -a "$RUN_DIR/etl_b.log"
             done
             etl_end=$(date +%s)
             echo "  ETL_B completed in $((etl_end - etl_start))s"
@@ -405,13 +377,6 @@ print(total)
                 "$SPLIT_DIR/agentdojo_lossmasks_benign.jsonl"
             )
 
-            if [[ "$HAS_LLMAIL" == "true" ]]; then
-                HARMFUL_RENDER_ARGS+=("$RUN_DIR/renders/llmail_inject_ds.jsonl")
-                HARMFUL_LOSSMASK_ARGS+=("$RUN_DIR/lossmasks/llmail_inject_ds.jsonl")
-                BENIGN_RENDER_ARGS+=("$RUN_DIR/renders/llmail_inject_dr.jsonl")
-                BENIGN_LOSSMASK_ARGS+=("$RUN_DIR/lossmasks/llmail_inject_dr.jsonl")
-            fi
-            
             # Build training args (matching sweep_policies.sbatch exactly)
             TRAIN_ARGS=(
                 --preset "$PRESET"
@@ -534,58 +499,6 @@ PYEOF
                         fi
                     fi
 
-                    if [[ "$HAS_LLMAIL" == "true" ]]; then
-                        echo "  Evaluating on LLMail-Inject ($LIMIT_EVAL samples)..."
-                        LLMAIL_OUTPUT="$RUN_DIR/eval/llmail_eval.json"
-                        python src/evaluation/eval.py \
-                            --baseline "$TOKENIZER" \
-                            --cb-adapter "$ADAPTER_PATH" \
-                            --eval-data "$LLMAIL_DS_TRACES" \
-                            --tool-schema "$LLMAIL_TOOL_SCHEMA" \
-                            --output "$LLMAIL_OUTPUT" \
-                            --limit "$LIMIT_EVAL" \
-                            --llmail-retrieved-only "$LLMAIL_RETRIEVED_ONLY" \
-                            --merge-adapter \
-                            --dtype "$DTYPE" 2>&1 | tee -a "$RUN_DIR/eval/llmail.log"
-
-                        # Print LLMail examples
-                        if [[ "$SHOW_EXAMPLES" == "true" ]]; then
-                            PAIRED_FILE="${LLMAIL_OUTPUT%.json}.paired_outputs.jsonl"
-                            if [[ -f "$PAIRED_FILE" ]]; then
-                                echo ""
-                                echo "    ========================================"
-                                echo "    LLMAIL EXAMPLES: $RUN_NAME"
-                                echo "    ========================================"
-                                python3 << PYEOF
-import json
-
-with open('$PAIRED_FILE', 'r') as f:
-    pairs = [json.loads(line) for line in f if line.strip()]
-
-if not pairs:
-    print('    No paired outputs')
-    exit(0)
-
-print(f'    Pairs: {len(pairs)}')
-print()
-
-for i, p in enumerate(pairs[:$NUM_EXAMPLES], 1):
-    b_out = p.get('baseline_outcome', '?')
-    c_out = p.get('cb_outcome', '?')
-    b_tool = p.get('baseline_observed_tool') or 'none'
-    c_tool = p.get('cb_observed_tool') or 'none'
-    label = 'IMP' if b_tool == 'send_email' and c_tool != 'send_email' else ('REG' if b_tool != 'send_email' and c_tool == 'send_email' else 'SAME')
-    print(f'    [{i}] {label}: baseline_tool={b_tool} -> cb_tool={c_tool}')
-    print(f'    --- BASELINE RESPONSE ---')
-    print(p.get('baseline_response') or '(empty)')
-    print(f'    --- CB MODEL RESPONSE ---')
-    print(p.get('cb_response') or '(empty)')
-    print()
-PYEOF
-                            fi
-                        fi
-                    fi
-                    
                     # ---------------------------------------------------------
                     # Evaluate on AgentDojo (harmful subset)
                     # ---------------------------------------------------------
@@ -681,25 +594,6 @@ if 'output_comparison' in r:
     print(f'  AgentDojo Diff Rate:  {diff:.1%}')
 " 2>/dev/null || echo "  AgentDojo: (parse error)"
             fi
-            if [[ -f "$RUN_DIR/eval/llmail_eval.json" ]]; then
-                python3 -c "
-import json
-with open('$RUN_DIR/eval/llmail_eval.json') as f:
-    r = json.load(f)
-for key in ['baseline', 'cb_model']:
-    if key in r and 'llmail_attack' in r[key]:
-        la = r[key]['llmail_attack']
-        label = 'Baseline' if key == 'baseline' else 'CB'
-        print(f'  LLMail {label} ASR:    {la[\"attack_success_rate\"]:.1%}  (refusal: {la[\"refusal_rate\"]:.1%})')
-    if key in r and 'llmail_usefulness' in r[key]:
-        lu = r[key]['llmail_usefulness']
-        label = 'Baseline' if key == 'baseline' else 'CB'
-        print(f'  LLMail {label} Useful: {lu[\"usefulness_rate\"]:.1%}')
-if 'delta' in r:
-    if 'llmail_attack_asr' in r['delta']:
-        print(f'  LLMail Delta ASR:     {r[\"delta\"][\"llmail_attack_asr\"]:+.1%}')
-" 2>/dev/null || echo "  LLMail: (parse error)"
-            fi
             echo ""
             
         done
@@ -723,7 +617,7 @@ echo ""
 
 # Generate summary CSV
 SUMMARY_CSV="$SWEEP_DIR/summary.csv"
-echo "alpha,layers,policy,fujitsu_baseline_asr,fujitsu_cb_asr,fujitsu_delta,agentdojo_diff,agentdojo_benign_match,agentdojo_harmful_resist,llmail_baseline_asr,llmail_cb_asr,llmail_delta,llmail_usefulness,llmail_capability,llmail_target_acc,llmail_json_parse_fail,tools_broken,status" > "$SUMMARY_CSV"
+echo "alpha,layers,policy,fujitsu_baseline_asr,fujitsu_cb_asr,fujitsu_delta,agentdojo_diff,agentdojo_benign_match,agentdojo_harmful_resist,status" > "$SUMMARY_CSV"
 
 for run_dir in "$SWEEP_DIR"/a*; do
     if [[ -d "$run_dir" ]]; then
@@ -742,14 +636,6 @@ for run_dir in "$SWEEP_DIR"/a*; do
         agentdojo_diff="N/A"
         agentdojo_benign_match="N/A"
         agentdojo_harmful_resist="N/A"
-        llmail_baseline="N/A"
-        llmail_cb="N/A"
-        llmail_delta="N/A"
-        llmail_useful="N/A"
-        llmail_capability="N/A"
-        llmail_target_acc="N/A"
-        llmail_json_parse_fail="N/A"
-        tools_broken="N/A"
         status="unknown"
 
         if [[ -f "$run_dir/eval/fujitsu_eval.json" ]]; then
@@ -777,24 +663,7 @@ print(diff, bmr, hrr)
 " 2>/dev/null || echo "N/A N/A N/A")
         fi
 
-        if [[ -f "$run_dir/eval/llmail_eval.json" ]]; then
-            read llmail_baseline llmail_cb llmail_delta llmail_useful llmail_capability llmail_target_acc llmail_json_parse_fail tools_broken < <(python3 -c "
-import json
-with open('$run_dir/eval/llmail_eval.json') as f:
-    r = json.load(f)
-bl = r.get('baseline', {}).get('llmail_attack', {}).get('attack_success_rate', 'N/A')
-cb = r.get('cb_model', {}).get('llmail_attack', {}).get('attack_success_rate', 'N/A')
-d = r.get('delta', {}).get('llmail_attack_asr', 'N/A')
-u = r.get('cb_model', {}).get('llmail_usefulness', {}).get('usefulness_rate', 'N/A')
-cap = r.get('cb_model', {}).get('llmail_capability', {}).get('capability_retention', 'N/A')
-ta = r.get('cb_model', {}).get('llmail_attack', {}).get('target_accuracy_rate', 'N/A')
-jpf = r.get('diagnostics', {}).get('llmail_json_parse_failure_rate', 'N/A')
-tb = r.get('diagnostics', {}).get('tools_broken', 'N/A')
-print(bl, cb, d, u, cap, ta, jpf, tb)
-" 2>/dev/null || echo "N/A N/A N/A N/A N/A N/A N/A N/A")
-        fi
-
-        echo "$alpha,$layers,$policy,$fujitsu_baseline,$fujitsu_cb,$fujitsu_delta,$agentdojo_diff,$agentdojo_benign_match,$agentdojo_harmful_resist,$llmail_baseline,$llmail_cb,$llmail_delta,$llmail_useful,$llmail_capability,$llmail_target_acc,$llmail_json_parse_fail,$tools_broken,$status" >> "$SUMMARY_CSV"
+        echo "$alpha,$layers,$policy,$fujitsu_baseline,$fujitsu_cb,$fujitsu_delta,$agentdojo_diff,$agentdojo_benign_match,$agentdojo_harmful_resist,$status" >> "$SUMMARY_CSV"
     fi
 done
 
@@ -841,24 +710,6 @@ try:
             print(f'  AgentDojo Benign Match: {bmr}')
         if hrr != 'N/A':
             print(f'  AgentDojo Harmful Resist: {hrr}')
-        llmail_cb = best[1].get('llmail_cb_asr', 'N/A')
-        llmail_useful = best[1].get('llmail_usefulness', 'N/A')
-        llmail_cap = best[1].get('llmail_capability', 'N/A')
-        tb = best[1].get('tools_broken', 'N/A')
-        if llmail_cb != 'N/A':
-            print(f'  LLMail CB ASR: {llmail_cb}')
-        if llmail_useful != 'N/A':
-            print(f'  LLMail Usefulness: {llmail_useful}')
-        if llmail_cap != 'N/A':
-            print(f'  LLMail Capability: {llmail_cap}')
-        llmail_ta = best[1].get('llmail_target_acc', 'N/A')
-        llmail_jpf = best[1].get('llmail_json_parse_fail', 'N/A')
-        if llmail_ta != 'N/A':
-            print(f'  LLMail Target Accuracy: {llmail_ta}')
-        if llmail_jpf != 'N/A' and llmail_jpf != '0' and llmail_jpf != '0.0':
-            print(f'  LLMail JSON Parse Fail: {llmail_jpf}')
-        if tb != 'N/A':
-            print(f'  Tools Broken: {tb}')
 except Exception as e:
     print(f'Could not analyze results: {e}')
 " 2>/dev/null || echo "(analysis failed)"
@@ -869,6 +720,23 @@ except Exception as e:
 echo ""
 echo "Generating tradeoff visualizations..."
 python "$REPO_DIR/scripts/plot_tradeoff.py" --sweep-dir "$SWEEP_DIR" --output "$SWEEP_DIR/plots" 2>&1 || echo "(plot generation skipped - install matplotlib for plots)"
+
+# =============================================================================
+# Full Trace Visualization (per-sample details)
+# =============================================================================
+echo ""
+echo "Generating full trace visualization..."
+python "$REPO_DIR/scripts/visualize_sweep_results.py" "$SWEEP_DIR" \
+    --traces-dir "$TRACES_DIR" \
+    --no-color \
+    --show-samples "$NUM_EXAMPLES" \
+    --show-full \
+    --csv "$SWEEP_DIR/eval_summary.csv" \
+    2>&1 | tee "$SWEEP_DIR/visualization.txt"
+
+echo ""
+echo "Visualization:  $SWEEP_DIR/visualization.txt"
+echo "Summary CSV:    $SWEEP_DIR/eval_summary.csv"
 
 echo ""
 echo "Finished at: $(date)"
