@@ -190,8 +190,8 @@ LORA_ALPHA="${LORA_ALPHA:-32}"
 NO_WANDB="${NO_WANDB:-true}"
 
 # Judge settings
-JUDGE_PROVIDER="${JUDGE_PROVIDER:-openai}"
-JUDGE_MODEL="${JUDGE_MODEL:-gpt-4o-mini}"
+JUDGE_PROVIDER="${JUDGE_PROVIDER:-local}"
+JUDGE_MODEL="${JUDGE_MODEL:-$MODEL}"
 
 # Eval settings
 EVAL_LIMIT="${EVAL_LIMIT:-100}"
@@ -207,6 +207,8 @@ echo "  LIMIT_GEN: ${LIMIT_GEN:-<none>}"
 echo "  EVAL_MERGE_ADAPTER: $EVAL_MERGE_ADAPTER"
 echo "  VERIFY_PIPELINE: $VERIFY_PIPELINE"
 echo "  VERIFY_FAIL_ON_ERROR: $VERIFY_FAIL_ON_ERROR"
+echo "  JUDGE_PROVIDER: $JUDGE_PROVIDER"
+echo "  JUDGE_MODEL: $JUDGE_MODEL"
 echo "  LMP_POLICY: $LMP_POLICY"
 echo "  TOTAL_STEPS: $TOTAL_STEPS"
 echo "  BATCH_SIZE: $BATCH_SIZE"
@@ -265,6 +267,10 @@ if [[ "$TOKENIZER" != /* ]]; then
         exit 1
     fi
 fi
+
+# Judge must use the exact same local model artifact as the training/eval model.
+JUDGE_MODEL="$MODEL"
+echo "Judge model resolved to local model path: $JUDGE_MODEL"
 echo ""
 
 # =============================================================================
@@ -412,6 +418,12 @@ if [[ "$SKIP_JUDGE" != "true" ]]; then
     echo "========================================"
     echo "Stage 3: Judge Evaluation"
     echo "========================================"
+
+    if [[ "$JUDGE_PROVIDER" != "local" ]]; then
+        echo "ERROR: JUDGE_PROVIDER=$JUDGE_PROVIDER is not allowed on cluster."
+        echo "Set JUDGE_PROVIDER=local and use a downloaded local model (default: MODEL)."
+        exit 1
+    fi
 
     # Find traces that need evaluation (no attack_succeeded labels)
     for trace_file in "$TRACES_DIR"/*_complete.jsonl; do
