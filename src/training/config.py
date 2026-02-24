@@ -76,10 +76,10 @@ class CircuitBreakerConfig:
 
     # Triplet full loss hyperparameters (paper-style defaults)
     triplet_alpha_benign: float = 0.5
-    triplet_beta_harmful: float = 0.4
-    triplet_gamma_kl: float = 0.9
-    triplet_margin_benign: float = 500.0
-    triplet_margin_harmful: float = 1500.0
+    triplet_beta_harmful: float = 0.25
+    triplet_gamma_kl: float = 1.2
+    triplet_margin_benign: float = 50.0
+    triplet_margin_harmful: float = 150.0
     triplet_benign_positive_distance: str = "dmix"
     triplet_benign_negative_distance: str = "dmix"
     triplet_harmful_positive_distance: str = "dmix"

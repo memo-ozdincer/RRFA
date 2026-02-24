@@ -135,6 +135,8 @@ POLICIES="${POLICIES:-$DEFAULT_POLICIES}"
 LIMIT_EVAL="${LIMIT_EVAL:-$DEFAULT_LIMIT_EVAL}"
 NUM_EXAMPLES="${NUM_EXAMPLES:-$DEFAULT_NUM_EXAMPLES}"
 SHOW_EXAMPLES="${SHOW_EXAMPLES:-true}"
+VERIFY_PIPELINE="${VERIFY_PIPELINE:-true}"
+VERIFY_FAIL_ON_ERROR="${VERIFY_FAIL_ON_ERROR:-false}"
 
 # Training params (configurable via env vars, safe defaults for single GPU)
 BATCH_SIZE="${BATCH_SIZE:-1}"
@@ -149,10 +151,10 @@ DTYPE="${DTYPE:-bfloat16}"
 LOSS_MODE="${LOSS_MODE:-triplet_full}"
 LOSS_WEIGHTING="${LOSS_WEIGHTING:-dual}"
 TRIPLET_ALPHA_BENIGN="${TRIPLET_ALPHA_BENIGN:-0.5}"
-TRIPLET_BETA_HARMFUL="${TRIPLET_BETA_HARMFUL:-0.4}"
-TRIPLET_GAMMA_KL="${TRIPLET_GAMMA_KL:-0.9}"
-TRIPLET_MARGIN_BENIGN="${TRIPLET_MARGIN_BENIGN:-500.0}"
-TRIPLET_MARGIN_HARMFUL="${TRIPLET_MARGIN_HARMFUL:-1500.0}"
+TRIPLET_BETA_HARMFUL="${TRIPLET_BETA_HARMFUL:-0.25}"
+TRIPLET_GAMMA_KL="${TRIPLET_GAMMA_KL:-1.2}"
+TRIPLET_MARGIN_BENIGN="${TRIPLET_MARGIN_BENIGN:-50.0}"
+TRIPLET_MARGIN_HARMFUL="${TRIPLET_MARGIN_HARMFUL:-150.0}"
 TRIPLET_BENIGN_POS_DISTANCE="${TRIPLET_BENIGN_POS_DISTANCE:-dmix}"
 TRIPLET_BENIGN_NEG_DISTANCE="${TRIPLET_BENIGN_NEG_DISTANCE:-dmix}"
 TRIPLET_HARMFUL_POS_DISTANCE="${TRIPLET_HARMFUL_POS_DISTANCE:-dmix}"
@@ -172,6 +174,8 @@ echo "  LOSS_MODE: $LOSS_MODE"
 echo "  LIMIT_EVAL: $LIMIT_EVAL"
 echo "  NUM_EXAMPLES: $NUM_EXAMPLES"
 echo "  SHOW_EXAMPLES: $SHOW_EXAMPLES"
+echo "  VERIFY_PIPELINE: $VERIFY_PIPELINE"
+echo "  VERIFY_FAIL_ON_ERROR: $VERIFY_FAIL_ON_ERROR"
 echo "  QUICK_TEST: $QUICK_TEST"
 echo ""
 
@@ -279,6 +283,7 @@ for alpha in "${ALPHA_ARRAY[@]}"; do
             layers_short="${layers//,/_}"
             RUN_NAME="a${alpha}_l${layers_short}_${policy}"
             RUN_DIR="$SWEEP_DIR/$RUN_NAME"
+            verification_status="skipped"
             
             echo "========================================"
             echo "[$run_idx/$TOTAL_RUNS] $RUN_NAME"
@@ -551,12 +556,76 @@ for i, p in enumerate(differ[:$NUM_EXAMPLES], 1):
     print(f'    --- CB MODEL RESPONSE ---')
     print(p.get('cb_response') or '(empty)')
     print()
-PYEOF
+                                PYEOF
                             fi
                         fi
                     fi
-                    
-                    success_count=$((success_count + 1))
+
+                    # ---------------------------------------------------------
+                    # Verification: metrics/loss/context integrity checks
+                    # ---------------------------------------------------------
+                    verification_status="pass"
+                    if [[ "$VERIFY_PIPELINE" == "true" ]]; then
+                        echo "  Running verification checks..."
+                        VERIFY_CMD=(
+                            python scripts/verify_pipeline_run.py
+                            --tool-schema "$REPO_DIR/configs/tool_schemas/b4_standard_v1.json"
+                            --train-log "$RUN_DIR/train.log"
+                            --eval-json "$RUN_DIR/eval/fujitsu_eval.json"
+                            --report-json "$RUN_DIR/verification_report.json"
+                            --expected-steps "$TOTAL_STEPS"
+                        )
+                        if [[ -f "$RUN_DIR/model/training_manifest.json" ]]; then
+                            VERIFY_CMD+=(--training-manifest "$RUN_DIR/model/training_manifest.json")
+                        fi
+                        if [[ -f "$RUN_DIR/eval/agentdojo_eval.json" ]]; then
+                            VERIFY_CMD+=(--eval-json "$RUN_DIR/eval/agentdojo_eval.json")
+                        fi
+                        if [[ -f "$DS_TRACES" ]]; then
+                            VERIFY_CMD+=(--trace-jsonl "$DS_TRACES")
+                        fi
+                        if [[ -f "$SPLIT_DIR/agentdojo_traces_harmful.jsonl" ]]; then
+                            VERIFY_CMD+=(--trace-jsonl "$SPLIT_DIR/agentdojo_traces_harmful.jsonl")
+                        fi
+                        if [[ -f "$RUN_DIR/lossmasks/fujitsu_b4_ds.jsonl" ]]; then
+                            VERIFY_CMD+=(--lossmask-jsonl "$RUN_DIR/lossmasks/fujitsu_b4_ds.jsonl")
+                        fi
+                        if [[ -f "$RUN_DIR/lossmasks/fujitsu_b4_dr.jsonl" ]]; then
+                            VERIFY_CMD+=(--lossmask-jsonl "$RUN_DIR/lossmasks/fujitsu_b4_dr.jsonl")
+                        fi
+                        if [[ -f "$SPLIT_DIR/agentdojo_lossmasks_harmful.jsonl" ]]; then
+                            VERIFY_CMD+=(--lossmask-jsonl "$SPLIT_DIR/agentdojo_lossmasks_harmful.jsonl")
+                        fi
+                        if [[ -f "$SPLIT_DIR/agentdojo_lossmasks_benign.jsonl" ]]; then
+                            VERIFY_CMD+=(--lossmask-jsonl "$SPLIT_DIR/agentdojo_lossmasks_benign.jsonl")
+                        fi
+                        if [[ "$VERIFY_FAIL_ON_ERROR" == "true" ]]; then
+                            VERIFY_CMD+=(--fail-on-error)
+                        fi
+
+                        if "${VERIFY_CMD[@]}" 2>&1 | tee -a "$RUN_DIR/verify.log"; then
+                            verification_status="pass"
+                            if [[ -f "$RUN_DIR/verification_report.json" ]]; then
+                                verification_status=$(python3 -c "
+import json
+with open('$RUN_DIR/verification_report.json') as f:
+    r = json.load(f)
+print('pass' if r.get('summary', {}).get('passed') else 'fail')
+" 2>/dev/null || echo "unknown")
+                            fi
+                        else
+                            verification_status="fail"
+                            echo "  WARNING: verification failed for $RUN_NAME"
+                        fi
+                    fi
+
+                    if [[ "$verification_status" == "fail" ]]; then
+                        fail_count=$((fail_count + 1))
+                    else
+                        success_count=$((success_count + 1))
+                    fi
+                else
+                    fail_count=$((fail_count + 1))
                 fi
             else
                 fail_count=$((fail_count + 1))
@@ -568,6 +637,7 @@ PYEOF
             echo ""
             echo "--- Run Summary: $RUN_NAME ---"
             echo "  Training: $train_status"
+            echo "  Verification: $verification_status"
             if [[ -f "$RUN_DIR/eval/fujitsu_eval.json" ]]; then
                 python3 -c "
 import json
@@ -592,6 +662,18 @@ with open('$RUN_DIR/eval/agentdojo_eval.json') as f:
 if 'output_comparison' in r:
     diff = r['output_comparison'].get('difference_rate', -1)
     print(f'  AgentDojo Diff Rate:  {diff:.1%}')
+gen_b = r.get('baseline', {}).get('generation_comparison', {})
+gen_c = r.get('cb_model', {}).get('generation_comparison', {})
+if gen_b or gen_c:
+    b_tcr = gen_b.get('tool_call_rate')
+    c_tcr = gen_c.get('tool_call_rate')
+    hrr = gen_c.get('harmful_resistance_rate')
+    if b_tcr is not None:
+        print(f'  AgentDojo Tool-Call Rate (baseline): {b_tcr:.1%}')
+    if c_tcr is not None:
+        print(f'  AgentDojo Tool-Call Rate (CB):       {c_tcr:.1%}')
+    if hrr is not None:
+        print(f'  AgentDojo Harmful Resist:            {hrr:.1%}')
 " 2>/dev/null || echo "  AgentDojo: (parse error)"
             fi
             echo ""
@@ -617,7 +699,7 @@ echo ""
 
 # Generate summary CSV
 SUMMARY_CSV="$SWEEP_DIR/summary.csv"
-echo "alpha,layers,policy,fujitsu_baseline_asr,fujitsu_cb_asr,fujitsu_delta,agentdojo_diff,agentdojo_benign_match,agentdojo_harmful_resist,status" > "$SUMMARY_CSV"
+echo "alpha,layers,policy,fujitsu_baseline_asr,fujitsu_cb_asr,fujitsu_delta,agentdojo_diff,agentdojo_benign_match,agentdojo_harmful_resist,agentdojo_baseline_tool_call_rate,agentdojo_cb_tool_call_rate,status,verification_status" > "$SUMMARY_CSV"
 
 for run_dir in "$SWEEP_DIR"/a*; do
     if [[ -d "$run_dir" ]]; then
@@ -636,7 +718,10 @@ for run_dir in "$SWEEP_DIR"/a*; do
         agentdojo_diff="N/A"
         agentdojo_benign_match="N/A"
         agentdojo_harmful_resist="N/A"
+        agentdojo_baseline_tool_call_rate="N/A"
+        agentdojo_cb_tool_call_rate="N/A"
         status="unknown"
+        verification_status_csv="N/A"
 
         if [[ -f "$run_dir/eval/fujitsu_eval.json" ]]; then
             read fujitsu_baseline fujitsu_cb fujitsu_delta < <(python3 -c "
@@ -652,18 +737,31 @@ print(baseline, cb, delta)
         fi
 
         if [[ -f "$run_dir/eval/agentdojo_eval.json" ]]; then
-            read agentdojo_diff agentdojo_benign_match agentdojo_harmful_resist < <(python3 -c "
+            read agentdojo_diff agentdojo_benign_match agentdojo_harmful_resist agentdojo_baseline_tool_call_rate agentdojo_cb_tool_call_rate < <(python3 -c "
 import json
 with open('$run_dir/eval/agentdojo_eval.json') as f:
     r = json.load(f)
 diff = r.get('output_comparison', {}).get('difference_rate', 'N/A')
 bmr = r.get('cb_model', {}).get('generation_comparison', {}).get('benign_tool_match_rate', 'N/A')
 hrr = r.get('cb_model', {}).get('generation_comparison', {}).get('harmful_resistance_rate', 'N/A')
-print(diff, bmr, hrr)
-" 2>/dev/null || echo "N/A N/A N/A")
+btcr = r.get('baseline', {}).get('generation_comparison', {}).get('tool_call_rate', 'N/A')
+ctcr = r.get('cb_model', {}).get('generation_comparison', {}).get('tool_call_rate', 'N/A')
+print(diff, bmr, hrr, btcr, ctcr)
+" 2>/dev/null || echo "N/A N/A N/A N/A N/A")
         fi
 
-        echo "$alpha,$layers,$policy,$fujitsu_baseline,$fujitsu_cb,$fujitsu_delta,$agentdojo_diff,$agentdojo_benign_match,$agentdojo_harmful_resist,$status" >> "$SUMMARY_CSV"
+        if [[ -f "$run_dir/verification_report.json" ]]; then
+            verification_status_csv=$(python3 -c "
+import json
+with open('$run_dir/verification_report.json') as f:
+    r = json.load(f)
+print('pass' if r.get('summary', {}).get('passed') else 'fail')
+" 2>/dev/null || echo "unknown")
+        elif [[ -f "$run_dir/verify.log" ]]; then
+            verification_status_csv="unknown"
+        fi
+
+        echo "$alpha,$layers,$policy,$fujitsu_baseline,$fujitsu_cb,$fujitsu_delta,$agentdojo_diff,$agentdojo_benign_match,$agentdojo_harmful_resist,$agentdojo_baseline_tool_call_rate,$agentdojo_cb_tool_call_rate,$status,$verification_status_csv" >> "$SUMMARY_CSV"
     fi
 done
 
@@ -706,10 +804,19 @@ try:
         print(f'  AgentDojo Diff: {best[1][\"agentdojo_diff\"]}')
         bmr = best[1].get('agentdojo_benign_match', 'N/A')
         hrr = best[1].get('agentdojo_harmful_resist', 'N/A')
+        btcr = best[1].get('agentdojo_baseline_tool_call_rate', 'N/A')
+        ctcr = best[1].get('agentdojo_cb_tool_call_rate', 'N/A')
         if bmr != 'N/A':
             print(f'  AgentDojo Benign Match: {bmr}')
         if hrr != 'N/A':
             print(f'  AgentDojo Harmful Resist: {hrr}')
+        if btcr != 'N/A':
+            print(f'  AgentDojo Tool-Call Rate (baseline): {btcr}')
+        if ctcr != 'N/A':
+            print(f'  AgentDojo Tool-Call Rate (CB): {ctcr}')
+        vstat = best[1].get('verification_status', 'N/A')
+        if vstat != 'N/A':
+            print(f'  Verification: {vstat}')
 except Exception as e:
     print(f'Could not analyze results: {e}')
 " 2>/dev/null || echo "(analysis failed)"

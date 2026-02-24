@@ -1220,7 +1220,7 @@ class CircuitBreakerTrainer:
                 cs, cr = alpha, 1.0
         else:
             cs, cr = 1.0, 1.0
-            alpha = float(getattr(self.config, "triplet_beta_harmful", 0.4))
+            alpha = float(getattr(self.config, "triplet_beta_harmful", 0.25))
 
         # Extract batch data
         harmful_input_ids = batch['harmful_input_ids']
@@ -1427,10 +1427,10 @@ class CircuitBreakerTrainer:
                 benign_attention_mask=benign_attention_mask,
                 benign_loss_mask=benign_loss_mask,
                 alpha_benign=float(getattr(self.config, "triplet_alpha_benign", 0.5)),
-                beta_harmful=float(getattr(self.config, "triplet_beta_harmful", 0.4)),
-                gamma_kl=float(getattr(self.config, "triplet_gamma_kl", 0.9)),
-                margin_benign=float(getattr(self.config, "triplet_margin_benign", 500.0)),
-                margin_harmful=float(getattr(self.config, "triplet_margin_harmful", 1500.0)),
+                beta_harmful=float(getattr(self.config, "triplet_beta_harmful", 0.25)),
+                gamma_kl=float(getattr(self.config, "triplet_gamma_kl", 1.2)),
+                margin_benign=float(getattr(self.config, "triplet_margin_benign", 50.0)),
+                margin_harmful=float(getattr(self.config, "triplet_margin_harmful", 150.0)),
                 benign_positive_distance=getattr(self.config, "triplet_benign_positive_distance", "dmix"),
                 benign_negative_distance=getattr(self.config, "triplet_benign_negative_distance", "dmix"),
                 harmful_positive_distance=getattr(self.config, "triplet_harmful_positive_distance", "dmix"),
@@ -1448,7 +1448,6 @@ class CircuitBreakerTrainer:
                 "triplet_alpha": triplet_metrics["triplet_alpha"],
                 "triplet_beta": triplet_metrics["triplet_beta"],
                 "triplet_gamma": triplet_metrics["triplet_gamma"],
-                "alpha": alpha,
             }
         elif loss_mode == LOSS_MODE_LEGACY_CB:
             loss_reroute, reroute_metrics = reroute_loss(
@@ -1537,6 +1536,23 @@ class CircuitBreakerTrainer:
                 self.config.max_grad_norm,
             )
 
+        # Gradient diagnostics (every 50 steps on main process) must run
+        # before optimizer.zero_grad(), otherwise they always read as zero.
+        if self.global_step % 50 == 1 and self.accelerator.is_main_process:
+            grad_stats = self._compute_gradient_stats()
+            metrics.update(grad_stats)
+            if grad_stats.get('grad_norm_total', 0) < 1e-8:
+                self.accelerator.print(
+                    f"  WARNING: Very small gradients detected! "
+                    f"grad_norm={grad_stats.get('grad_norm_total', 0):.2e}"
+                )
+            if reroute_metrics is not None:
+                self.accelerator.print(
+                    f"  Reroute metrics: cos_sim_mean={reroute_metrics['cos_sim_mean']:.4f}, "
+                    f"positive_frac={reroute_metrics['cos_sim_positive_frac']:.2%}, "
+                    f"target={reroute_metrics['target_type']}"
+                )
+
         # Optimizer step
         self.optimizer.step()
         self.scheduler.step()
@@ -1556,22 +1572,6 @@ class CircuitBreakerTrainer:
             if reroute_metrics.get('target_type') != 'frozen_baseline':
                 self.accelerator.print(
                     f"  WARNING: Unexpected reroute target type: {reroute_metrics.get('target_type')}"
-                )
-
-        # Gradient diagnostics (every 50 steps on main process)
-        if self.global_step % 50 == 1 and self.accelerator.is_main_process:
-            grad_stats = self._compute_gradient_stats()
-            metrics.update(grad_stats)
-            if grad_stats.get('grad_norm_total', 0) < 1e-8:
-                self.accelerator.print(
-                    f"  WARNING: Very small gradients detected! "
-                    f"grad_norm={grad_stats.get('grad_norm_total', 0):.2e}"
-                )
-            if reroute_metrics is not None:
-                self.accelerator.print(
-                    f"  Reroute metrics: cos_sim_mean={reroute_metrics['cos_sim_mean']:.4f}, "
-                    f"positive_frac={reroute_metrics['cos_sim_positive_frac']:.2%}, "
-                    f"target={reroute_metrics['target_type']}"
                 )
 
         return metrics
@@ -1742,7 +1742,12 @@ class CircuitBreakerTrainer:
                         log_msg += f", kl={metrics['loss_kl']:.4f}"
                     if 'loss_triplet_kl' in metrics:
                         log_msg += f", triplet_kl={metrics['loss_triplet_kl']:.4f}"
-                    log_msg += f", α={metrics['alpha']:.4f}"
+                    if 'triplet_beta' in metrics:
+                        log_msg += f", triplet_beta={metrics['triplet_beta']:.4f}"
+                    if 'triplet_gamma' in metrics:
+                        log_msg += f", triplet_gamma={metrics['triplet_gamma']:.4f}"
+                    if 'alpha' in metrics:
+                        log_msg += f", alpha={metrics['alpha']:.4f}"
                     self.accelerator.print(log_msg)
                     
                     if self.config.use_wandb:

@@ -53,7 +53,7 @@
 #   SKIP_ETL_A, SKIP_GENERATE, SKIP_JUDGE, SKIP_ETL_B, SKIP_SPLIT, SKIP_TRAIN, SKIP_EVAL
 #
 # Core training:
-#   TOTAL_STEPS, BATCH_SIZE, LEARNING_RATE, WARMUP_STEPS, ALPHA_MAX,
+#   TOTAL_STEPS, BATCH_SIZE, GRAD_ACCUM, LEARNING_RATE, WARMUP_STEPS, ALPHA_MAX,
 #   LOSS_MODE, LOSS_WEIGHTING, CB_LAYERS, LMP_POLICY, MAX_SEQ_LENGTH
 #
 # Triplet parameters:
@@ -162,17 +162,18 @@ LIMIT_GEN="${LIMIT_GEN:-}"
 
 # Training settings
 TOTAL_STEPS="${TOTAL_STEPS:-300}"
-BATCH_SIZE="${BATCH_SIZE:-8}"
+BATCH_SIZE="${BATCH_SIZE:-1}"
+GRAD_ACCUM="${GRAD_ACCUM:-4}"
 LEARNING_RATE="${LEARNING_RATE:-5e-5}"
 WARMUP_STEPS="${WARMUP_STEPS:-20}"
 ALPHA_MAX="${ALPHA_MAX:-10.0}"
 LOSS_MODE="${LOSS_MODE:-triplet_full}"
 LOSS_WEIGHTING="${LOSS_WEIGHTING:-dual}"
 TRIPLET_ALPHA_BENIGN="${TRIPLET_ALPHA_BENIGN:-0.5}"
-TRIPLET_BETA_HARMFUL="${TRIPLET_BETA_HARMFUL:-0.4}"
-TRIPLET_GAMMA_KL="${TRIPLET_GAMMA_KL:-0.9}"
-TRIPLET_MARGIN_BENIGN="${TRIPLET_MARGIN_BENIGN:-500.0}"
-TRIPLET_MARGIN_HARMFUL="${TRIPLET_MARGIN_HARMFUL:-1500.0}"
+TRIPLET_BETA_HARMFUL="${TRIPLET_BETA_HARMFUL:-0.25}"
+TRIPLET_GAMMA_KL="${TRIPLET_GAMMA_KL:-1.2}"
+TRIPLET_MARGIN_BENIGN="${TRIPLET_MARGIN_BENIGN:-50.0}"
+TRIPLET_MARGIN_HARMFUL="${TRIPLET_MARGIN_HARMFUL:-150.0}"
 TRIPLET_BENIGN_POS_DISTANCE="${TRIPLET_BENIGN_POS_DISTANCE:-dmix}"
 TRIPLET_BENIGN_NEG_DISTANCE="${TRIPLET_BENIGN_NEG_DISTANCE:-dmix}"
 TRIPLET_HARMFUL_POS_DISTANCE="${TRIPLET_HARMFUL_POS_DISTANCE:-dmix}"
@@ -180,8 +181,8 @@ TRIPLET_HARMFUL_NEG_DISTANCE="${TRIPLET_HARMFUL_NEG_DISTANCE:-dmix}"
 TRIPLET_MIX_L2_WEIGHT="${TRIPLET_MIX_L2_WEIGHT:-0.5}"
 TRIPLET_MIX_COS_WEIGHT="${TRIPLET_MIX_COS_WEIGHT:-0.5}"
 CB_LAYERS="${CB_LAYERS:-10,20}"
-LMP_POLICY="${LMP_POLICY:-assistant_only}"
-MAX_SEQ_LENGTH="${MAX_SEQ_LENGTH:-2048}"
+LMP_POLICY="${LMP_POLICY:-cb_full_sequence}"
+MAX_SEQ_LENGTH="${MAX_SEQ_LENGTH:-4096}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
 DTYPE="${DTYPE:-bfloat16}"
 LORA_R="${LORA_R:-16}"
@@ -195,6 +196,8 @@ JUDGE_MODEL="${JUDGE_MODEL:-gpt-4o-mini}"
 # Eval settings
 EVAL_LIMIT="${EVAL_LIMIT:-100}"
 EVAL_MERGE_ADAPTER="${EVAL_MERGE_ADAPTER:-true}"
+VERIFY_PIPELINE="${VERIFY_PIPELINE:-true}"
+VERIFY_FAIL_ON_ERROR="${VERIFY_FAIL_ON_ERROR:-true}"
 
 echo "Configuration:"
 echo "  DATASETS: $DATASETS"
@@ -202,8 +205,12 @@ echo "  OUTPUT_BASE: $OUTPUT_BASE"
 echo "  STRICT_SIMULATED_MATCH: $STRICT_SIMULATED_MATCH"
 echo "  LIMIT_GEN: ${LIMIT_GEN:-<none>}"
 echo "  EVAL_MERGE_ADAPTER: $EVAL_MERGE_ADAPTER"
+echo "  VERIFY_PIPELINE: $VERIFY_PIPELINE"
+echo "  VERIFY_FAIL_ON_ERROR: $VERIFY_FAIL_ON_ERROR"
 echo "  LMP_POLICY: $LMP_POLICY"
 echo "  TOTAL_STEPS: $TOTAL_STEPS"
+echo "  BATCH_SIZE: $BATCH_SIZE"
+echo "  GRAD_ACCUM: $GRAD_ACCUM"
 echo "  ALPHA_MAX: $ALPHA_MAX"
 echo "  LOSS_MODE: $LOSS_MODE"
 echo "  CB_LAYERS: $CB_LAYERS"
@@ -602,7 +609,7 @@ if [[ "$SKIP_TRAIN" != "true" ]]; then
         --warmup-steps "$WARMUP_STEPS"
         --alpha-max "$ALPHA_MAX"
         --max-seq-length "$MAX_SEQ_LENGTH"
-        --gradient-accumulation-steps 1
+        --gradient-accumulation-steps "$GRAD_ACCUM"
         --loss-mode "$LOSS_MODE"
         --loss-weighting "$LOSS_WEIGHTING"
         --triplet-alpha-benign "$TRIPLET_ALPHA_BENIGN"
@@ -729,9 +736,70 @@ if [[ "$SKIP_EVAL" != "true" ]]; then
 }
 RUNEOF
 
+            # Post-run integrity verification
+            if [[ "$VERIFY_PIPELINE" == "true" ]]; then
+                echo ""
+                echo "Running pipeline verification..."
+
+                VERIFY_CMD=(
+                    python scripts/verify_pipeline_run.py
+                    --tool-schema "$TOOL_SCHEMA"
+                    --report-json "$VIS_RUN_DIR/verification_report.json"
+                    --expected-steps "$TOTAL_STEPS"
+                )
+
+                if [[ -f "$MODEL_OUTPUT_DIR/train.log" ]]; then
+                    VERIFY_CMD+=(--train-log "$MODEL_OUTPUT_DIR/train.log")
+                fi
+                if [[ -f "$MODEL_OUTPUT_DIR/training_manifest.json" ]]; then
+                    VERIFY_CMD+=(--training-manifest "$MODEL_OUTPUT_DIR/training_manifest.json")
+                fi
+                if [[ -f "$VIS_EVAL_DIR/fujitsu_eval.json" ]]; then
+                    VERIFY_CMD+=(--eval-json "$VIS_EVAL_DIR/fujitsu_eval.json")
+                fi
+                if [[ -f "$VIS_EVAL_DIR/agentdojo_eval.json" ]]; then
+                    VERIFY_CMD+=(--eval-json "$VIS_EVAL_DIR/agentdojo_eval.json")
+                fi
+                if [[ -f "$TRACES_DIR/fujitsu_b4_ds.jsonl" ]]; then
+                    VERIFY_CMD+=(--trace-jsonl "$TRACES_DIR/fujitsu_b4_ds.jsonl")
+                fi
+                if [[ -f "$AGENTDOJO_HARMFUL" ]]; then
+                    VERIFY_CMD+=(--trace-jsonl "$AGENTDOJO_HARMFUL")
+                fi
+                if [[ -f "$LOSSMASKS_DIR/fujitsu_b4_ds.jsonl" ]]; then
+                    VERIFY_CMD+=(--lossmask-jsonl "$LOSSMASKS_DIR/fujitsu_b4_ds.jsonl")
+                fi
+                if [[ -f "$LOSSMASKS_DIR/fujitsu_b4_dr.jsonl" ]]; then
+                    VERIFY_CMD+=(--lossmask-jsonl "$LOSSMASKS_DIR/fujitsu_b4_dr.jsonl")
+                fi
+                if [[ -f "$OUTPUT_BASE/split/agentdojo/agentdojo_lossmasks_cb.jsonl" ]]; then
+                    VERIFY_CMD+=(--lossmask-jsonl "$OUTPUT_BASE/split/agentdojo/agentdojo_lossmasks_cb.jsonl")
+                fi
+                if [[ -f "$OUTPUT_BASE/split/agentdojo/agentdojo_lossmasks_retain.jsonl" ]]; then
+                    VERIFY_CMD+=(--lossmask-jsonl "$OUTPUT_BASE/split/agentdojo/agentdojo_lossmasks_retain.jsonl")
+                fi
+                if [[ "$VERIFY_FAIL_ON_ERROR" == "true" ]]; then
+                    VERIFY_CMD+=(--fail-on-error)
+                fi
+
+                "${VERIFY_CMD[@]}" | tee "$VIS_RUN_DIR/verification.txt"
+                if [[ -f "$VIS_RUN_DIR/verification_report.json" ]]; then
+                    VERIFY_STATUS=$(python3 -c "
+import json
+with open('$VIS_RUN_DIR/verification_report.json') as f:
+    r = json.load(f)
+print('pass' if r.get('summary', {}).get('passed') else 'fail')
+" 2>/dev/null || echo "unknown")
+                    echo "Verification status: $VERIFY_STATUS"
+                fi
+            fi
+
             echo ""
             echo "Eval output: $VIS_EVAL_DIR"
             echo "  Visualize: python scripts/visualize_sweep_results.py $VIS_RUN_DIR"
+            if [[ -f "$VIS_RUN_DIR/verification_report.json" ]]; then
+                echo "  Verification: $VIS_RUN_DIR/verification_report.json"
+            fi
         fi
     fi
 fi

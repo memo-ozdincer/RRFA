@@ -63,6 +63,13 @@ export LIMIT_GEN="${LIMIT_GEN:-5000}"
 export NUM_EXAMPLES="${NUM_EXAMPLES:-50}"
 export SHOW_EXAMPLES="${SHOW_EXAMPLES:-true}"
 export BATCH_SIZE="${BATCH_SIZE:-1}"
+export GRAD_ACCUM="${GRAD_ACCUM:-4}"
+export VERIFY_PIPELINE="${VERIFY_PIPELINE:-true}"
+export VERIFY_FAIL_ON_ERROR="${VERIFY_FAIL_ON_ERROR:-false}"
+export TRIPLET_BETA_HARMFUL="${TRIPLET_BETA_HARMFUL:-0.25}"
+export TRIPLET_GAMMA_KL="${TRIPLET_GAMMA_KL:-1.2}"
+export TRIPLET_MARGIN_BENIGN="${TRIPLET_MARGIN_BENIGN:-50.0}"
+export TRIPLET_MARGIN_HARMFUL="${TRIPLET_MARGIN_HARMFUL:-150.0}"
 
 echo "Starting sweep_hparams_simple.sbatch..."
 echo "  ALPHAS: ${ALPHAS}"
@@ -70,6 +77,7 @@ echo "  LAYER_CONFIGS: ${LAYER_CONFIGS}"
 echo "  POLICIES: ${POLICIES}"
 echo "  Datasets: Fujitsu, AgentDojo"
 echo "  Logging: Compatible with scripts/visualize_sweep_results.py"
+echo "  Verification: VERIFY_PIPELINE=${VERIFY_PIPELINE}, VERIFY_FAIL_ON_ERROR=${VERIFY_FAIL_ON_ERROR}"
 
 # =============================================================================
 # Cache Setup (Offline Mode)

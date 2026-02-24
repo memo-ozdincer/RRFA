@@ -11,6 +11,8 @@ import json
 import logging
 import os
 import sys
+from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
@@ -239,6 +241,32 @@ def run_training(
         trainer.cleanup()
 
 
+def write_training_manifest(
+    config: CircuitBreakerConfig,
+    harmful_samples: List[Dict[str, Any]],
+    benign_samples: List[Dict[str, Any]],
+) -> Path:
+    """Write resolved config + sample counts for post-run verification."""
+    output_dir = Path(config.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest = {
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "config": asdict(config),
+        "data": {
+            "harmful_samples": len(harmful_samples),
+            "benign_samples": len(benign_samples),
+            "total_samples": len(harmful_samples) + len(benign_samples),
+        },
+    }
+
+    manifest_path = output_dir / "training_manifest.json"
+    with open(manifest_path, "w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, indent=2, ensure_ascii=False)
+
+    return manifest_path
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Circuit Breaker training with schema v1 data format",
@@ -451,6 +479,9 @@ def main() -> None:
     logger.info("  loss_mode=%s", config.loss_mode)
     logger.info("  output_dir=%s", config.output_dir)
     logger.info("  harmful=%d benign=%d", len(harmful_samples), len(benign_samples))
+
+    manifest_path = write_training_manifest(config, harmful_samples, benign_samples)
+    logger.info("  training_manifest=%s", manifest_path)
 
     run_training(config, harmful_samples, benign_samples)
 
