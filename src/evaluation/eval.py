@@ -585,6 +585,14 @@ def _infer_tools_from_samples(
     return inferred
 
 
+def _infer_tools_from_single_sample(
+    sample: Dict[str, Any],
+    schema_tools: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Infer a minimal tool schema for one sample from its observed trace tool calls."""
+    return _infer_tools_from_samples([sample], schema_tools)
+
+
 def _log_eval_context(
     eval_samples: List[Dict[str, Any]],
     schema_tools: List[Dict[str, Any]],
@@ -738,9 +746,10 @@ def _evaluate_model_on_samples(
                 ]
             )
             actual_tools = inferred_tools
-            tool_source = "inferred_from_samples"
+            tool_source = "per_sample_inferred"
             logger.warning(
-                "Using sample context with inferred tool schema (%d tools): %s",
+                "Using sample context with inferred tool schema (%d tools): %s "
+                "(generation comparison will infer tools per sample when needed)",
                 len(inferred_tools),
                 inferred_names,
             )
@@ -820,7 +829,9 @@ def _evaluate_model_on_samples(
         generation_comparison = evaluate_generation_comparison(
             model, tokenizer, eval_samples, actual_tools, actual_system_prompt,
             model_name="cb_model" if adapter_path else "baseline",
-            verbose=verbose
+            verbose=verbose,
+            use_sample_context=use_sample_context,
+            schema_tools=tools,
         )
         if verbose:
             logger.info(f"  Generation comparison produced {generation_comparison['total_samples']} results")
@@ -2008,6 +2019,8 @@ def evaluate_generation_comparison(
     system_prompt: str,
     model_name: str = "model",
     verbose: bool = True,
+    use_sample_context: bool = False,
+    schema_tools: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Generation evaluation for datasets without tool_attack info (e.g. AgentDojo).
@@ -2023,6 +2036,7 @@ def evaluate_generation_comparison(
     """
     results = []
     dataset_type = _detect_dataset_type(eval_samples)
+    schema_tools = schema_tools or tools
 
     iterator = tqdm(eval_samples, desc=f"Generating ({model_name})") if verbose else eval_samples
 
@@ -2037,6 +2051,21 @@ def evaluate_generation_comparison(
         if not messages:
             continue
 
+        sample_tools_source = "global"
+        sample_tools = tools
+        if use_sample_context:
+            embedded_tools, _ = _extract_sample_tools_and_system(sample)
+            if embedded_tools:
+                sample_tools = embedded_tools
+                sample_tools_source = "sample_embedded"
+            else:
+                inferred_tools = _infer_tools_from_single_sample(sample, schema_tools)
+                if inferred_tools:
+                    sample_tools = inferred_tools
+                    sample_tools_source = "per_sample_inferred"
+                else:
+                    sample_tools_source = "global_fallback"
+
         # Get labels for context
         labels = sample.get("labels", {})
         category = labels.get("category", "unknown")
@@ -2046,7 +2075,7 @@ def evaluate_generation_comparison(
         reference_tools = _extract_reference_tools_from_sample(sample)
 
         try:
-            response = generate_with_tools(model, tokenizer, messages, tools)
+            response = generate_with_tools(model, tokenizer, messages, sample_tools)
         except Exception as e:
             logger.error(f"Generation error for {sample.get('id')}: {e}")
             continue
@@ -2078,6 +2107,7 @@ def evaluate_generation_comparison(
             "reference_tools": sorted(reference_tools) if reference_tools else None,
             "matches_reference": matches_reference,
             "is_valid_json": is_valid_json,
+            "tools_source": sample_tools_source,
             "response_preview": response[:500] if len(response) > 500 else response,
             "response_full": response,
             "sample_context": _extract_sample_context(sample),
@@ -2404,13 +2434,14 @@ def run_mvp_evaluation(
                 inferred_tools = _infer_tools_from_samples(eval_samples, tools)
                 if inferred_tools:
                     worker_tools = inferred_tools
-                    tool_source = "inferred_from_samples"
+                    tool_source = "per_sample_inferred"
                 else:
                     worker_tools = tools
                     tool_source = "schema_fallback"
 
-            # Context is pre-resolved globally, so workers should not resolve per-chunk.
-            worker_use_sample_context = False
+            # Keep sample-context enabled in workers so generation comparison can
+            # resolve tools per sample (avoids single-tool collapse on mixed suites).
+            worker_use_sample_context = True
             precomputed_eval_context = {
                 "dataset_type": dataset_type,
                 "use_sample_context": use_sample_context,

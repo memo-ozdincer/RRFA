@@ -1684,6 +1684,104 @@ class CircuitBreakerTrainer:
         
         self.accelerator.print("=" * 60 + "\n")
 
+    def _validate_external_lossmasks(self):
+        """
+        Lightweight sanity checks for externally pre-tokenized datasets.
+
+        We cannot decode/reconstruct completion boundaries here, but we can still
+        verify that masks are non-empty, bounded, and aligned with attention masks.
+        """
+        self.accelerator.print("\n" + "=" * 60)
+        self.accelerator.print("VALIDATING EXTERNAL LOSSMASKS")
+        self.accelerator.print("=" * 60)
+
+        if not hasattr(self.dataset, "__len__") or not hasattr(self.dataset, "__getitem__"):
+            self.accelerator.print("  Dataset does not support direct indexing; skipping validation.")
+            self.accelerator.print("=" * 60 + "\n")
+            return
+
+        num_to_check = min(8, len(self.dataset))
+        if num_to_check == 0:
+            self.accelerator.print("  No samples to validate.")
+            self.accelerator.print("=" * 60 + "\n")
+            return
+
+        stats = {
+            "samples_checked": 0,
+            "harmful_nonzero_tokens": 0,
+            "harmful_total_tokens": 0,
+            "benign_nonzero_tokens": 0,
+            "benign_total_tokens": 0,
+            "zero_mask_samples": 0,
+            "invalid_weight_samples": 0,
+        }
+
+        for idx in range(num_to_check):
+            sample = self.dataset[idx]
+            stats["samples_checked"] += 1
+
+            for side in ("harmful", "benign"):
+                mask = sample.get(f"{side}_loss_mask")
+                attn = sample.get(f"{side}_attention_mask")
+                weight = sample.get(f"{side}_sample_weight")
+
+                if mask is None:
+                    continue
+
+                mask = mask.float()
+                if attn is None:
+                    attn = torch.ones_like(mask, dtype=torch.long)
+                attn = attn.long()
+
+                active = attn > 0
+                total_tokens = int(active.sum().item())
+                nonzero_tokens = int(((mask > 0) & active).sum().item())
+
+                stats[f"{side}_total_tokens"] += total_tokens
+                stats[f"{side}_nonzero_tokens"] += nonzero_tokens
+
+                if total_tokens > 0 and nonzero_tokens == 0:
+                    stats["zero_mask_samples"] += 1
+
+                if weight is not None:
+                    weight_value = float(weight.item()) if torch.is_tensor(weight) else float(weight)
+                    if not math.isfinite(weight_value) or weight_value <= 0:
+                        stats["invalid_weight_samples"] += 1
+
+        def _ratio(nonzero_key: str, total_key: str) -> float:
+            total = stats[total_key]
+            if total <= 0:
+                return 0.0
+            return stats[nonzero_key] / total
+
+        harmful_ratio = _ratio("harmful_nonzero_tokens", "harmful_total_tokens")
+        benign_ratio = _ratio("benign_nonzero_tokens", "benign_total_tokens")
+
+        self.accelerator.print(f"  Samples checked: {stats['samples_checked']}")
+        self.accelerator.print(
+            f"  Harmful mask coverage: {stats['harmful_nonzero_tokens']}/{stats['harmful_total_tokens']} "
+            f"({harmful_ratio:.2%})"
+        )
+        self.accelerator.print(
+            f"  Benign mask coverage:  {stats['benign_nonzero_tokens']}/{stats['benign_total_tokens']} "
+            f"({benign_ratio:.2%})"
+        )
+
+        if stats["zero_mask_samples"] > 0:
+            self.accelerator.print(
+                f"  WARNING: {stats['zero_mask_samples']} checked samples had zero non-masked tokens."
+            )
+        if stats["invalid_weight_samples"] > 0:
+            self.accelerator.print(
+                f"  WARNING: {stats['invalid_weight_samples']} checked samples had invalid sample weights."
+            )
+        if harmful_ratio < 0.001 or benign_ratio < 0.001:
+            self.accelerator.print(
+                "  WARNING: Very low lossmask coverage detected. Re-check ETL_B policy/MWCS settings."
+            )
+
+        self.accelerator.print("=" * 60 + "\n")
+
     def train(self):
         """Main training loop."""
         self.accelerator.print("=" * 60)
@@ -1701,7 +1799,10 @@ class CircuitBreakerTrainer:
         if isinstance(self.dataset, CircuitBreakerDataset):
             self._validate_completion_masking()
         else:
-            self.accelerator.print("Skipping completion-mask validation (external pre-tokenized dataset)")
+            self.accelerator.print(
+                "External pre-tokenized dataset detected; running lightweight lossmask sanity checks."
+            )
+            self._validate_external_lossmasks()
         
         progress_bar = tqdm(
             total=self.config.total_steps,

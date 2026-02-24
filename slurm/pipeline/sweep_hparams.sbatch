@@ -16,6 +16,7 @@
 #   - `POLICIES` (lossmask policy)
 #   - `LAYER_CONFIGS` (CB target layers)
 #   - `ALPHAS` (alpha_max for legacy schedules)
+# And applies one MWCS schedule per sweep run (`MWCS_SCHEDULE`).
 #
 # For each configuration: ETL_B (policy) -> train -> eval.
 # Evaluates on Fujitsu + AgentDojo and produces full trace visualization.
@@ -38,7 +39,15 @@
 #    POLICIES=assistant_only,assistant_and_tool,cb_full_sequence,tool_calls_only,completion_only \
 #    sbatch slurm/pipeline/sweep_hparams.sbatch
 #
-# 5) Legacy loss sweep:
+# 5) Compare MWCS schedules (run multiple sweeps):
+#    for S in balanced_cb attack_focus capability_focus; do \
+#      ALPHAS=10.0 LAYER_CONFIGS=10,20 \
+#      POLICIES=assistant_and_tool,cb_full_sequence,action_commitment \
+#      MWCS_SCHEDULE=$S \
+#      sbatch slurm/pipeline/sweep_hparams.sbatch; \
+#    done
+#
+# 6) Legacy loss sweep:
 #    LOSS_MODE=legacy_cb LOSS_WEIGHTING=dual \
 #    sbatch slurm/pipeline/sweep_hparams.sbatch
 #
@@ -46,10 +55,10 @@
 # Config knobs (pass with `VAR=value sbatch ...`)
 # -----------------------------------------------------------------------------
 # Sweep controls:
-#   QUICK_TEST, TOTAL_STEPS, ALPHAS, LAYER_CONFIGS, POLICIES
+#   QUICK_TEST, TOTAL_STEPS, ALPHAS, LAYER_CONFIGS, POLICIES, MWCS_SCHEDULE
 #
 # Eval/logging:
-#   LIMIT_EVAL, NUM_EXAMPLES, SHOW_EXAMPLES
+#   LIMIT_EVAL, NUM_EXAMPLES, SHOW_EXAMPLES, AGENTDOJO_EVAL_SPLIT
 #
 # Data limits:
 # Core training:
@@ -117,6 +126,8 @@ if [[ "$QUICK_TEST" == "true" ]]; then
     DEFAULT_ALPHAS="5.0,10.0"
     DEFAULT_LAYER_CONFIGS="10,20"
     DEFAULT_POLICIES="assistant_only"
+    DEFAULT_MWCS_SCHEDULE="none"
+    DEFAULT_AGENTDOJO_EVAL_SPLIT="complete"
     DEFAULT_LIMIT_EVAL=20
     DEFAULT_NUM_EXAMPLES=5
 else
@@ -124,6 +135,8 @@ else
     DEFAULT_ALPHAS="5.0,10.0,15.0"
     DEFAULT_LAYER_CONFIGS="10,20|8,16,24|12,18|6,12,18,24"
     DEFAULT_POLICIES="assistant_only,assistant_and_tool,cb_full_sequence,tool_calls_only,completion_only"
+    DEFAULT_MWCS_SCHEDULE="none"
+    DEFAULT_AGENTDOJO_EVAL_SPLIT="complete"
     DEFAULT_LIMIT_EVAL=50
     DEFAULT_NUM_EXAMPLES=50
 fi
@@ -132,6 +145,10 @@ TOTAL_STEPS="${TOTAL_STEPS:-$DEFAULT_STEPS}"
 ALPHAS="${ALPHAS:-$DEFAULT_ALPHAS}"
 LAYER_CONFIGS="${LAYER_CONFIGS:-$DEFAULT_LAYER_CONFIGS}"
 POLICIES="${POLICIES:-$DEFAULT_POLICIES}"
+MWCS_SCHEDULE="${MWCS_SCHEDULE:-$DEFAULT_MWCS_SCHEDULE}"
+MWCS_REGISTRY="${MWCS_REGISTRY:-$REPO_DIR/configs/mwcs_registry_v1.json}"
+MWCS_STEP="${MWCS_STEP:-0}"
+AGENTDOJO_EVAL_SPLIT="${AGENTDOJO_EVAL_SPLIT:-$DEFAULT_AGENTDOJO_EVAL_SPLIT}"
 LIMIT_EVAL="${LIMIT_EVAL:-$DEFAULT_LIMIT_EVAL}"
 NUM_EXAMPLES="${NUM_EXAMPLES:-$DEFAULT_NUM_EXAMPLES}"
 SHOW_EXAMPLES="${SHOW_EXAMPLES:-true}"
@@ -167,10 +184,14 @@ echo "  TOTAL_STEPS: $TOTAL_STEPS"
 echo "  ALPHAS: $ALPHAS"
 echo "  LAYER_CONFIGS: $LAYER_CONFIGS"
 echo "  POLICIES: $POLICIES"
+echo "  MWCS_SCHEDULE: $MWCS_SCHEDULE"
+echo "  MWCS_REGISTRY: $MWCS_REGISTRY"
+echo "  MWCS_STEP: $MWCS_STEP"
 echo "  BATCH_SIZE: $BATCH_SIZE"
 echo "  GRAD_ACCUM: $GRAD_ACCUM"
 echo "  LEARNING_RATE: $LEARNING_RATE"
 echo "  LOSS_MODE: $LOSS_MODE"
+echo "  AGENTDOJO_EVAL_SPLIT: $AGENTDOJO_EVAL_SPLIT"
 echo "  LIMIT_EVAL: $LIMIT_EVAL"
 echo "  NUM_EXAMPLES: $NUM_EXAMPLES"
 echo "  SHOW_EXAMPLES: $SHOW_EXAMPLES"
@@ -281,7 +302,8 @@ for alpha in "${ALPHA_ARRAY[@]}"; do
             
             # Create unique run name
             layers_short="${layers//,/_}"
-            RUN_NAME="a${alpha}_l${layers_short}_${policy}"
+            mwcs_label="${MWCS_SCHEDULE//\//-}"
+            RUN_NAME="a${alpha}_l${layers_short}_p${policy}_mw${mwcs_label}"
             RUN_DIR="$SWEEP_DIR/$RUN_NAME"
             verification_status="skipped"
             
@@ -291,18 +313,46 @@ for alpha in "${ALPHA_ARRAY[@]}"; do
             echo "  Alpha: $alpha"
             echo "  Layers: $layers"
             echo "  Policy: $policy"
+            echo "  MWCS: $MWCS_SCHEDULE (step=$MWCS_STEP)"
             echo "  Output: $RUN_DIR"
             echo ""
             
             mkdir -p "$RUN_DIR"/{renders,lossmasks,model,eval}
+
+            cat > "$RUN_DIR/run_config.json" << JSONEOF
+{
+  "run_name": "$RUN_NAME",
+  "alpha": "$alpha",
+  "layers": "$layers",
+  "policy": "$policy",
+  "mwcs_schedule": "$MWCS_SCHEDULE",
+  "mwcs_step": "$MWCS_STEP",
+  "agentdojo_eval_split": "$AGENTDOJO_EVAL_SPLIT",
+  "loss_mode": "$LOSS_MODE",
+  "loss_weighting": "$LOSS_WEIGHTING",
+  "triplet_beta_harmful": "$TRIPLET_BETA_HARMFUL",
+  "triplet_gamma_kl": "$TRIPLET_GAMMA_KL",
+  "triplet_margin_benign": "$TRIPLET_MARGIN_BENIGN",
+  "triplet_margin_harmful": "$TRIPLET_MARGIN_HARMFUL"
+}
+JSONEOF
             
             # =====================================================
             # Step 1: ETL_B with this policy
             # =====================================================
-            echo "Step 1: Creating lossmasks with policy=$policy"
+            echo "Step 1: Creating lossmasks with policy=$policy mwcs=$MWCS_SCHEDULE"
             
             etl_start=$(date +%s)
             TRACE_FILES=("$DS_TRACES" "$DR_TRACES" "$AGENTDOJO_TRACES")
+            ETL_B_MWCS_ARGS=()
+            if [[ "$MWCS_SCHEDULE" != "none" && -n "$MWCS_SCHEDULE" ]]; then
+                if [[ -f "$MWCS_REGISTRY" ]]; then
+                    ETL_B_MWCS_ARGS+=(--mwcs-registry "$MWCS_REGISTRY")
+                else
+                    echo "  WARNING: MWCS registry not found at $MWCS_REGISTRY (continuing without registry)"
+                fi
+                ETL_B_MWCS_ARGS+=(--mwcs-schedule "$MWCS_SCHEDULE" --mwcs-step "$MWCS_STEP")
+            fi
 
             for trace_file in "${TRACE_FILES[@]}"; do
                 basename=$(basename "$trace_file" .jsonl)
@@ -316,7 +366,8 @@ for alpha in "${ALPHA_ARRAY[@]}"; do
                     --lossmask-out "$lossmask_out" \
                     --tokenizer "$TOKENIZER" \
                     --max-length 4096 \
-                    --policy-override "$policy" 2>&1 | tee -a "$RUN_DIR/etl_b.log"
+                    --policy-override "$policy" \
+                    "${ETL_B_MWCS_ARGS[@]}" 2>&1 | tee -a "$RUN_DIR/etl_b.log"
             done
             etl_end=$(date +%s)
             echo "  ETL_B completed in $((etl_end - etl_start))s"
@@ -360,7 +411,7 @@ print(total)
             # =====================================================
             # Step 3: Training (same args as sweep_policies.sbatch)
             # =====================================================
-            echo "Step 3: Training with alpha=$alpha, layers=$layers, policy=$policy"
+            echo "Step 3: Training with alpha=$alpha, layers=$layers, policy=$policy, mwcs=$MWCS_SCHEDULE"
             
             # Parse layers to array
             IFS=',' read -ra CB_LAYER_ARRAY <<< "$layers"
@@ -505,16 +556,31 @@ PYEOF
                     fi
 
                     # ---------------------------------------------------------
-                    # Evaluate on AgentDojo (harmful subset)
+                    # Evaluate on AgentDojo
                     # ---------------------------------------------------------
-                    echo "  Evaluating on AgentDojo ($LIMIT_EVAL samples)..."
                     AGENTDOJO_OUTPUT="$RUN_DIR/eval/agentdojo_eval.json"
+                    case "$AGENTDOJO_EVAL_SPLIT" in
+                        complete)
+                            AGENTDOJO_EVAL_FILE="$AGENTDOJO_TRACES"
+                            ;;
+                        harmful)
+                            AGENTDOJO_EVAL_FILE="$SPLIT_DIR/agentdojo_traces_harmful.jsonl"
+                            ;;
+                        benign)
+                            AGENTDOJO_EVAL_FILE="$SPLIT_DIR/agentdojo_traces_benign.jsonl"
+                            ;;
+                        *)
+                            echo "  WARNING: Unknown AGENTDOJO_EVAL_SPLIT=$AGENTDOJO_EVAL_SPLIT (using complete)"
+                            AGENTDOJO_EVAL_FILE="$AGENTDOJO_TRACES"
+                            ;;
+                    esac
+                    echo "  Evaluating on AgentDojo ($AGENTDOJO_EVAL_SPLIT, $LIMIT_EVAL samples)..."
                     
-                    if [[ -f "$SPLIT_DIR/agentdojo_traces_harmful.jsonl" ]]; then
+                    if [[ -f "$AGENTDOJO_EVAL_FILE" ]]; then
                         python src/evaluation/eval.py \
                             --baseline "$TOKENIZER" \
                             --cb-adapter "$ADAPTER_PATH" \
-                            --eval-data "$SPLIT_DIR/agentdojo_traces_harmful.jsonl" \
+                            --eval-data "$AGENTDOJO_EVAL_FILE" \
                             --tool-schema "$REPO_DIR/configs/tool_schemas/b4_standard_v1.json" \
                             --output "$AGENTDOJO_OUTPUT" \
                             --use-sample-context \
@@ -556,9 +622,11 @@ for i, p in enumerate(differ[:$NUM_EXAMPLES], 1):
     print(f'    --- CB MODEL RESPONSE ---')
     print(p.get('cb_response') or '(empty)')
     print()
-                                PYEOF
+PYEOF
                             fi
                         fi
+                    else
+                        echo "  WARNING: AgentDojo eval file not found: $AGENTDOJO_EVAL_FILE"
                     fi
 
                     # ---------------------------------------------------------
@@ -584,8 +652,8 @@ for i, p in enumerate(differ[:$NUM_EXAMPLES], 1):
                         if [[ -f "$DS_TRACES" ]]; then
                             VERIFY_CMD+=(--trace-jsonl "$DS_TRACES")
                         fi
-                        if [[ -f "$SPLIT_DIR/agentdojo_traces_harmful.jsonl" ]]; then
-                            VERIFY_CMD+=(--trace-jsonl "$SPLIT_DIR/agentdojo_traces_harmful.jsonl")
+                        if [[ -n "${AGENTDOJO_EVAL_FILE:-}" && -f "$AGENTDOJO_EVAL_FILE" ]]; then
+                            VERIFY_CMD+=(--trace-jsonl "$AGENTDOJO_EVAL_FILE")
                         fi
                         if [[ -f "$RUN_DIR/lossmasks/fujitsu_b4_ds.jsonl" ]]; then
                             VERIFY_CMD+=(--lossmask-jsonl "$RUN_DIR/lossmasks/fujitsu_b4_ds.jsonl")
@@ -638,6 +706,7 @@ print('pass' if r.get('summary', {}).get('passed') else 'fail')
             echo "--- Run Summary: $RUN_NAME ---"
             echo "  Training: $train_status"
             echo "  Verification: $verification_status"
+            echo "  AgentDojo Eval Split: $AGENTDOJO_EVAL_SPLIT"
             if [[ -f "$RUN_DIR/eval/fujitsu_eval.json" ]]; then
                 python3 -c "
 import json
@@ -699,17 +768,35 @@ echo ""
 
 # Generate summary CSV
 SUMMARY_CSV="$SWEEP_DIR/summary.csv"
-echo "alpha,layers,policy,fujitsu_baseline_asr,fujitsu_cb_asr,fujitsu_delta,agentdojo_diff,agentdojo_benign_match,agentdojo_harmful_resist,agentdojo_baseline_tool_call_rate,agentdojo_cb_tool_call_rate,status,verification_status" > "$SUMMARY_CSV"
+echo "alpha,layers,policy,mwcs_schedule,mwcs_step,agentdojo_eval_split,fujitsu_baseline_asr,fujitsu_cb_asr,fujitsu_delta,agentdojo_diff,agentdojo_benign_match,agentdojo_harmful_resist,agentdojo_baseline_tool_call_rate,agentdojo_cb_tool_call_rate,status,verification_status" > "$SUMMARY_CSV"
 
 for run_dir in "$SWEEP_DIR"/a*; do
     if [[ -d "$run_dir" ]]; then
         run_name=$(basename "$run_dir")
 
-        # Parse run name to extract params
-        # Format: a${alpha}_l${layers}_${policy}
-        alpha=$(echo "$run_name" | sed -n 's/^a\([0-9.]*\)_.*/\1/p')
-        layers=$(echo "$run_name" | sed -n 's/.*_l\([0-9_]*\)_.*/\1/p' | tr '_' ',')
-        policy=$(echo "$run_name" | sed -n 's/.*_l[0-9_]*_\(.*\)/\1/p')
+        # Prefer structured config metadata; fallback to legacy run-name parsing.
+        if [[ -f "$run_dir/run_config.json" ]]; then
+            read alpha layers policy mwcs_schedule mwcs_step agentdojo_eval_split < <(python3 -c "
+import json
+with open('$run_dir/run_config.json') as f:
+    cfg = json.load(f)
+print(
+    cfg.get('alpha', ''),
+    cfg.get('layers', ''),
+    cfg.get('policy', ''),
+    cfg.get('mwcs_schedule', 'none'),
+    cfg.get('mwcs_step', '0'),
+    cfg.get('agentdojo_eval_split', 'complete'),
+)
+" 2>/dev/null || echo "N/A N/A N/A none 0 complete")
+        else
+            alpha=$(echo "$run_name" | sed -n 's/^a\([0-9.]*\)_.*/\1/p')
+            layers=$(echo "$run_name" | sed -n 's/.*_l\([0-9_]*\)_.*/\1/p' | tr '_' ',')
+            policy=$(echo "$run_name" | sed -n 's/.*_l[0-9_]*_\(.*\)/\1/p')
+            mwcs_schedule="none"
+            mwcs_step="0"
+            agentdojo_eval_split="harmful"
+        fi
 
         # Get metrics
         fujitsu_baseline="N/A"
@@ -761,7 +848,7 @@ print('pass' if r.get('summary', {}).get('passed') else 'fail')
             verification_status_csv="unknown"
         fi
 
-        echo "$alpha,$layers,$policy,$fujitsu_baseline,$fujitsu_cb,$fujitsu_delta,$agentdojo_diff,$agentdojo_benign_match,$agentdojo_harmful_resist,$agentdojo_baseline_tool_call_rate,$agentdojo_cb_tool_call_rate,$status,$verification_status_csv" >> "$SUMMARY_CSV"
+        echo "$alpha,$layers,$policy,$mwcs_schedule,$mwcs_step,$agentdojo_eval_split,$fujitsu_baseline,$fujitsu_cb,$fujitsu_delta,$agentdojo_diff,$agentdojo_benign_match,$agentdojo_harmful_resist,$agentdojo_baseline_tool_call_rate,$agentdojo_cb_tool_call_rate,$status,$verification_status_csv" >> "$SUMMARY_CSV"
     fi
 done
 
@@ -799,6 +886,8 @@ try:
         print(f'  Alpha: {best[1][\"alpha\"]}')
         print(f'  Layers: {best[1][\"layers\"]}')
         print(f'  Policy: {best[1][\"policy\"]}')
+        print(f'  MWCS: {best[1].get(\"mwcs_schedule\", \"none\")} (step={best[1].get(\"mwcs_step\", \"0\")})')
+        print(f'  AgentDojo Eval Split: {best[1].get(\"agentdojo_eval_split\", \"N/A\")}')
         print(f'  Baseline ASR: {best[1][\"fujitsu_baseline_asr\"]}')
         print(f'  Delta: {best[1][\"fujitsu_delta\"]}')
         print(f'  AgentDojo Diff: {best[1][\"agentdojo_diff\"]}')

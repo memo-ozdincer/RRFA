@@ -21,7 +21,7 @@ Usage:
     python scripts/visualize_sweep_results.py <sweep_dir> --show-samples 10 --filter-success
     
     # Analyze specific run
-    python scripts/visualize_sweep_results.py <sweep_dir> --run a5.0_l10_20_assistant_only
+    python scripts/visualize_sweep_results.py <sweep_dir> --run a10.0_l10_20_passistant_and_tool_mwbalanced_cb
     
 """
 
@@ -393,8 +393,20 @@ def parse_run_name(run_name: str) -> Tuple[Dict[str, str], Optional[str]]:
     """
     Parse run name into hparams and lossmask.
 
-    Example: a5.0_l10_20_assistant_only -> hparams={"a": "5.0"}, lossmask="l10_20_assistant_only"
+    Supports both:
+      - legacy: a5.0_l10_20_assistant_only
+      - explicit: a5.0_l10_20_passistant_only_mwbalanced_cb
     """
+    explicit = re.match(r"^a(?P<a>[0-9.]+)_l(?P<layers>[0-9_]+)_p(?P<policy>.+?)_mw(?P<mwcs>.+)$", run_name)
+    if explicit:
+        hparams = {
+            "a": explicit.group("a"),
+            "l": explicit.group("layers").replace("_", ","),
+            "p": explicit.group("policy"),
+            "mw": explicit.group("mwcs"),
+        }
+        return hparams, explicit.group("policy")
+
     tokens = run_name.split("_")
     hparams: Dict[str, str] = {}
     lossmask: Optional[str] = None
@@ -669,10 +681,31 @@ def analyze_run(
 ) -> Dict[str, Any]:
     """Analyze a single run directory."""
     hparams, lossmask = parse_run_name(run_dir.name)
+    run_config = load_json(run_dir / "run_config.json")
+
+    alpha = run_config.get("alpha") if run_config else None
+    layers = run_config.get("layers") if run_config else None
+    policy = run_config.get("policy") if run_config else None
+    mwcs_schedule = run_config.get("mwcs_schedule") if run_config else None
+    agentdojo_eval_split = run_config.get("agentdojo_eval_split") if run_config else None
+
+    verification_status = "N/A"
+    verification_report = load_json(run_dir / "verification_report.json")
+    if verification_report:
+        verification_status = "pass" if verification_report.get("summary", {}).get("passed") else "fail"
+    elif (run_dir / "verify.log").exists():
+        verification_status = "unknown"
+
     results = {
         "run_name": run_dir.name,
         "hparams": hparams,
         "lossmask": lossmask,
+        "alpha": alpha,
+        "layers": layers,
+        "policy": policy,
+        "mwcs_schedule": mwcs_schedule,
+        "agentdojo_eval_split": agentdojo_eval_split,
+        "verification_status": verification_status,
         "fujitsu": None,
         "llmail": None,
         "agentdojo": None,
@@ -872,11 +905,19 @@ def analyze_run(
         paired = load_jsonl(agentdojo_paired)
 
         output_comparison = eval_data.get("output_comparison", {})
+        baseline_gc = eval_data.get("baseline", {}).get("generation_comparison", {})
+        cb_gc = eval_data.get("cb_model", {}).get("generation_comparison", {})
+        cb_context = eval_data.get("cb_model", {}).get("evaluation_context", {})
 
         results["agentdojo"] = {
             "total": output_comparison.get("total_compared", 0),
             "different": output_comparison.get("different", 0),
             "diff_rate": output_comparison.get("difference_rate", 0) * 100,
+            "baseline_tool_call_rate": baseline_gc.get("tool_call_rate"),
+            "cb_tool_call_rate": cb_gc.get("tool_call_rate"),
+            "harmful_resistance_rate": cb_gc.get("harmful_resistance_rate"),
+            "benign_tool_match_rate": cb_gc.get("benign_tool_match_rate"),
+            "tool_source": cb_context.get("tool_source"),
         }
 
         # Show sample details if requested
@@ -916,7 +957,14 @@ def get_best_runs(
     top_n: int = 5,
     metric_dataset: str = "fujitsu",
 ) -> List[Dict[str, Any]]:
-    """Return top runs by lowest CB ASR for dataset with ASR metrics."""
+    """Return top runs by dataset-specific primary metric."""
+    if metric_dataset == "agentdojo":
+        valid_runs = [
+            r for r in runs
+            if r.get("agentdojo") and r["agentdojo"].get("diff_rate") is not None
+        ]
+        return sorted(valid_runs, key=lambda r: r["agentdojo"]["diff_rate"], reverse=True)[:top_n]
+
     valid_runs = [
         r for r in runs
         if r.get(metric_dataset) and r[metric_dataset].get("cb_asr") is not None
@@ -924,81 +972,67 @@ def get_best_runs(
     return sorted(valid_runs, key=lambda r: r[metric_dataset]["cb_asr"])[:top_n]
 
 def print_summary_table(runs: List[Dict[str, Any]], use_color: bool = True) -> None:
-    """Print a summary table of all runs."""
+    """Print a concrete, non-hallucinatory summary table of all runs."""
     BOLD = "\033[1m" if use_color else ""
     GREEN = "\033[92m" if use_color else ""
     RED = "\033[91m" if use_color else ""
     RESET = "\033[0m" if use_color else ""
-    
-    print(f"\n{BOLD}{'='*150}{RESET}")
+
+    def _fmt_pct(value: Optional[float], scale_100: bool = False) -> str:
+        if not isinstance(value, (int, float)):
+            return "N/A"
+        pct = value * 100.0 if not scale_100 else value
+        return f"{pct:.1f}%"
+
+    print(f"\n{BOLD}{'='*190}{RESET}")
     print(f"{BOLD}SWEEP RESULTS SUMMARY{RESET}")
-    print(f"{'='*150}")
-    
-    # Header
+    print(f"{'='*190}")
+
     header = (
-        f"{'Run Name':<35} {'Hparams':<18} {'Lossmask':<28} "
-        f"{'Base ASR':<10} {'CB ASR':<8} {'Reduct':<10} {'AgentDojo':<10} "
-        f"{'LLMail':<10} {'LL Cap':<8} {'LL TgtAcc':<10}"
+        f"{'Run Name':<36} {'Alpha':<6} {'Layers':<11} {'Policy':<20} {'MWCS':<16} {'Verif':<6} "
+        f"{'Fuj Base':<9} {'Fuj CB':<9} {'Fuj Δ':<8} "
+        f"{'AD Diff':<8} {'AD TCR(B)':<10} {'AD TCR(CB)':<11} {'AD Resist':<9}"
     )
     print(f"{BOLD}{header}{RESET}")
-    print(f"{'-'*170}")
+    print("-" * 190)
 
     for run in runs:
         run_name = run.get("run_name", "?")
-        hparams = run.get("hparams") or {}
-        lossmask = run.get("lossmask") or "N/A"
-        hparams_str = ",".join(f"{k}{v}" for k, v in sorted(hparams.items())) or "N/A"
 
-        fujitsu = run.get("fujitsu", {})
-        if fujitsu:
-            base_asr = fujitsu.get("baseline_asr", 0)
-            cb_asr = fujitsu.get("cb_asr", 0)
+        alpha = run.get("alpha") or (run.get("hparams") or {}).get("a") or "N/A"
+        layers = run.get("layers") or (run.get("hparams") or {}).get("l") or "N/A"
+        policy = run.get("policy") or run.get("lossmask") or "N/A"
+        mwcs = run.get("mwcs_schedule") or (run.get("hparams") or {}).get("mw") or "none"
+        verif = run.get("verification_status", "N/A")
+
+        fujitsu = run.get("fujitsu", {}) or {}
+        base_asr = fujitsu.get("baseline_asr")
+        cb_asr = fujitsu.get("cb_asr")
+        reduction = None
+        if isinstance(base_asr, (int, float)) and isinstance(cb_asr, (int, float)):
             reduction = base_asr - cb_asr
 
-            base_str = f"{base_asr:.1f}%"
-            cb_str = f"{cb_asr:.1f}%"
-            red_str = f"{reduction:.1f}pp"
-
-            # Color code based on reduction
-            if reduction > 50:
+        base_str = _fmt_pct(base_asr, scale_100=True)
+        cb_str = _fmt_pct(cb_asr, scale_100=True)
+        if isinstance(reduction, (int, float)):
+            red_str = f"{reduction:+.1f}pp"
+            if reduction > 0:
                 red_str = f"{GREEN}{red_str}{RESET}"
             elif reduction < 0:
                 red_str = f"{RED}{red_str}{RESET}"
         else:
-            base_str = cb_str = red_str = "N/A"
+            red_str = "N/A"
 
-        agentdojo = run.get("agentdojo", {})
-        if agentdojo:
-            diff_rate = agentdojo.get("diff_rate", 0)
-            agent_str = f"{diff_rate:.1f}%"
-        else:
-            agent_str = "N/A"
-
-        llmail = run.get("llmail", {})
-        if llmail:
-            llmail_base = llmail.get("baseline_asr", 0)
-            llmail_cb = llmail.get("cb_asr", 0)
-            llmail_red = llmail_base - llmail_cb
-            llmail_str = f"{llmail_cb:.1f}%"
-            if llmail_red > 50:
-                llmail_str = f"{GREEN}{llmail_str}{RESET}"
-
-            cap = llmail.get("capability_retention")
-            cap_str = f"{cap*100:.0f}%" if isinstance(cap, (int, float)) else "N/A"
-            if isinstance(cap, (int, float)) and cap < 0.30:
-                cap_str = f"{RED}{cap_str}{RESET}"
-
-            ta = llmail.get("target_accuracy_rate")
-            ta_str = f"{ta*100:.0f}%" if isinstance(ta, (int, float)) else "N/A"
-        else:
-            llmail_str = "N/A"
-            cap_str = "N/A"
-            ta_str = "N/A"
+        agentdojo = run.get("agentdojo", {}) or {}
+        diff_str = _fmt_pct(agentdojo.get("diff_rate"), scale_100=True)
+        b_tcr_str = _fmt_pct(agentdojo.get("baseline_tool_call_rate"))
+        c_tcr_str = _fmt_pct(agentdojo.get("cb_tool_call_rate"))
+        resist_str = _fmt_pct(agentdojo.get("harmful_resistance_rate"))
 
         print(
-            f"{run_name:<35} {hparams_str:<18} {lossmask:<28} "
-            f"{base_str:<10} {cb_str:<8} {red_str:<10} {agent_str:<10} "
-            f"{llmail_str:<10} {cap_str:<8} {ta_str:<10}"
+            f"{run_name:<36} {str(alpha):<6} {str(layers):<11} {str(policy):<20} {str(mwcs):<16} {str(verif):<6} "
+            f"{base_str:<9} {cb_str:<9} {red_str:<8} "
+            f"{diff_str:<8} {b_tcr_str:<10} {c_tcr_str:<11} {resist_str:<9}"
         )
 
 
@@ -1019,22 +1053,41 @@ def print_best_runs(
     
     
     print(f"\n{BOLD}{'='*80}{RESET}")
-    print(f"{BOLD}TOP {top_n} RUNS BY LOWEST {metric_dataset.upper()} CB ASR{RESET}")
+    if metric_dataset == "agentdojo":
+        print(f"{BOLD}TOP {top_n} RUNS BY HIGHEST AGENTDOJO DIFFERENCE RATE{RESET}")
+    else:
+        print(f"{BOLD}TOP {top_n} RUNS BY LOWEST {metric_dataset.upper()} CB ASR{RESET}")
     print(f"{'='*80}")
     
     for i, run in enumerate(by_cb_asr[:top_n], 1):
         metric = run[metric_dataset]
         hparams = run.get("hparams") or {}
-        lossmask = run.get("lossmask") or "N/A"
         hparams_str = ",".join(f"{k}{v}" for k, v in sorted(hparams.items())) or "N/A"
+        policy = run.get("policy") or run.get("lossmask") or "N/A"
+        mwcs = run.get("mwcs_schedule") or (run.get("hparams") or {}).get("mw") or "none"
         print(f"\n{GREEN}{i}. {run['run_name']}{RESET}")
         print(f"   Hparams: {hparams_str}")
-        print(f"   Lossmask: {lossmask}")
-        print(f"   Baseline ASR: {metric['baseline_asr']:.1f}% → "
-              f"CB ASR: {metric['cb_asr']:.1f}% "
-              f"(Reduction: {metric['baseline_asr'] - metric['cb_asr']:.1f}pp)")
-        print(f"   Improvements: {metric.get('improvements', 0)}, "
-              f"Regressions: {metric.get('regressions', 0)}")
+        print(f"   Policy: {policy}")
+        print(f"   MWCS: {mwcs}")
+        if run.get("verification_status"):
+            print(f"   Verification: {run.get('verification_status')}")
+        if metric_dataset == "agentdojo":
+            print(f"   AgentDojo Diff Rate: {metric.get('diff_rate', 0):.1f}%")
+            btcr = metric.get("baseline_tool_call_rate")
+            ctcr = metric.get("cb_tool_call_rate")
+            hrr = metric.get("harmful_resistance_rate")
+            if isinstance(btcr, (int, float)):
+                print(f"   AgentDojo Tool-Call Rate (baseline): {btcr:.1%}")
+            if isinstance(ctcr, (int, float)):
+                print(f"   AgentDojo Tool-Call Rate (CB): {ctcr:.1%}")
+            if isinstance(hrr, (int, float)):
+                print(f"   AgentDojo Harmful Resistance: {hrr:.1%}")
+        else:
+            print(f"   Baseline ASR: {metric['baseline_asr']:.1f}% → "
+                  f"CB ASR: {metric['cb_asr']:.1f}% "
+                  f"(Reduction: {metric['baseline_asr'] - metric['cb_asr']:.1f}pp)")
+            print(f"   Improvements: {metric.get('improvements', 0)}, "
+                  f"Regressions: {metric.get('regressions', 0)}")
         if metric_dataset == "llmail":
             if metric.get("usefulness") is not None:
                 print(f"   LLMail Usefulness: {metric.get('usefulness', 0):.1f}%")
@@ -1075,16 +1128,29 @@ def print_best_runs(
                 print(f"   Tool Dist (baseline): {tool_dist.get('baseline', {})}")
                 print(f"   Tool Dist (cb): {tool_dist.get('cb', {})}")
         agentdojo = run.get("agentdojo", {})
-        if agentdojo:
+        if agentdojo and metric_dataset != "agentdojo":
             print(f"   AgentDojo Diff Rate: {agentdojo.get('diff_rate', 0):.1f}%")
+            btcr = agentdojo.get("baseline_tool_call_rate")
+            ctcr = agentdojo.get("cb_tool_call_rate")
+            hrr = agentdojo.get("harmful_resistance_rate")
+            if isinstance(btcr, (int, float)):
+                print(f"   AgentDojo Tool-Call Rate (baseline): {btcr:.1%}")
+            if isinstance(ctcr, (int, float)):
+                print(f"   AgentDojo Tool-Call Rate (CB): {ctcr:.1%}")
+            if isinstance(hrr, (int, float)):
+                print(f"   AgentDojo Harmful Resistance: {hrr:.1%}")
+            if agentdojo.get("tool_source"):
+                print(f"   AgentDojo Tool Source: {agentdojo.get('tool_source')}")
 
     best_run = by_cb_asr[0]
     best_hparams = ",".join(
         f"{k}{v}" for k, v in sorted((best_run.get("hparams") or {}).items())
     ) or "N/A"
-    best_lossmask = best_run.get("lossmask") or "N/A"
+    best_policy = best_run.get("policy") or best_run.get("lossmask") or "N/A"
+    best_mwcs = best_run.get("mwcs_schedule") or (best_run.get("hparams") or {}).get("mw") or "none"
     print(f"\n{BOLD}BEST HPARAMS:{RESET} {best_hparams}")
-    print(f"{BOLD}BEST LOSSMASK:{RESET} {best_lossmask}")
+    print(f"{BOLD}BEST POLICY:{RESET} {best_policy}")
+    print(f"{BOLD}BEST MWCS:{RESET} {best_mwcs}")
 
 
 def plot_metrics(runs: List[Dict[str, Any]]) -> None:
@@ -1096,7 +1162,7 @@ def plot_metrics(runs: List[Dict[str, Any]]) -> None:
     # Sort runs by alpha then layers
     sorted_runs = sorted(runs, key=lambda r: (
         float(r.get("hparams", {}).get("a") or 0),
-        r.get("lossmask") or ""
+        (r.get("policy") or r.get("lossmask") or "")
     ))
     
     # 1. Fujitsu CB ASR vs Alpha
@@ -1109,11 +1175,13 @@ def plot_metrics(runs: List[Dict[str, Any]]) -> None:
         asr = fujitsu.get("cb_asr")
         if asr is None: continue
         alpha = run.get("hparams", {}).get("a") or "?"
-        layers = run.get("lossmask") or "?"
+        policy = run.get("policy") or run.get("lossmask") or "?"
+        mwcs = run.get("mwcs_schedule") or "none"
+        label = f"{policy}|{mwcs}"
 
         bar_len = int((asr / max_asr) * 40)
         bar = "█" * bar_len
-        print(f"  a={alpha:<4} {layers:<20}: {bar} {asr:.1f}%")
+        print(f"  a={alpha:<4} {label:<28}: {bar} {asr:.1f}%")
 
     # 2. AgentDojo Diff Rate vs Alpha
     print("\n2. AgentDojo Diff Rate (higher = more refusal) vs Alpha:")
@@ -1124,11 +1192,13 @@ def plot_metrics(runs: List[Dict[str, Any]]) -> None:
         diff = agentdojo.get("diff_rate")
         if diff is None: continue
         alpha = run.get("hparams", {}).get("a") or "?"
-        layers = run.get("lossmask") or "?"
+        policy = run.get("policy") or run.get("lossmask") or "?"
+        mwcs = run.get("mwcs_schedule") or "none"
+        label = f"{policy}|{mwcs}"
 
         bar_len = int((diff / 100.0) * 40)
         bar = "█" * bar_len
-        print(f"  a={alpha:<4} {layers:<20}: {bar} {diff:.1f}%")
+        print(f"  a={alpha:<4} {label:<28}: {bar} {diff:.1f}%")
 
     # 3. LLMail CB ASR vs Alpha
     print("\n3. LLMail CB ASR (lower is better) vs Alpha:")
@@ -1139,11 +1209,13 @@ def plot_metrics(runs: List[Dict[str, Any]]) -> None:
         asr = llmail.get("cb_asr")
         if asr is None: continue
         alpha = run.get("hparams", {}).get("a") or "?"
-        layers = run.get("lossmask") or "?"
+        policy = run.get("policy") or run.get("lossmask") or "?"
+        mwcs = run.get("mwcs_schedule") or "none"
+        label = f"{policy}|{mwcs}"
 
         bar_len = int((asr / 100.0) * 40)
         bar = "█" * bar_len
-        print(f"  a={alpha:<4} {layers:<20}: {bar} {asr:.1f}%")
+        print(f"  a={alpha:<4} {label:<28}: {bar} {asr:.1f}%")
 
     # 4. LLMail Capability Retention (higher is better)
     has_cap = any(run.get("llmail", {}).get("capability_retention") is not None for run in sorted_runs)
@@ -1155,13 +1227,15 @@ def plot_metrics(runs: List[Dict[str, Any]]) -> None:
             if cap is None: continue
 
             alpha = run.get("hparams", {}).get("a") or "?"
-            layers = run.get("lossmask") or "?"
+            policy = run.get("policy") or run.get("lossmask") or "?"
+            mwcs = run.get("mwcs_schedule") or "none"
+            label = f"{policy}|{mwcs}"
             cap_pct = cap * 100 if isinstance(cap, (int, float)) else 0
 
             bar_len = int((cap_pct / 100.0) * 40)
             bar = "█" * bar_len
             marker = " ← BROKEN" if cap_pct < 30 else ""
-            print(f"  a={alpha:<4} {layers:<20}: {bar} {cap_pct:.1f}%{marker}")
+            print(f"  a={alpha:<4} {label:<28}: {bar} {cap_pct:.1f}%{marker}")
 
 
 def compare_samples(
@@ -1335,7 +1409,7 @@ Examples:
         "--run",
         type=str,
         default=None,
-        help="Only analyze a specific run (by name, e.g., a5.0_l10_20_assistant_only)"
+        help="Only analyze a specific run (by name)"
     )
     parser.add_argument(
         "--no-color",
@@ -1520,29 +1594,42 @@ Examples:
         with open(args.csv, "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow([
-                "run_name", "baseline_asr", "cb_asr", "reduction",
-                "improvements", "regressions", "agentdojo_diff_rate",
-                "llmail_cb_asr", "llmail_capability", "llmail_target_acc",
-                "llmail_json_parse_fail", "tools_broken", "stage1_passed",
+                "run_name", "alpha", "layers", "policy", "mwcs_schedule", "verification_status",
+                "fujitsu_baseline_asr", "fujitsu_cb_asr", "fujitsu_reduction_pp",
+                "fujitsu_improvements", "fujitsu_regressions",
+                "agentdojo_diff_rate", "agentdojo_baseline_tool_call_rate",
+                "agentdojo_cb_tool_call_rate", "agentdojo_harmful_resistance_rate",
+                "agentdojo_benign_tool_match_rate", "agentdojo_tool_source",
+                "llmail_cb_asr",
             ])
             for r in all_results:
                 fujitsu = r.get("fujitsu") or {}
                 agentdojo = r.get("agentdojo") or {}
                 llmail = r.get("llmail") or {}
+                base_asr = fujitsu.get("baseline_asr") if fujitsu else None
+                cb_asr = fujitsu.get("cb_asr") if fujitsu else None
+                reduction_pp = ""
+                if isinstance(base_asr, (int, float)) and isinstance(cb_asr, (int, float)):
+                    reduction_pp = base_asr - cb_asr
                 writer.writerow([
                     r.get("run_name", ""),
-                    fujitsu.get("baseline_asr", "") if fujitsu else "",
-                    fujitsu.get("cb_asr", "") if fujitsu else "",
-                    fujitsu.get("baseline_asr", 0) - fujitsu.get("cb_asr", 0) if fujitsu else "",
+                    r.get("alpha", ""),
+                    r.get("layers", ""),
+                    r.get("policy", r.get("lossmask", "")),
+                    r.get("mwcs_schedule", ""),
+                    r.get("verification_status", ""),
+                    base_asr if base_asr is not None else "",
+                    cb_asr if cb_asr is not None else "",
+                    reduction_pp,
                     fujitsu.get("improvements", "") if fujitsu else "",
                     fujitsu.get("regressions", "") if fujitsu else "",
                     agentdojo.get("diff_rate", "") if agentdojo else "",
+                    agentdojo.get("baseline_tool_call_rate", "") if agentdojo else "",
+                    agentdojo.get("cb_tool_call_rate", "") if agentdojo else "",
+                    agentdojo.get("harmful_resistance_rate", "") if agentdojo else "",
+                    agentdojo.get("benign_tool_match_rate", "") if agentdojo else "",
+                    agentdojo.get("tool_source", "") if agentdojo else "",
                     llmail.get("cb_asr", "") if llmail else "",
-                    llmail.get("capability_retention", "") if llmail else "",
-                    llmail.get("target_accuracy_rate", "") if llmail else "",
-                    llmail.get("json_parse_failure_rate", "") if llmail else "",
-                    llmail.get("tools_broken", "") if llmail else "",
-                    llmail.get("stage1_passed", "") if llmail else "",
                 ])
         print(f"\nExported results to: {args.csv}")
 

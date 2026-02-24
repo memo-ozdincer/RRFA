@@ -182,6 +182,9 @@ TRIPLET_MIX_L2_WEIGHT="${TRIPLET_MIX_L2_WEIGHT:-0.5}"
 TRIPLET_MIX_COS_WEIGHT="${TRIPLET_MIX_COS_WEIGHT:-0.5}"
 CB_LAYERS="${CB_LAYERS:-10,20}"
 LMP_POLICY="${LMP_POLICY:-cb_full_sequence}"
+MWCS_SCHEDULE="${MWCS_SCHEDULE:-none}"
+MWCS_REGISTRY="${MWCS_REGISTRY:-$REPO_DIR/configs/mwcs_registry_v1.json}"
+MWCS_STEP="${MWCS_STEP:-0}"
 MAX_SEQ_LENGTH="${MAX_SEQ_LENGTH:-4096}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
 DTYPE="${DTYPE:-bfloat16}"
@@ -196,6 +199,7 @@ JUDGE_MODEL="${JUDGE_MODEL:-$MODEL}"
 # Eval settings
 EVAL_LIMIT="${EVAL_LIMIT:-100}"
 EVAL_MERGE_ADAPTER="${EVAL_MERGE_ADAPTER:-true}"
+AGENTDOJO_EVAL_SPLIT="${AGENTDOJO_EVAL_SPLIT:-complete}"
 VERIFY_PIPELINE="${VERIFY_PIPELINE:-true}"
 VERIFY_FAIL_ON_ERROR="${VERIFY_FAIL_ON_ERROR:-true}"
 
@@ -210,12 +214,16 @@ echo "  VERIFY_FAIL_ON_ERROR: $VERIFY_FAIL_ON_ERROR"
 echo "  JUDGE_PROVIDER: $JUDGE_PROVIDER"
 echo "  JUDGE_MODEL: $JUDGE_MODEL"
 echo "  LMP_POLICY: $LMP_POLICY"
+echo "  MWCS_SCHEDULE: $MWCS_SCHEDULE"
+echo "  MWCS_REGISTRY: $MWCS_REGISTRY"
+echo "  MWCS_STEP: $MWCS_STEP"
 echo "  TOTAL_STEPS: $TOTAL_STEPS"
 echo "  BATCH_SIZE: $BATCH_SIZE"
 echo "  GRAD_ACCUM: $GRAD_ACCUM"
 echo "  ALPHA_MAX: $ALPHA_MAX"
 echo "  LOSS_MODE: $LOSS_MODE"
 echo "  CB_LAYERS: $CB_LAYERS"
+echo "  AGENTDOJO_EVAL_SPLIT: $AGENTDOJO_EVAL_SPLIT"
 echo ""
 echo "Stage Control:"
 echo "  SKIP_ETL_A: $SKIP_ETL_A"
@@ -469,6 +477,16 @@ if [[ "$SKIP_ETL_B" != "true" ]]; then
     echo "Stage 4: ETL_B (Renders + Lossmasks)"
     echo "========================================"
 
+    ETL_B_MWCS_ARGS=()
+    if [[ "$MWCS_SCHEDULE" != "none" && -n "$MWCS_SCHEDULE" ]]; then
+        if [[ -f "$MWCS_REGISTRY" ]]; then
+            ETL_B_MWCS_ARGS+=(--mwcs-registry "$MWCS_REGISTRY")
+        else
+            echo "WARNING: MWCS registry not found at $MWCS_REGISTRY (continuing without registry)"
+        fi
+        ETL_B_MWCS_ARGS+=(--mwcs-schedule "$MWCS_SCHEDULE" --mwcs-step "$MWCS_STEP")
+    fi
+
     # Process all trace files
     for trace_file in "$TRACES_DIR"/*.jsonl; do
         if [[ -f "$trace_file" ]]; then
@@ -501,7 +519,8 @@ if [[ "$SKIP_ETL_B" != "true" ]]; then
                 --lossmask-out "$lossmask_out" \
                 --tokenizer "$TOKENIZER" \
                 --max-length 4096 \
-                --policy-override "$LMP_POLICY"
+                --policy-override "$LMP_POLICY" \
+                "${ETL_B_MWCS_ARGS[@]}"
 
             echo "  Render: $render_out ($(wc -l < "$render_out") lines)"
             echo "  Lossmask: $lossmask_out ($(wc -l < "$lossmask_out") lines)"
@@ -719,20 +738,38 @@ if [[ "$SKIP_EVAL" != "true" ]]; then
                     --dtype "$DTYPE"
             fi
 
-            # Evaluate on AgentDojo harmful
-            AGENTDOJO_HARMFUL="$OUTPUT_BASE/split/agentdojo/agentdojo_traces_cb.jsonl"
-            if dataset_enabled "agentdojo" && [[ -f "$AGENTDOJO_HARMFUL" ]]; then
-                echo "Evaluating on AgentDojo (harmful)..."
+            # Evaluate on AgentDojo
+            AGENTDOJO_EVAL_FILE="$TRACES_DIR/agentdojo_complete.jsonl"
+            case "$AGENTDOJO_EVAL_SPLIT" in
+                complete)
+                    AGENTDOJO_EVAL_FILE="$TRACES_DIR/agentdojo_complete.jsonl"
+                    ;;
+                harmful)
+                    AGENTDOJO_EVAL_FILE="$OUTPUT_BASE/split/agentdojo/agentdojo_traces_cb.jsonl"
+                    ;;
+                benign)
+                    AGENTDOJO_EVAL_FILE="$OUTPUT_BASE/split/agentdojo/agentdojo_traces_retain.jsonl"
+                    ;;
+                *)
+                    echo "WARNING: Unknown AGENTDOJO_EVAL_SPLIT=$AGENTDOJO_EVAL_SPLIT (using complete)"
+                    AGENTDOJO_EVAL_FILE="$TRACES_DIR/agentdojo_complete.jsonl"
+                    ;;
+            esac
+
+            if dataset_enabled "agentdojo" && [[ -f "$AGENTDOJO_EVAL_FILE" ]]; then
+                echo "Evaluating on AgentDojo ($AGENTDOJO_EVAL_SPLIT)..."
                 python src/evaluation/eval.py \
                     --baseline "$MODEL" \
                     --cb-adapter "$ADAPTER_PATH" \
-                    --eval-data "$AGENTDOJO_HARMFUL" \
+                    --eval-data "$AGENTDOJO_EVAL_FILE" \
                     --tool-schema "$TOOL_SCHEMA" \
                     --output "$VIS_EVAL_DIR/agentdojo_eval.json" \
                     --use-sample-context \
                     --limit "$EVAL_LIMIT" \
                     "${EVAL_COMMON_ARGS[@]}" \
                     --dtype "$DTYPE"
+            elif dataset_enabled "agentdojo"; then
+                echo "WARNING: AgentDojo eval file not found: $AGENTDOJO_EVAL_FILE"
             fi
 
             # Write run metadata for the visualizer
@@ -775,8 +812,8 @@ RUNEOF
                 if [[ -f "$TRACES_DIR/fujitsu_b4_ds.jsonl" ]]; then
                     VERIFY_CMD+=(--trace-jsonl "$TRACES_DIR/fujitsu_b4_ds.jsonl")
                 fi
-                if [[ -f "$AGENTDOJO_HARMFUL" ]]; then
-                    VERIFY_CMD+=(--trace-jsonl "$AGENTDOJO_HARMFUL")
+                if [[ -n "${AGENTDOJO_EVAL_FILE:-}" && -f "$AGENTDOJO_EVAL_FILE" ]]; then
+                    VERIFY_CMD+=(--trace-jsonl "$AGENTDOJO_EVAL_FILE")
                 fi
                 if [[ -f "$LOSSMASKS_DIR/fujitsu_b4_ds.jsonl" ]]; then
                     VERIFY_CMD+=(--lossmask-jsonl "$LOSSMASKS_DIR/fujitsu_b4_ds.jsonl")
