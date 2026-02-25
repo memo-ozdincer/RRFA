@@ -200,6 +200,7 @@ JUDGE_MODEL="${JUDGE_MODEL:-$MODEL}"
 EVAL_LIMIT="${EVAL_LIMIT:-100}"
 EVAL_MERGE_ADAPTER="${EVAL_MERGE_ADAPTER:-true}"
 AGENTDOJO_EVAL_SPLIT="${AGENTDOJO_EVAL_SPLIT:-complete}"
+FULL_RENDER_AUDIT="${FULL_RENDER_AUDIT:-true}"
 VERIFY_PIPELINE="${VERIFY_PIPELINE:-true}"
 VERIFY_FAIL_ON_ERROR="${VERIFY_FAIL_ON_ERROR:-true}"
 
@@ -224,6 +225,7 @@ echo "  ALPHA_MAX: $ALPHA_MAX"
 echo "  LOSS_MODE: $LOSS_MODE"
 echo "  CB_LAYERS: $CB_LAYERS"
 echo "  AGENTDOJO_EVAL_SPLIT: $AGENTDOJO_EVAL_SPLIT"
+echo "  FULL_RENDER_AUDIT: $FULL_RENDER_AUDIT"
 echo ""
 echo "Stage Control:"
 echo "  SKIP_ETL_A: $SKIP_ETL_A"
@@ -487,6 +489,10 @@ if [[ "$SKIP_ETL_B" != "true" ]]; then
         ETL_B_MWCS_ARGS+=(--mwcs-schedule "$MWCS_SCHEDULE" --mwcs-step "$MWCS_STEP")
     fi
 
+    TRACE_ARGS=()
+    RENDER_ARGS=()
+    LOSSMASK_ARGS=()
+
     # Process all trace files
     for trace_file in "$TRACES_DIR"/*.jsonl; do
         if [[ -f "$trace_file" ]]; then
@@ -512,6 +518,9 @@ if [[ "$SKIP_ETL_B" != "true" ]]; then
 
             render_out="$RENDERS_DIR/${basename}.jsonl"
             lossmask_out="$LOSSMASKS_DIR/${basename}.jsonl"
+            TRACE_ARGS+=(--trace-jsonl "$trace_file")
+            RENDER_ARGS+=(--render-jsonl "$render_out")
+            LOSSMASK_ARGS+=(--lossmask-jsonl "$lossmask_out")
             echo "Processing: $basename"
             python src/schemas/tools/ETL_B.py \
                 --traces "$trace_file" \
@@ -519,6 +528,7 @@ if [[ "$SKIP_ETL_B" != "true" ]]; then
                 --lossmask-out "$lossmask_out" \
                 --tokenizer "$TOKENIZER" \
                 --max-length 4096 \
+                --include-rendered-text \
                 --policy-override "$LMP_POLICY" \
                 "${ETL_B_MWCS_ARGS[@]}"
 
@@ -526,6 +536,18 @@ if [[ "$SKIP_ETL_B" != "true" ]]; then
             echo "  Lossmask: $lossmask_out ($(wc -l < "$lossmask_out") lines)"
         fi
     done
+    if [[ "$FULL_RENDER_AUDIT" == "true" && "${#RENDER_ARGS[@]}" -gt 0 ]]; then
+        FULL_RENDER_AUDIT_FILE="$OUTPUT_BASE/full_renders.jsonl"
+        FULL_RENDER_AUDIT_SUMMARY="$OUTPUT_BASE/full_renders_summary.txt"
+        echo "Building self-contained full render audit..."
+        python "$REPO_DIR/scripts/export_full_renders.py" \
+            "${TRACE_ARGS[@]}" \
+            "${RENDER_ARGS[@]}" \
+            "${LOSSMASK_ARGS[@]}" \
+            --output "$FULL_RENDER_AUDIT_FILE" \
+            --summary "$FULL_RENDER_AUDIT_SUMMARY"
+        echo "  Full render audit: $FULL_RENDER_AUDIT_FILE"
+    fi
     echo ""
 fi
 
@@ -718,6 +740,12 @@ if [[ "$SKIP_EVAL" != "true" ]]; then
             VIS_RUN_DIR="$OUTPUT_BASE/run_${RUN_ID}"
             VIS_EVAL_DIR="$VIS_RUN_DIR/eval"
             mkdir -p "$VIS_EVAL_DIR"
+            if [[ -n "${FULL_RENDER_AUDIT_FILE:-}" && -f "$FULL_RENDER_AUDIT_FILE" ]]; then
+                ln -sfn "$FULL_RENDER_AUDIT_FILE" "$VIS_RUN_DIR/full_renders.jsonl"
+            fi
+            if [[ -n "${FULL_RENDER_AUDIT_SUMMARY:-}" && -f "$FULL_RENDER_AUDIT_SUMMARY" ]]; then
+                ln -sfn "$FULL_RENDER_AUDIT_SUMMARY" "$VIS_RUN_DIR/full_renders_summary.txt"
+            fi
 
             EVAL_COMMON_ARGS=()
             if [[ "$EVAL_MERGE_ADAPTER" == "true" ]]; then
@@ -869,6 +897,9 @@ echo "  Models: $MODELS_DIR"
 echo "  Eval: $EVAL_DIR"
 if [[ -n "${VIS_RUN_DIR:-}" ]]; then
 echo "  Visualizer: $VIS_RUN_DIR"
+if [[ -f "$VIS_RUN_DIR/full_renders.jsonl" ]]; then
+echo "  Full Renders: $VIS_RUN_DIR/full_renders.jsonl"
+fi
 echo ""
 
 # Full trace visualization (per-sample details)

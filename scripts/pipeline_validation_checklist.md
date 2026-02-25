@@ -43,10 +43,11 @@ for S in balanced_cb attack_focus capability_focus; do
   sbatch slurm/pipeline/sweep_hparams.sbatch \
     ALPHAS=10.0 \
     LAYER_CONFIGS=10,20 \
-    POLICIES=assistant_and_tool,cb_full_sequence,action_commitment \
+    POLICIES=assistant_only,cb_full_sequence,tool_calls_only \
     MWCS_SCHEDULE=$S \
     MWCS_STEP=0 \
     AGENTDOJO_EVAL_SPLIT=complete \
+    FULL_RENDER_AUDIT=true \
     LIMIT_EVAL=100
  done
 ```

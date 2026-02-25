@@ -36,7 +36,7 @@
 #
 # 4) Policy-only sweep (fixed layers/alpha):
 #    ALPHAS=10.0 LAYER_CONFIGS=10,20 \
-#    POLICIES=assistant_only,assistant_and_tool,cb_full_sequence,tool_calls_only,completion_only \
+#    POLICIES=assistant_only,cb_full_sequence,tool_calls_only \
 #    sbatch slurm/pipeline/sweep_hparams.sbatch
 #
 # 5) Compare MWCS schedules (run multiple sweeps):
@@ -58,7 +58,7 @@
 #   QUICK_TEST, TOTAL_STEPS, ALPHAS, LAYER_CONFIGS, POLICIES, MWCS_SCHEDULE
 #
 # Eval/logging:
-#   LIMIT_EVAL, NUM_EXAMPLES, SHOW_EXAMPLES, AGENTDOJO_EVAL_SPLIT
+#   LIMIT_EVAL, NUM_EXAMPLES, SHOW_EXAMPLES, AGENTDOJO_EVAL_SPLIT, FULL_RENDER_AUDIT
 #
 # Data limits:
 # Core training:
@@ -125,7 +125,7 @@ if [[ "$QUICK_TEST" == "true" ]]; then
     DEFAULT_STEPS=50
     DEFAULT_ALPHAS="5.0,10.0"
     DEFAULT_LAYER_CONFIGS="10,20"
-    DEFAULT_POLICIES="assistant_only"
+    DEFAULT_POLICIES="assistant_only,cb_full_sequence,tool_calls_only"
     DEFAULT_MWCS_SCHEDULE="none"
     DEFAULT_AGENTDOJO_EVAL_SPLIT="complete"
     DEFAULT_LIMIT_EVAL=20
@@ -134,7 +134,7 @@ else
     DEFAULT_STEPS=200
     DEFAULT_ALPHAS="5.0,10.0,15.0"
     DEFAULT_LAYER_CONFIGS="10,20|8,16,24|12,18|6,12,18,24"
-    DEFAULT_POLICIES="assistant_only,assistant_and_tool,cb_full_sequence,tool_calls_only,completion_only"
+    DEFAULT_POLICIES="assistant_only,cb_full_sequence,tool_calls_only"
     DEFAULT_MWCS_SCHEDULE="none"
     DEFAULT_AGENTDOJO_EVAL_SPLIT="complete"
     DEFAULT_LIMIT_EVAL=50
@@ -152,6 +152,7 @@ AGENTDOJO_EVAL_SPLIT="${AGENTDOJO_EVAL_SPLIT:-$DEFAULT_AGENTDOJO_EVAL_SPLIT}"
 LIMIT_EVAL="${LIMIT_EVAL:-$DEFAULT_LIMIT_EVAL}"
 NUM_EXAMPLES="${NUM_EXAMPLES:-$DEFAULT_NUM_EXAMPLES}"
 SHOW_EXAMPLES="${SHOW_EXAMPLES:-true}"
+FULL_RENDER_AUDIT="${FULL_RENDER_AUDIT:-true}"
 VERIFY_PIPELINE="${VERIFY_PIPELINE:-true}"
 VERIFY_FAIL_ON_ERROR="${VERIFY_FAIL_ON_ERROR:-false}"
 
@@ -195,6 +196,7 @@ echo "  AGENTDOJO_EVAL_SPLIT: $AGENTDOJO_EVAL_SPLIT"
 echo "  LIMIT_EVAL: $LIMIT_EVAL"
 echo "  NUM_EXAMPLES: $NUM_EXAMPLES"
 echo "  SHOW_EXAMPLES: $SHOW_EXAMPLES"
+echo "  FULL_RENDER_AUDIT: $FULL_RENDER_AUDIT"
 echo "  VERIFY_PIPELINE: $VERIFY_PIPELINE"
 echo "  VERIFY_FAIL_ON_ERROR: $VERIFY_FAIL_ON_ERROR"
 echo "  QUICK_TEST: $QUICK_TEST"
@@ -328,6 +330,7 @@ for alpha in "${ALPHA_ARRAY[@]}"; do
   "mwcs_schedule": "$MWCS_SCHEDULE",
   "mwcs_step": "$MWCS_STEP",
   "agentdojo_eval_split": "$AGENTDOJO_EVAL_SPLIT",
+  "full_render_audit": "$FULL_RENDER_AUDIT",
   "loss_mode": "$LOSS_MODE",
   "loss_weighting": "$LOSS_WEIGHTING",
   "triplet_beta_harmful": "$TRIPLET_BETA_HARMFUL",
@@ -344,6 +347,9 @@ JSONEOF
             
             etl_start=$(date +%s)
             TRACE_FILES=("$DS_TRACES" "$DR_TRACES" "$AGENTDOJO_TRACES")
+            TRACE_ARGS=()
+            RENDER_ARGS=()
+            LOSSMASK_ARGS=()
             ETL_B_MWCS_ARGS=()
             if [[ "$MWCS_SCHEDULE" != "none" && -n "$MWCS_SCHEDULE" ]]; then
                 if [[ -f "$MWCS_REGISTRY" ]]; then
@@ -358,6 +364,9 @@ JSONEOF
                 basename=$(basename "$trace_file" .jsonl)
                 render_out="$RUN_DIR/renders/${basename}.jsonl"
                 lossmask_out="$RUN_DIR/lossmasks/${basename}.jsonl"
+                TRACE_ARGS+=(--trace-jsonl "$trace_file")
+                RENDER_ARGS+=(--render-jsonl "$render_out")
+                LOSSMASK_ARGS+=(--lossmask-jsonl "$lossmask_out")
 
                 echo "  Processing: $basename"
                 python src/schemas/tools/ETL_B.py \
@@ -366,6 +375,7 @@ JSONEOF
                     --lossmask-out "$lossmask_out" \
                     --tokenizer "$TOKENIZER" \
                     --max-length 4096 \
+                    --include-rendered-text \
                     --policy-override "$policy" \
                     "${ETL_B_MWCS_ARGS[@]}" 2>&1 | tee -a "$RUN_DIR/etl_b.log"
             done
@@ -388,6 +398,17 @@ print(total)
 " 2>/dev/null || echo "0")
                 echo "    $(basename "$lm"): $nonzero non-zero mask tokens (first 5 samples)"
             done
+            if [[ "$FULL_RENDER_AUDIT" == "true" ]]; then
+                echo "  Building self-contained full render audit..."
+                python "$REPO_DIR/scripts/export_full_renders.py" \
+                    "${TRACE_ARGS[@]}" \
+                    "${RENDER_ARGS[@]}" \
+                    "${LOSSMASK_ARGS[@]}" \
+                    --output "$RUN_DIR/full_renders.jsonl" \
+                    --summary "$RUN_DIR/full_renders_summary.txt" \
+                    2>&1 | tee -a "$RUN_DIR/etl_b.log"
+                echo "  Full render audit: $RUN_DIR/full_renders.jsonl"
+            fi
             echo ""
             
             # =====================================================

@@ -1193,11 +1193,11 @@ def _build_detail_pair_index(details: List[Dict[str, Any]]) -> Dict[Tuple[Any, .
     return index
 
 
-def _prepare_messages_for_generation(
+def _prepare_messages_for_generation_with_meta(
     sample: Dict[str, Any],
     dataset_type: str,
     system_prompt: str,
-) -> List[Dict[str, Any]]:
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Normalize a trace into a generation-ready message list.
 
@@ -1224,21 +1224,58 @@ def _prepare_messages_for_generation(
             row["tool_calls"] = msg.get("tool_calls")
         messages.append(row)
 
+    raw_last_role = messages[-1].get("role") if messages else None
+    trimmed_trailing_assistant = 0
+
     if not messages:
         user_content = sample.get("metadata", {}).get("combined_query", "")
         if not user_content:
-            return []
-        return [
+            return [], {
+                "raw_message_count": 0,
+                "prepared_message_count": 0,
+                "raw_last_role": None,
+                "prepared_last_role": None,
+                "trimmed_trailing_assistant_count": 0,
+                "used_combined_query_fallback": False,
+            }
+        fallback = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
         ]
+        return fallback, {
+            "raw_message_count": 0,
+            "prepared_message_count": len(fallback),
+            "raw_last_role": None,
+            "prepared_last_role": "user",
+            "trimmed_trailing_assistant_count": 0,
+            "used_combined_query_fallback": True,
+        }
 
     if dataset_type == "agentdojo":
         # AgentDojo exports often include the assistant response/tool-call that we
         # want to evaluate against. Keep context up to the turn before that.
         while messages and messages[-1].get("role") == "assistant":
             messages.pop()
+            trimmed_trailing_assistant += 1
 
+    prepared_last_role = messages[-1].get("role") if messages else None
+    prep_meta = {
+        "raw_message_count": len(raw_messages),
+        "prepared_message_count": len(messages),
+        "raw_last_role": raw_last_role,
+        "prepared_last_role": prepared_last_role,
+        "trimmed_trailing_assistant_count": trimmed_trailing_assistant,
+        "used_combined_query_fallback": False,
+    }
+    return messages, prep_meta
+
+
+def _prepare_messages_for_generation(
+    sample: Dict[str, Any],
+    dataset_type: str,
+    system_prompt: str,
+) -> List[Dict[str, Any]]:
+    messages, _ = _prepare_messages_for_generation_with_meta(sample, dataset_type, system_prompt)
     return messages
 
 
@@ -1320,7 +1357,7 @@ def evaluate_tool_flip_asr(
     for sample in iterator:
         expected_tool, simulated_tool = get_tool_flip_info(sample)
 
-        messages = _prepare_messages_for_generation(sample, dataset_type, system_prompt)
+        messages, prep_meta = _prepare_messages_for_generation_with_meta(sample, dataset_type, system_prompt)
         if not messages:
             continue
         
@@ -1360,6 +1397,7 @@ def evaluate_tool_flip_asr(
             "response_full": response,  # Full response for analysis
             "response_preview": response[:500] if len(response) > 500 else response,
             "sample_context": _extract_sample_context(sample),
+            "prep_meta": prep_meta,
         })
     
     total = len(results)
@@ -1420,7 +1458,7 @@ def evaluate_forced_function_call(
         if not simulated_tool:
             continue
 
-        messages = _prepare_messages_for_generation(sample, dataset_type, system_prompt)
+        messages, prep_meta = _prepare_messages_for_generation_with_meta(sample, dataset_type, system_prompt)
         if not messages:
             continue
         
@@ -1516,6 +1554,7 @@ def evaluate_forced_function_call(
             "has_end_token": has_end_token,
             "parsed_params": parsed_params,
             "response_preview": response[:200],
+            "prep_meta": prep_meta,
         })
     
     total = len(results)
@@ -2045,9 +2084,11 @@ def evaluate_generation_comparison(
     harmful_resisted = 0
     harmful_total = 0
     tool_call_count = 0
+    tool_source_counts: Dict[str, int] = defaultdict(int)
+    trimmed_trailing_assistant_samples = 0
 
     for sample in iterator:
-        messages = _prepare_messages_for_generation(sample, dataset_type, system_prompt)
+        messages, prep_meta = _prepare_messages_for_generation_with_meta(sample, dataset_type, system_prompt)
         if not messages:
             continue
 
@@ -2065,6 +2106,9 @@ def evaluate_generation_comparison(
                     sample_tools_source = "per_sample_inferred"
                 else:
                     sample_tools_source = "global_fallback"
+        tool_source_counts[sample_tools_source] += 1
+        if prep_meta.get("trimmed_trailing_assistant_count", 0) > 0:
+            trimmed_trailing_assistant_samples += 1
 
         # Get labels for context
         labels = sample.get("labels", {})
@@ -2108,6 +2152,8 @@ def evaluate_generation_comparison(
             "matches_reference": matches_reference,
             "is_valid_json": is_valid_json,
             "tools_source": sample_tools_source,
+            "prep_meta": prep_meta,
+            "prepared_messages": messages,
             "response_preview": response[:500] if len(response) > 500 else response,
             "response_full": response,
             "sample_context": _extract_sample_context(sample),
@@ -2118,6 +2164,8 @@ def evaluate_generation_comparison(
         "total_samples": total,
         "tool_call_rate": tool_call_count / total if total > 0 else 0,
         "tool_call_count": tool_call_count,
+        "tools_source_counts": dict(sorted(tool_source_counts.items())),
+        "trimmed_trailing_assistant_samples": trimmed_trailing_assistant_samples,
     }
 
     # Add reference-comparison metrics when available

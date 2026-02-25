@@ -918,6 +918,8 @@ def analyze_run(
             "harmful_resistance_rate": cb_gc.get("harmful_resistance_rate"),
             "benign_tool_match_rate": cb_gc.get("benign_tool_match_rate"),
             "tool_source": cb_context.get("tool_source"),
+            "tools_source_counts": cb_gc.get("tools_source_counts"),
+            "trimmed_trailing_assistant_samples": cb_gc.get("trimmed_trailing_assistant_samples"),
         }
 
         # Show sample details if requested
@@ -1600,6 +1602,7 @@ Examples:
                 "agentdojo_diff_rate", "agentdojo_baseline_tool_call_rate",
                 "agentdojo_cb_tool_call_rate", "agentdojo_harmful_resistance_rate",
                 "agentdojo_benign_tool_match_rate", "agentdojo_tool_source",
+                "agentdojo_tools_source_counts", "agentdojo_trimmed_trailing_assistant_samples",
                 "llmail_cb_asr",
             ])
             for r in all_results:
@@ -1629,6 +1632,8 @@ Examples:
                     agentdojo.get("harmful_resistance_rate", "") if agentdojo else "",
                     agentdojo.get("benign_tool_match_rate", "") if agentdojo else "",
                     agentdojo.get("tool_source", "") if agentdojo else "",
+                    json.dumps(agentdojo.get("tools_source_counts", ""), sort_keys=True) if agentdojo else "",
+                    agentdojo.get("trimmed_trailing_assistant_samples", "") if agentdojo else "",
                     llmail.get("cb_asr", "") if llmail else "",
                 ])
         print(f"\nExported results to: {args.csv}")

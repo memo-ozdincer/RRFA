@@ -667,6 +667,55 @@ def verify_eval_outputs(
                     f"{path}: CB tool-call rate collapsed ({c_tcr:.3f}) vs baseline ({b_tcr:.3f}).",
                 )
 
+        if dataset_type == "agentdojo":
+            source_counts = cb_gen.get("tools_source_counts") or {}
+            if isinstance(source_counts, dict):
+                inferred_or_embedded = (_safe_float(source_counts.get("per_sample_inferred")) or 0.0) + (
+                    _safe_float(source_counts.get("sample_embedded")) or 0.0
+                )
+                total_count = 0.0
+                for value in source_counts.values():
+                    fv = _safe_float(value)
+                    if fv is not None:
+                        total_count += fv
+                if strict_agentdojo_context and use_sample_context and total_count > 0 and inferred_or_embedded <= 0:
+                    _add_finding(
+                        findings,
+                        "error",
+                        "evaluation",
+                        f"{path}: generation_comparison.tools_source_counts lacks per-sample tools under sample-context.",
+                    )
+                fallback = _safe_float(source_counts.get("global_fallback")) or 0.0
+                if total_count > 0 and (fallback / total_count) > 0.25:
+                    _add_finding(
+                        findings,
+                        "warning",
+                        "evaluation",
+                        f"{path}: global_fallback tool source used heavily ({fallback}/{total_count}).",
+                    )
+
+            details = cb_gen.get("details") or []
+            if isinstance(details, list) and details:
+                untrimmed_tail_assistant = 0
+                for row in details:
+                    prep_meta = row.get("prep_meta") or {}
+                    if not isinstance(prep_meta, dict):
+                        continue
+                    raw_last_role = prep_meta.get("raw_last_role")
+                    trimmed = int(prep_meta.get("trimmed_trailing_assistant_count", 0) or 0)
+                    prepared_last_role = prep_meta.get("prepared_last_role")
+                    if raw_last_role == "assistant" and trimmed == 0:
+                        untrimmed_tail_assistant += 1
+                    if prepared_last_role == "assistant":
+                        untrimmed_tail_assistant += 1
+                if untrimmed_tail_assistant > 0:
+                    _add_finding(
+                        findings,
+                        "error",
+                        "evaluation",
+                        f"{path}: found {untrimmed_tail_assistant} AgentDojo rows with trailing assistant in generation context.",
+                    )
+
         reports.append(report)
     return reports
 
