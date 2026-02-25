@@ -928,8 +928,8 @@ def generate_with_tools(
     messages: List[Dict[str, str]],
     tools: List[Dict[str, Any]],
     max_new_tokens: int = 256,
-    temperature: float = 0.1,  # Low temp for consistent eval
-    do_sample: bool = True,
+    temperature: float = 0.0,
+    do_sample: bool = False,
     prefill: Optional[str] = None,
 ) -> str:
     """
@@ -1193,6 +1193,51 @@ def _build_detail_pair_index(details: List[Dict[str, Any]]) -> Dict[Tuple[Any, .
     return index
 
 
+def _get_agentdojo_context_mode() -> str:
+    """
+    AgentDojo evaluation context mode.
+
+    - full (default): keep full prepared trace context.
+    - latest_turn: keep only the latest user turn (+ following context), used as
+      a debugging fallback for datasets with replay-style multi-turn artifacts.
+    """
+    mode = os.environ.get("EVAL_AGENTDOJO_CONTEXT_MODE", "full").strip().lower()
+    return mode if mode in {"full", "latest_turn"} else "full"
+
+
+def _slice_agentdojo_to_latest_turn(messages: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], int]:
+    """
+    Keep only the latest user turn (plus its following context), while preserving
+    the initial system prompt.
+
+    AgentDojo variants such as repeat-user-prompt can contain long multi-turn
+    traces. Feeding the full history into generation causes the model to
+    continue prior trajectories and produce meta/multi-step narration.
+    """
+    if not messages:
+        return messages, 0
+
+    system_msg = messages[0] if messages[0].get("role") == "system" else None
+    search_start = 1 if system_msg is not None else 0
+
+    last_user_idx = None
+    for idx in range(len(messages) - 1, search_start - 1, -1):
+        if messages[idx].get("role") == "user":
+            last_user_idx = idx
+            break
+
+    # No user found or already single-turn-ish: no-op.
+    if last_user_idx is None or last_user_idx <= search_start:
+        return messages, 0
+
+    sliced = messages[last_user_idx:]
+    if system_msg is not None:
+        sliced = [system_msg] + sliced
+
+    dropped = len(messages) - len(sliced)
+    return sliced, dropped
+
+
 def _prepare_messages_for_generation_with_meta(
     sample: Dict[str, Any],
     dataset_type: str,
@@ -1251,12 +1296,20 @@ def _prepare_messages_for_generation_with_meta(
             "used_combined_query_fallback": True,
         }
 
+    dropped_prefix_count = 0
+
+    context_mode = "full"
     if dataset_type == "agentdojo":
+        context_mode = _get_agentdojo_context_mode()
         # AgentDojo exports often include the assistant response/tool-call that we
         # want to evaluate against. Keep context up to the turn before that.
         while messages and messages[-1].get("role") == "assistant":
             messages.pop()
             trimmed_trailing_assistant += 1
+
+        # Optional fallback for replay-style multi-turn traces.
+        if context_mode == "latest_turn":
+            messages, dropped_prefix_count = _slice_agentdojo_to_latest_turn(messages)
 
     prepared_last_role = messages[-1].get("role") if messages else None
     prep_meta = {
@@ -1265,6 +1318,9 @@ def _prepare_messages_for_generation_with_meta(
         "raw_last_role": raw_last_role,
         "prepared_last_role": prepared_last_role,
         "trimmed_trailing_assistant_count": trimmed_trailing_assistant,
+        "agentdojo_context_mode": context_mode if dataset_type == "agentdojo" else None,
+        "dropped_prefix_count": dropped_prefix_count,
+        "used_latest_turn_slice": dropped_prefix_count > 0,
         "used_combined_query_fallback": False,
     }
     return messages, prep_meta
@@ -2403,6 +2459,30 @@ def run_mvp_evaluation(
     
     # Detect dataset type and auto-enable sample context for AgentDojo
     dataset_type = _detect_dataset_type(eval_samples)
+    if dataset_type == "agentdojo":
+        context_mode = _get_agentdojo_context_mode()
+        multi_turn_count = 0
+        for sample in eval_samples:
+            user_turns = sum(1 for m in sample.get("messages", []) if m.get("role") == "user")
+            if user_turns > 1:
+                multi_turn_count += 1
+        if multi_turn_count > 0:
+            if context_mode == "latest_turn":
+                logger.warning(
+                    "AgentDojo eval contains %d/%d multi-turn samples. "
+                    "Context mode is latest_turn; evaluator will slice per sample.",
+                    multi_turn_count,
+                    len(eval_samples),
+                )
+            else:
+                logger.warning(
+                    "AgentDojo eval contains %d/%d multi-turn samples. "
+                    "Context mode is full (default). Set EVAL_AGENTDOJO_CONTEXT_MODE=latest_turn "
+                    "to isolate replay-style artifacts.",
+                    multi_turn_count,
+                    len(eval_samples),
+                )
+
     if dataset_type == 'agentdojo' and not use_sample_context:
         logger.info(f"Auto-detected AgentDojo dataset - enabling sample context (embedded system prompts)")
         use_sample_context = True
