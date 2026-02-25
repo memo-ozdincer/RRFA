@@ -604,10 +604,12 @@ for name in ['fujitsu_eval.json', 'agentdojo_eval.json']:
     mal = utm.get('malicious_tool_called_rate')
     cor = utm.get('correct_tool_called_rate')
     ds = utm.get('dataset_type', name.split('_')[0])
+    ntc = utm.get('no_tool_call_rate')
     if mal is not None or cor is not None:
         m_s = f'{mal:.1%}' if mal is not None else 'N/A'
         c_s = f'{cor:.1%}' if cor is not None else 'N/A'
-        print(f'    [checkpoint-$ckpt_step] {ds}: malicious={m_s} correct={c_s}')
+        n_s = f' no_tool={ntc:.1%}' if ntc is not None else ''
+        print(f'    [checkpoint-$ckpt_step] {ds}: malicious={m_s} correct={c_s}{n_s}')
 " 2>/dev/null || true
                         done
                         echo ""
@@ -842,8 +844,10 @@ if 'delta' in r:
 utm = r.get('unified_tool_metrics', {})
 mal = utm.get('malicious_tool_called_rate')
 cor = utm.get('correct_tool_called_rate')
+ntc = utm.get('no_tool_call_rate')
 if mal is not None or cor is not None:
-    print(f'  --- Unified: Malicious={mal:.1%}(lower=better) Correct={cor:.1%}(higher=better)')
+    ntc_s = f' NoTool={ntc:.1%}' if ntc is not None else ''
+    print(f'  --- Unified: Malicious={mal:.1%}(lower=better) Correct={cor:.1%}(higher=better){ntc_s}')
 " 2>/dev/null || echo "  Fujitsu: (parse error)"
             fi
             if [[ -f "$RUN_DIR/eval/agentdojo_eval.json" ]]; then
@@ -872,8 +876,10 @@ if gen_b or gen_c:
 utm = r.get('unified_tool_metrics', {})
 mal = utm.get('malicious_tool_called_rate')
 cor = utm.get('correct_tool_called_rate')
+ntc = utm.get('no_tool_call_rate')
 if mal is not None or cor is not None:
-    print(f'  --- Unified: Malicious={mal:.1%}(lower=better) Correct={cor:.1%}(higher=better)')
+    ntc_s = f' NoTool={ntc:.1%}' if ntc is not None else ''
+    print(f'  --- Unified: Malicious={mal:.1%}(lower=better) Correct={cor:.1%}(higher=better){ntc_s}')
 " 2>/dev/null || echo "  AgentDojo: (parse error)"
             fi
             echo ""

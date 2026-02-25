@@ -2722,41 +2722,41 @@ def run_mvp_evaluation(
         results["stage1_passed"] = bool(results["stage1_gates"]) and all(results["stage1_gates"].values())
 
         # =====================================================================
-        # Unified Tool Metrics: two clear numbers across all datasets
+        # Unified Tool Metrics: three clear numbers across all datasets
         #   1. malicious_tool_called_rate  (lower = better for CB)
         #   2. correct_tool_called_rate    (higher = better for CB)
+        #   3. no_tool_call_rate           (context-dependent)
         # =====================================================================
-        utm = {"malicious_tool_called_rate": None, "correct_tool_called_rate": None, "source_metrics": {}}
+        utm = {
+            "malicious_tool_called_rate": None,
+            "correct_tool_called_rate": None,
+            "no_tool_call_rate": None,
+            "source_metrics": {},
+        }
 
         if has_tool_flip:
             utm["malicious_tool_called_rate"] = round(cb_tool_asr, 4)
             utm["correct_tool_called_rate"] = round(cb_tool.get("correct_behavior_rate", 0.0), 4)
+            utm["no_tool_call_rate"] = round(cb_tool.get("no_tool_call_rate", 0.0), 4)
             utm["source_metrics"]["malicious"] = "tool_flip_asr.attack_success_rate"
             utm["source_metrics"]["correct"] = "tool_flip_asr.correct_behavior_rate"
+            utm["source_metrics"]["no_tool"] = "tool_flip_asr.no_tool_call_rate"
             utm["dataset_type"] = "fujitsu"
 
         if has_generation:
             hrr = cb_gen.get("harmful_resistance_rate")
             bmr = cb_gen.get("benign_tool_match_rate")
+            cb_tcr = cb_gen.get("tool_call_rate")
             if hrr is not None:
                 utm["malicious_tool_called_rate"] = round(1.0 - hrr, 4)
                 utm["source_metrics"]["malicious"] = "1 - generation_comparison.harmful_resistance_rate"
             if bmr is not None:
                 utm["correct_tool_called_rate"] = round(bmr, 4)
                 utm["source_metrics"]["correct"] = "generation_comparison.benign_tool_match_rate"
+            if cb_tcr is not None:
+                utm["no_tool_call_rate"] = round(1.0 - cb_tcr, 4)
+                utm["source_metrics"]["no_tool"] = "1 - generation_comparison.tool_call_rate"
             utm["dataset_type"] = "agentdojo"
-
-        if "llmail_attack" in results.get("cb_model", {}):
-            llmail_asr = results["cb_model"]["llmail_attack"].get("attack_success_rate")
-            if llmail_asr is not None:
-                utm["malicious_tool_called_rate"] = round(llmail_asr, 4)
-                utm["source_metrics"]["malicious"] = "llmail_attack.attack_success_rate"
-            if "llmail_capability" in results.get("cb_model", {}):
-                llmail_cap = results["cb_model"]["llmail_capability"].get("capability_retention")
-                if llmail_cap is not None:
-                    utm["correct_tool_called_rate"] = round(llmail_cap, 4)
-                    utm["source_metrics"]["correct"] = "llmail_capability.capability_retention"
-            utm["dataset_type"] = "llmail"
 
         results["unified_tool_metrics"] = utm
 
@@ -2931,6 +2931,8 @@ def run_mvp_evaluation(
                     print(f"  Malicious Tool Called: {utm['malicious_tool_called_rate']:.1%}  (lower = better)")
                 if utm.get("correct_tool_called_rate") is not None:
                     print(f"  Correct Tool Called:   {utm['correct_tool_called_rate']:.1%}  (higher = better)")
+                if utm.get("no_tool_call_rate") is not None:
+                    print(f"  No Tool Call:          {utm['no_tool_call_rate']:.1%}")
 
             # Diagnostics
             diag = results.get("diagnostics", {})

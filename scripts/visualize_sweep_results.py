@@ -1205,7 +1205,7 @@ def plot_metrics(runs: List[Dict[str, Any]]) -> None:
     # 3. LLMail CB ASR vs Alpha
     print("\n3. LLMail CB ASR (lower is better) vs Alpha:")
     for run in sorted_runs:
-        llmail = run.get("llmail", {})
+        llmail = (run.get("llmail") or {})
         if not llmail: continue
 
         asr = llmail.get("cb_asr")
@@ -1220,11 +1220,11 @@ def plot_metrics(runs: List[Dict[str, Any]]) -> None:
         print(f"  a={alpha:<4} {label:<28}: {bar} {asr:.1f}%")
 
     # 4. LLMail Capability Retention (higher is better)
-    has_cap = any(run.get("llmail", {}).get("capability_retention") is not None for run in sorted_runs)
+    has_cap = any((run.get("llmail") or {}).get("capability_retention") is not None for run in sorted_runs)
     if has_cap:
         print("\n4. LLMail Capability Retention (higher is better):")
         for run in sorted_runs:
-            llmail = run.get("llmail", {})
+            llmail = (run.get("llmail") or {})
             cap = llmail.get("capability_retention")
             if cap is None: continue
 
