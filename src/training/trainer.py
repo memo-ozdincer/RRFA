@@ -1220,7 +1220,7 @@ class CircuitBreakerTrainer:
                 cs, cr = alpha, 1.0
         else:
             cs, cr = 1.0, 1.0
-            alpha = float(getattr(self.config, "triplet_beta_harmful", 0.25))
+            alpha = float(getattr(self.config, "triplet_beta_harmful", 0.4))
 
         # Extract batch data
         harmful_input_ids = batch['harmful_input_ids']
@@ -1233,10 +1233,16 @@ class CircuitBreakerTrainer:
         benign_loss_mask = batch.get('benign_loss_mask', None)
         benign_sample_weight = batch.get('benign_sample_weight', None)
 
+        # Keep unweighted masks for triplet pooling (sample_weight cancels in
+        # _masked_mean_per_sample's numerator/denominator, so it must be applied
+        # separately).  Weighted masks are used only for KL / token-level losses
+        # where _masked_mean correctly propagates per-sample importance.
+        harmful_loss_mask_kl = harmful_loss_mask
+        benign_loss_mask_kl = benign_loss_mask
         if harmful_loss_mask is not None and harmful_sample_weight is not None:
-            harmful_loss_mask = harmful_loss_mask * harmful_sample_weight.unsqueeze(-1)
+            harmful_loss_mask_kl = harmful_loss_mask * harmful_sample_weight.unsqueeze(-1)
         if benign_loss_mask is not None and benign_sample_weight is not None:
-            benign_loss_mask = benign_loss_mask * benign_sample_weight.unsqueeze(-1)
+            benign_loss_mask_kl = benign_loss_mask * benign_sample_weight.unsqueeze(-1)
 
         # Get batch sizes for later splitting
         harmful_batch_size = harmful_input_ids.shape[0]
@@ -1425,12 +1431,12 @@ class CircuitBreakerTrainer:
                 benign_student_logits=student_logits_benign,
                 benign_teacher_logits=teacher_logits_benign,
                 benign_attention_mask=benign_attention_mask,
-                benign_loss_mask=benign_loss_mask,
+                benign_loss_mask=benign_loss_mask_kl,
                 alpha_benign=float(getattr(self.config, "triplet_alpha_benign", 0.5)),
-                beta_harmful=float(getattr(self.config, "triplet_beta_harmful", 0.25)),
-                gamma_kl=float(getattr(self.config, "triplet_gamma_kl", 1.2)),
-                margin_benign=float(getattr(self.config, "triplet_margin_benign", 50.0)),
-                margin_harmful=float(getattr(self.config, "triplet_margin_harmful", 150.0)),
+                beta_harmful=float(getattr(self.config, "triplet_beta_harmful", 0.4)),
+                gamma_kl=float(getattr(self.config, "triplet_gamma_kl", 0.9)),
+                margin_benign=float(getattr(self.config, "triplet_margin_benign", 500.0)),
+                margin_harmful=float(getattr(self.config, "triplet_margin_harmful", 1500.0)),
                 benign_positive_distance=getattr(self.config, "triplet_benign_positive_distance", "dmix"),
                 benign_negative_distance=getattr(self.config, "triplet_benign_negative_distance", "dmix"),
                 harmful_positive_distance=getattr(self.config, "triplet_harmful_positive_distance", "dmix"),
@@ -1455,7 +1461,7 @@ class CircuitBreakerTrainer:
                 harmful_frozen_reps,
                 self.config.cb_target_layers,
                 harmful_attention_mask,
-                loss_mask=harmful_loss_mask,
+                loss_mask=harmful_loss_mask_kl,
                 return_metrics=True,
             )
             loss_retain = retain_loss(
@@ -1463,7 +1469,7 @@ class CircuitBreakerTrainer:
                 benign_frozen_reps,
                 self.config.cb_target_layers,
                 benign_attention_mask,
-                loss_mask=benign_loss_mask,
+                loss_mask=benign_loss_mask_kl,
             )
             if beta_kl > 0:
                 if teacher_logits_benign is None:
@@ -1472,7 +1478,7 @@ class CircuitBreakerTrainer:
                     student_logits=student_logits_benign,
                     teacher_logits=teacher_logits_benign,
                     attention_mask=benign_attention_mask,
-                    loss_mask=benign_loss_mask,
+                    loss_mask=benign_loss_mask_kl,
                     temperature=kl_temp,
                 )
             else:
@@ -1492,12 +1498,12 @@ class CircuitBreakerTrainer:
             loss_reroute = random_reroute_loss(
                 model_reps=harmful_model_reps,
                 target_layers=self.config.cb_target_layers,
-                loss_mask=harmful_loss_mask,
+                loss_mask=harmful_loss_mask_kl,
             )
             loss_retain = retain_ce_loss(
                 logits=student_logits_benign,
                 labels=benign_input_ids,
-                loss_mask=benign_loss_mask,
+                loss_mask=benign_loss_mask_kl,
             )
             total_loss = cs * loss_reroute + cr * loss_retain
             metrics = {
