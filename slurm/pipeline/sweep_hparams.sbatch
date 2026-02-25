@@ -3,7 +3,7 @@
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=24
-#SBATCH --time=19:00:00
+#SBATCH --time=09:00:00
 #SBATCH --output=/scratch/memoozd/cb-scratch/logs/%x_%j.out
 #SBATCH --error=/scratch/memoozd/cb-scratch/logs/%x_%j.err
 #SBATCH --account=def-zhijing
@@ -118,13 +118,13 @@ echo ""
 # =============================================================================
 # Configuration
 # =============================================================================
-QUICK_TEST="${QUICK_TEST:-false}"
+QUICK_TEST="${QUICK_TEST:-true}"
 
 if [[ "$QUICK_TEST" == "true" ]]; then
     echo "🔧 QUICK TEST MODE - Reduced configurations"
     DEFAULT_STEPS=50
-    DEFAULT_ALPHAS="5.0,10.0"
-    DEFAULT_LAYER_CONFIGS="10,20"
+    DEFAULT_ALPHAS="5.0,10.0,15.0"
+    DEFAULT_LAYER_CONFIGS="18,24"
     DEFAULT_POLICIES="assistant_only,cb_full_sequence,tool_calls_only"
     DEFAULT_MWCS_SCHEDULE="none"
     DEFAULT_AGENTDOJO_EVAL_SPLIT="complete"
