@@ -171,9 +171,9 @@ LOSS_MODE="${LOSS_MODE:-triplet_full}"
 LOSS_WEIGHTING="${LOSS_WEIGHTING:-dual}"
 TRIPLET_ALPHA_BENIGN="${TRIPLET_ALPHA_BENIGN:-0.5}"
 TRIPLET_BETA_HARMFUL="${TRIPLET_BETA_HARMFUL:-0.25}"
-TRIPLET_GAMMA_KL="${TRIPLET_GAMMA_KL:-1.2}"
-TRIPLET_MARGIN_BENIGN="${TRIPLET_MARGIN_BENIGN:-50.0}"
-TRIPLET_MARGIN_HARMFUL="${TRIPLET_MARGIN_HARMFUL:-150.0}"
+TRIPLET_GAMMA_KL="${TRIPLET_GAMMA_KL:-0.8}"
+TRIPLET_MARGIN_BENIGN="${TRIPLET_MARGIN_BENIGN:-80.0}"
+TRIPLET_MARGIN_HARMFUL="${TRIPLET_MARGIN_HARMFUL:-220.0}"
 TRIPLET_BENIGN_POS_DISTANCE="${TRIPLET_BENIGN_POS_DISTANCE:-dmix}"
 TRIPLET_BENIGN_NEG_DISTANCE="${TRIPLET_BENIGN_NEG_DISTANCE:-dmix}"
 TRIPLET_HARMFUL_POS_DISTANCE="${TRIPLET_HARMFUL_POS_DISTANCE:-dmix}"
@@ -182,9 +182,10 @@ TRIPLET_MIX_L2_WEIGHT="${TRIPLET_MIX_L2_WEIGHT:-0.5}"
 TRIPLET_MIX_COS_WEIGHT="${TRIPLET_MIX_COS_WEIGHT:-0.5}"
 CB_LAYERS="${CB_LAYERS:-10,20}"
 LMP_POLICY="${LMP_POLICY:-cb_full_sequence}"
-MWCS_SCHEDULE="${MWCS_SCHEDULE:-none}"
+MWCS_SCHEDULE="${MWCS_SCHEDULE:-capability_focus}"
 MWCS_REGISTRY="${MWCS_REGISTRY:-$REPO_DIR/configs/mwcs_registry_v1.json}"
 MWCS_STEP="${MWCS_STEP:-0}"
+SAVE_STEPS="${SAVE_STEPS:-10}"
 MAX_SEQ_LENGTH="${MAX_SEQ_LENGTH:-4096}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
 DTYPE="${DTYPE:-bfloat16}"
@@ -201,6 +202,9 @@ EVAL_LIMIT="${EVAL_LIMIT:-100}"
 EVAL_MERGE_ADAPTER="${EVAL_MERGE_ADAPTER:-true}"
 AGENTDOJO_EVAL_SPLIT="${AGENTDOJO_EVAL_SPLIT:-complete}"
 FULL_RENDER_AUDIT="${FULL_RENDER_AUDIT:-true}"
+EVAL_INTERMEDIATE_CHECKPOINTS="${EVAL_INTERMEDIATE_CHECKPOINTS:-true}"
+CHECKPOINT_EVAL_STEPS="${CHECKPOINT_EVAL_STEPS:-80,100,110,150}"
+CHECKPOINT_EVAL_LIMIT="${CHECKPOINT_EVAL_LIMIT:-$EVAL_LIMIT}"
 VERIFY_PIPELINE="${VERIFY_PIPELINE:-true}"
 VERIFY_FAIL_ON_ERROR="${VERIFY_FAIL_ON_ERROR:-true}"
 
@@ -226,6 +230,9 @@ echo "  LOSS_MODE: $LOSS_MODE"
 echo "  CB_LAYERS: $CB_LAYERS"
 echo "  AGENTDOJO_EVAL_SPLIT: $AGENTDOJO_EVAL_SPLIT"
 echo "  FULL_RENDER_AUDIT: $FULL_RENDER_AUDIT"
+echo "  EVAL_INTERMEDIATE_CHECKPOINTS: $EVAL_INTERMEDIATE_CHECKPOINTS"
+echo "  CHECKPOINT_EVAL_STEPS: $CHECKPOINT_EVAL_STEPS"
+echo "  CHECKPOINT_EVAL_LIMIT: $CHECKPOINT_EVAL_LIMIT"
 echo ""
 echo "Stage Control:"
 echo "  SKIP_ETL_A: $SKIP_ETL_A"
@@ -680,7 +687,7 @@ if [[ "$SKIP_TRAIN" != "true" ]]; then
         --lora-alpha "$LORA_ALPHA"
         --lora-dropout 0.05
         --logging-steps 10
-        --save-steps 50
+        --save-steps "$SAVE_STEPS"
         --cb-target-layers "${CB_LAYER_ARRAY[@]}"
         --mode mixed
     )
@@ -784,6 +791,51 @@ if [[ "$SKIP_EVAL" != "true" ]]; then
                     ;;
             esac
 
+            if [[ "$EVAL_INTERMEDIATE_CHECKPOINTS" == "true" ]]; then
+                echo "Evaluating intermediate checkpoints: $CHECKPOINT_EVAL_STEPS"
+                IFS=',' read -ra CHECKPOINT_STEPS_ARRAY <<< "$CHECKPOINT_EVAL_STEPS"
+                for ckpt_step_raw in "${CHECKPOINT_STEPS_ARRAY[@]}"; do
+                    ckpt_step="$(echo "$ckpt_step_raw" | xargs)"
+                    [[ -z "$ckpt_step" ]] && continue
+                    ckpt_dir="$MODEL_OUTPUT_DIR/checkpoint-$ckpt_step"
+                    if [[ ! -d "$ckpt_dir" ]]; then
+                        echo "  [checkpoint-$ckpt_step] missing (save-steps=$SAVE_STEPS), skipping"
+                        continue
+                    fi
+
+                    ckpt_eval_dir="$VIS_EVAL_DIR/checkpoints/checkpoint-$ckpt_step"
+                    mkdir -p "$ckpt_eval_dir"
+
+                    if dataset_enabled "fujitsu_b4" && [[ -f "$TRACES_DIR/fujitsu_b4_ds.jsonl" ]]; then
+                        echo "  [checkpoint-$ckpt_step] Fujitsu eval ($CHECKPOINT_EVAL_LIMIT samples)"
+                        python src/evaluation/eval.py \
+                            --baseline "$MODEL" \
+                            --cb-adapter "$ckpt_dir" \
+                            --eval-data "$TRACES_DIR/fujitsu_b4_ds.jsonl" \
+                            --tool-schema "$TOOL_SCHEMA" \
+                            --output "$ckpt_eval_dir/fujitsu_eval.json" \
+                            --limit "$CHECKPOINT_EVAL_LIMIT" \
+                            "${EVAL_COMMON_ARGS[@]}" \
+                            --dtype "$DTYPE"
+                    fi
+
+                    if dataset_enabled "agentdojo" && [[ -f "$AGENTDOJO_EVAL_FILE" ]]; then
+                        echo "  [checkpoint-$ckpt_step] AgentDojo eval ($AGENTDOJO_EVAL_SPLIT, $CHECKPOINT_EVAL_LIMIT samples)"
+                        python src/evaluation/eval.py \
+                            --baseline "$MODEL" \
+                            --cb-adapter "$ckpt_dir" \
+                            --eval-data "$AGENTDOJO_EVAL_FILE" \
+                            --tool-schema "$TOOL_SCHEMA" \
+                            --output "$ckpt_eval_dir/agentdojo_eval.json" \
+                            --use-sample-context \
+                            --limit "$CHECKPOINT_EVAL_LIMIT" \
+                            "${EVAL_COMMON_ARGS[@]}" \
+                            --dtype "$DTYPE"
+                    fi
+                done
+                echo ""
+            fi
+
             if dataset_enabled "agentdojo" && [[ -f "$AGENTDOJO_EVAL_FILE" ]]; then
                 echo "Evaluating on AgentDojo ($AGENTDOJO_EVAL_SPLIT)..."
                 python src/evaluation/eval.py \
@@ -868,7 +920,22 @@ with open('$VIS_RUN_DIR/verification_report.json') as f:
 print('pass' if r.get('summary', {}).get('passed') else 'fail')
 " 2>/dev/null || echo "unknown")
                     echo "Verification status: $VERIFY_STATUS"
+                    python3 -c "
+import json
+with open('$VIS_RUN_DIR/verification_report.json') as f:
+    r = json.load(f)
+s = r.get('summary', {})
+print(f\"Verification summary: errors={s.get('errors')} warnings={s.get('warnings')} passed={s.get('passed')}\")
+" 2>/dev/null || true
                 fi
+            fi
+
+            if [[ -f "$VIS_RUN_DIR/full_renders_summary.txt" ]]; then
+                echo "Full Render Audit Summary:"
+                sed -n '1,20p' "$VIS_RUN_DIR/full_renders_summary.txt" | sed 's/^/  /'
+            elif [[ -n "${FULL_RENDER_AUDIT_SUMMARY:-}" && -f "$FULL_RENDER_AUDIT_SUMMARY" ]]; then
+                echo "Full Render Audit Summary:"
+                sed -n '1,20p' "$FULL_RENDER_AUDIT_SUMMARY" | sed 's/^/  /'
             fi
 
             echo ""

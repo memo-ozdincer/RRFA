@@ -2722,6 +2722,45 @@ def run_mvp_evaluation(
         results["stage1_passed"] = bool(results["stage1_gates"]) and all(results["stage1_gates"].values())
 
         # =====================================================================
+        # Unified Tool Metrics: two clear numbers across all datasets
+        #   1. malicious_tool_called_rate  (lower = better for CB)
+        #   2. correct_tool_called_rate    (higher = better for CB)
+        # =====================================================================
+        utm = {"malicious_tool_called_rate": None, "correct_tool_called_rate": None, "source_metrics": {}}
+
+        if has_tool_flip:
+            utm["malicious_tool_called_rate"] = round(cb_tool_asr, 4)
+            utm["correct_tool_called_rate"] = round(cb_tool.get("correct_behavior_rate", 0.0), 4)
+            utm["source_metrics"]["malicious"] = "tool_flip_asr.attack_success_rate"
+            utm["source_metrics"]["correct"] = "tool_flip_asr.correct_behavior_rate"
+            utm["dataset_type"] = "fujitsu"
+
+        if has_generation:
+            hrr = cb_gen.get("harmful_resistance_rate")
+            bmr = cb_gen.get("benign_tool_match_rate")
+            if hrr is not None:
+                utm["malicious_tool_called_rate"] = round(1.0 - hrr, 4)
+                utm["source_metrics"]["malicious"] = "1 - generation_comparison.harmful_resistance_rate"
+            if bmr is not None:
+                utm["correct_tool_called_rate"] = round(bmr, 4)
+                utm["source_metrics"]["correct"] = "generation_comparison.benign_tool_match_rate"
+            utm["dataset_type"] = "agentdojo"
+
+        if "llmail_attack" in results.get("cb_model", {}):
+            llmail_asr = results["cb_model"]["llmail_attack"].get("attack_success_rate")
+            if llmail_asr is not None:
+                utm["malicious_tool_called_rate"] = round(llmail_asr, 4)
+                utm["source_metrics"]["malicious"] = "llmail_attack.attack_success_rate"
+            if "llmail_capability" in results.get("cb_model", {}):
+                llmail_cap = results["cb_model"]["llmail_capability"].get("capability_retention")
+                if llmail_cap is not None:
+                    utm["correct_tool_called_rate"] = round(llmail_cap, 4)
+                    utm["source_metrics"]["correct"] = "llmail_capability.capability_retention"
+            utm["dataset_type"] = "llmail"
+
+        results["unified_tool_metrics"] = utm
+
+        # =====================================================================
         # Diagnostics: detect "tools broken" failure mode
         # =====================================================================
         # If the CB model never calls tools while baseline does, the CB likely
@@ -2883,6 +2922,15 @@ def run_mvp_evaluation(
                 print("  N/A (no applicable gates for this dataset/eval setup)")
 
             print(f"\nStage 1 Overall: {'PASSED' if results['stage1_passed'] else 'FAILED'}")
+
+            # Unified Tool Metrics
+            utm = results.get("unified_tool_metrics", {})
+            if utm.get("malicious_tool_called_rate") is not None or utm.get("correct_tool_called_rate") is not None:
+                print(f"\nUnified Tool Metrics ({utm.get('dataset_type', '?')}):")
+                if utm.get("malicious_tool_called_rate") is not None:
+                    print(f"  Malicious Tool Called: {utm['malicious_tool_called_rate']:.1%}  (lower = better)")
+                if utm.get("correct_tool_called_rate") is not None:
+                    print(f"  Correct Tool Called:   {utm['correct_tool_called_rate']:.1%}  (higher = better)")
 
             # Diagnostics
             diag = results.get("diagnostics", {})

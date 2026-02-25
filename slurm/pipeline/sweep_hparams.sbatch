@@ -58,7 +58,8 @@
 #   QUICK_TEST, TOTAL_STEPS, ALPHAS, LAYER_CONFIGS, POLICIES, MWCS_SCHEDULE
 #
 # Eval/logging:
-#   LIMIT_EVAL, NUM_EXAMPLES, SHOW_EXAMPLES, AGENTDOJO_EVAL_SPLIT, FULL_RENDER_AUDIT
+#   LIMIT_EVAL, NUM_EXAMPLES, SHOW_EXAMPLES, AGENTDOJO_EVAL_SPLIT, FULL_RENDER_AUDIT,
+#   EVAL_INTERMEDIATE_CHECKPOINTS, CHECKPOINT_EVAL_STEPS, CHECKPOINT_EVAL_LIMIT
 #
 # Data limits:
 # Core training:
@@ -126,7 +127,7 @@ if [[ "$QUICK_TEST" == "true" ]]; then
     DEFAULT_ALPHAS="5.0,10.0,15.0"
     DEFAULT_LAYER_CONFIGS="18,24"
     DEFAULT_POLICIES="assistant_only,cb_full_sequence,tool_calls_only"
-    DEFAULT_MWCS_SCHEDULE="none"
+    DEFAULT_MWCS_SCHEDULE="capability_focus"
     DEFAULT_AGENTDOJO_EVAL_SPLIT="complete"
     DEFAULT_LIMIT_EVAL=20
     DEFAULT_NUM_EXAMPLES=5
@@ -135,7 +136,7 @@ else
     DEFAULT_ALPHAS="5.0,10.0,15.0"
     DEFAULT_LAYER_CONFIGS="10,20|8,16,24|12,18|6,12,18,24"
     DEFAULT_POLICIES="assistant_only,cb_full_sequence,tool_calls_only"
-    DEFAULT_MWCS_SCHEDULE="none"
+    DEFAULT_MWCS_SCHEDULE="capability_focus"
     DEFAULT_AGENTDOJO_EVAL_SPLIT="complete"
     DEFAULT_LIMIT_EVAL=50
     DEFAULT_NUM_EXAMPLES=50
@@ -153,6 +154,9 @@ LIMIT_EVAL="${LIMIT_EVAL:-$DEFAULT_LIMIT_EVAL}"
 NUM_EXAMPLES="${NUM_EXAMPLES:-$DEFAULT_NUM_EXAMPLES}"
 SHOW_EXAMPLES="${SHOW_EXAMPLES:-true}"
 FULL_RENDER_AUDIT="${FULL_RENDER_AUDIT:-true}"
+EVAL_INTERMEDIATE_CHECKPOINTS="${EVAL_INTERMEDIATE_CHECKPOINTS:-true}"
+CHECKPOINT_EVAL_STEPS="${CHECKPOINT_EVAL_STEPS:-80,100,110,150}"
+CHECKPOINT_EVAL_LIMIT="${CHECKPOINT_EVAL_LIMIT:-$LIMIT_EVAL}"
 VERIFY_PIPELINE="${VERIFY_PIPELINE:-true}"
 VERIFY_FAIL_ON_ERROR="${VERIFY_FAIL_ON_ERROR:-false}"
 
@@ -170,15 +174,16 @@ LOSS_MODE="${LOSS_MODE:-triplet_full}"
 LOSS_WEIGHTING="${LOSS_WEIGHTING:-dual}"
 TRIPLET_ALPHA_BENIGN="${TRIPLET_ALPHA_BENIGN:-0.5}"
 TRIPLET_BETA_HARMFUL="${TRIPLET_BETA_HARMFUL:-0.25}"
-TRIPLET_GAMMA_KL="${TRIPLET_GAMMA_KL:-1.2}"
-TRIPLET_MARGIN_BENIGN="${TRIPLET_MARGIN_BENIGN:-50.0}"
-TRIPLET_MARGIN_HARMFUL="${TRIPLET_MARGIN_HARMFUL:-150.0}"
+TRIPLET_GAMMA_KL="${TRIPLET_GAMMA_KL:-0.8}"
+TRIPLET_MARGIN_BENIGN="${TRIPLET_MARGIN_BENIGN:-80.0}"
+TRIPLET_MARGIN_HARMFUL="${TRIPLET_MARGIN_HARMFUL:-220.0}"
 TRIPLET_BENIGN_POS_DISTANCE="${TRIPLET_BENIGN_POS_DISTANCE:-dmix}"
 TRIPLET_BENIGN_NEG_DISTANCE="${TRIPLET_BENIGN_NEG_DISTANCE:-dmix}"
 TRIPLET_HARMFUL_POS_DISTANCE="${TRIPLET_HARMFUL_POS_DISTANCE:-dmix}"
 TRIPLET_HARMFUL_NEG_DISTANCE="${TRIPLET_HARMFUL_NEG_DISTANCE:-dmix}"
 TRIPLET_MIX_L2_WEIGHT="${TRIPLET_MIX_L2_WEIGHT:-0.5}"
 TRIPLET_MIX_COS_WEIGHT="${TRIPLET_MIX_COS_WEIGHT:-0.5}"
+SAVE_STEPS="${SAVE_STEPS:-10}"
 
 echo "Configuration:"
 echo "  TOTAL_STEPS: $TOTAL_STEPS"
@@ -197,6 +202,9 @@ echo "  LIMIT_EVAL: $LIMIT_EVAL"
 echo "  NUM_EXAMPLES: $NUM_EXAMPLES"
 echo "  SHOW_EXAMPLES: $SHOW_EXAMPLES"
 echo "  FULL_RENDER_AUDIT: $FULL_RENDER_AUDIT"
+echo "  EVAL_INTERMEDIATE_CHECKPOINTS: $EVAL_INTERMEDIATE_CHECKPOINTS"
+echo "  CHECKPOINT_EVAL_STEPS: $CHECKPOINT_EVAL_STEPS"
+echo "  CHECKPOINT_EVAL_LIMIT: $CHECKPOINT_EVAL_LIMIT"
 echo "  VERIFY_PIPELINE: $VERIFY_PIPELINE"
 echo "  VERIFY_FAIL_ON_ERROR: $VERIFY_FAIL_ON_ERROR"
 echo "  QUICK_TEST: $QUICK_TEST"
@@ -331,8 +339,12 @@ for alpha in "${ALPHA_ARRAY[@]}"; do
   "mwcs_step": "$MWCS_STEP",
   "agentdojo_eval_split": "$AGENTDOJO_EVAL_SPLIT",
   "full_render_audit": "$FULL_RENDER_AUDIT",
+  "eval_intermediate_checkpoints": "$EVAL_INTERMEDIATE_CHECKPOINTS",
+  "checkpoint_eval_steps": "$CHECKPOINT_EVAL_STEPS",
+  "checkpoint_eval_limit": "$CHECKPOINT_EVAL_LIMIT",
   "loss_mode": "$LOSS_MODE",
   "loss_weighting": "$LOSS_WEIGHTING",
+  "save_steps": "$SAVE_STEPS",
   "triplet_beta_harmful": "$TRIPLET_BETA_HARMFUL",
   "triplet_gamma_kl": "$TRIPLET_GAMMA_KL",
   "triplet_margin_benign": "$TRIPLET_MARGIN_BENIGN",
@@ -483,7 +495,7 @@ print(total)
                 --lora-alpha "$LORA_ALPHA"
                 --lora-dropout 0.05
                 --logging-steps 10
-                --save-steps 50
+                --save-steps "$SAVE_STEPS"
                 --no-wandb
                 --cb-target-layers "${CB_LAYER_ARRAY[@]}"
                 --mode mixed
@@ -520,6 +532,87 @@ print(total)
                 fi
                 
                 if [[ -n "$ADAPTER_PATH" ]]; then
+                    case "$AGENTDOJO_EVAL_SPLIT" in
+                        complete)
+                            AGENTDOJO_EVAL_FILE="$AGENTDOJO_TRACES"
+                            ;;
+                        harmful)
+                            AGENTDOJO_EVAL_FILE="$SPLIT_DIR/agentdojo_traces_harmful.jsonl"
+                            ;;
+                        benign)
+                            AGENTDOJO_EVAL_FILE="$SPLIT_DIR/agentdojo_traces_benign.jsonl"
+                            ;;
+                        *)
+                            echo "  WARNING: Unknown AGENTDOJO_EVAL_SPLIT=$AGENTDOJO_EVAL_SPLIT (using complete)"
+                            AGENTDOJO_EVAL_FILE="$AGENTDOJO_TRACES"
+                            ;;
+                    esac
+
+                    # ---------------------------------------------------------
+                    # Evaluate selected intermediate checkpoints
+                    # ---------------------------------------------------------
+                    if [[ "$EVAL_INTERMEDIATE_CHECKPOINTS" == "true" ]]; then
+                        echo "  Evaluating intermediate checkpoints: $CHECKPOINT_EVAL_STEPS"
+                        IFS=',' read -ra CHECKPOINT_STEPS_ARRAY <<< "$CHECKPOINT_EVAL_STEPS"
+                        for ckpt_step_raw in "${CHECKPOINT_STEPS_ARRAY[@]}"; do
+                            ckpt_step="$(echo "$ckpt_step_raw" | xargs)"
+                            [[ -z "$ckpt_step" ]] && continue
+                            ckpt_dir="$RUN_DIR/model/checkpoint-$ckpt_step"
+                            if [[ ! -d "$ckpt_dir" ]]; then
+                                echo "    [checkpoint-$ckpt_step] missing (save-steps=$SAVE_STEPS), skipping"
+                                continue
+                            fi
+
+                            ckpt_eval_dir="$RUN_DIR/eval/checkpoints/checkpoint-$ckpt_step"
+                            mkdir -p "$ckpt_eval_dir"
+                            echo "    [checkpoint-$ckpt_step] Fujitsu eval ($CHECKPOINT_EVAL_LIMIT samples)"
+                            python src/evaluation/eval.py \
+                                --baseline "$TOKENIZER" \
+                                --cb-adapter "$ckpt_dir" \
+                                --eval-data "$DS_TRACES" \
+                                --tool-schema "$REPO_DIR/configs/tool_schemas/b4_standard_v1.json" \
+                                --output "$ckpt_eval_dir/fujitsu_eval.json" \
+                                --limit "$CHECKPOINT_EVAL_LIMIT" \
+                                --merge-adapter \
+                                --dtype "$DTYPE" 2>&1 | tee -a "$RUN_DIR/eval/checkpoints.log"
+
+                            if [[ -f "$AGENTDOJO_EVAL_FILE" ]]; then
+                                echo "    [checkpoint-$ckpt_step] AgentDojo eval ($AGENTDOJO_EVAL_SPLIT, $CHECKPOINT_EVAL_LIMIT samples)"
+                                python src/evaluation/eval.py \
+                                    --baseline "$TOKENIZER" \
+                                    --cb-adapter "$ckpt_dir" \
+                                    --eval-data "$AGENTDOJO_EVAL_FILE" \
+                                    --tool-schema "$REPO_DIR/configs/tool_schemas/b4_standard_v1.json" \
+                                    --output "$ckpt_eval_dir/agentdojo_eval.json" \
+                                    --use-sample-context \
+                                    --limit "$CHECKPOINT_EVAL_LIMIT" \
+                                    --merge-adapter \
+                                    --dtype "$DTYPE" 2>&1 | tee -a "$RUN_DIR/eval/checkpoints.log"
+                            fi
+
+                            # Print checkpoint unified metrics summary
+                            python3 -c "
+import json, os
+ckpt_dir = '$ckpt_eval_dir'
+for name in ['fujitsu_eval.json', 'agentdojo_eval.json']:
+    path = os.path.join(ckpt_dir, name)
+    if not os.path.isfile(path):
+        continue
+    with open(path) as f:
+        r = json.load(f)
+    utm = r.get('unified_tool_metrics', {})
+    mal = utm.get('malicious_tool_called_rate')
+    cor = utm.get('correct_tool_called_rate')
+    ds = utm.get('dataset_type', name.split('_')[0])
+    if mal is not None or cor is not None:
+        m_s = f'{mal:.1%}' if mal is not None else 'N/A'
+        c_s = f'{cor:.1%}' if cor is not None else 'N/A'
+        print(f'    [checkpoint-$ckpt_step] {ds}: malicious={m_s} correct={c_s}')
+" 2>/dev/null || true
+                        done
+                        echo ""
+                    fi
+
                     # ---------------------------------------------------------
                     # Evaluate on Fujitsu
                     # ---------------------------------------------------------
@@ -580,21 +673,6 @@ PYEOF
                     # Evaluate on AgentDojo
                     # ---------------------------------------------------------
                     AGENTDOJO_OUTPUT="$RUN_DIR/eval/agentdojo_eval.json"
-                    case "$AGENTDOJO_EVAL_SPLIT" in
-                        complete)
-                            AGENTDOJO_EVAL_FILE="$AGENTDOJO_TRACES"
-                            ;;
-                        harmful)
-                            AGENTDOJO_EVAL_FILE="$SPLIT_DIR/agentdojo_traces_harmful.jsonl"
-                            ;;
-                        benign)
-                            AGENTDOJO_EVAL_FILE="$SPLIT_DIR/agentdojo_traces_benign.jsonl"
-                            ;;
-                        *)
-                            echo "  WARNING: Unknown AGENTDOJO_EVAL_SPLIT=$AGENTDOJO_EVAL_SPLIT (using complete)"
-                            AGENTDOJO_EVAL_FILE="$AGENTDOJO_TRACES"
-                            ;;
-                    esac
                     echo "  Evaluating on AgentDojo ($AGENTDOJO_EVAL_SPLIT, $LIMIT_EVAL samples)..."
                     
                     if [[ -f "$AGENTDOJO_EVAL_FILE" ]]; then
@@ -706,6 +784,21 @@ print('pass' if r.get('summary', {}).get('passed') else 'fail')
                             verification_status="fail"
                             echo "  WARNING: verification failed for $RUN_NAME"
                         fi
+
+                        if [[ -f "$RUN_DIR/verification_report.json" ]]; then
+                            python3 -c "
+import json
+with open('$RUN_DIR/verification_report.json') as f:
+    r = json.load(f)
+s = r.get('summary', {})
+print(f\"  Verification Summary: errors={s.get('errors')} warnings={s.get('warnings')} passed={s.get('passed')}\")
+" 2>/dev/null || true
+                        fi
+                    fi
+
+                    if [[ -f "$RUN_DIR/full_renders_summary.txt" ]]; then
+                        echo "  Full Render Audit Summary:"
+                        sed -n '1,20p' "$RUN_DIR/full_renders_summary.txt" | sed 's/^/    /'
                     fi
 
                     if [[ "$verification_status" == "fail" ]]; then
@@ -738,10 +831,19 @@ if 'baseline' in r:
     print(f'  Fujitsu Baseline ASR: {baseline_asr:.1%}')
 if 'cb_model' in r:
     asr = r['cb_model']['tool_flip_asr']['attack_success_rate']
+    correct = r['cb_model']['tool_flip_asr'].get('correct_behavior_rate', 0)
+    no_tool = r['cb_model']['tool_flip_asr'].get('no_tool_call_rate', 0)
     print(f'  Fujitsu CB ASR:       {asr:.1%}')
+    print(f'  Fujitsu Correct Rate: {correct:.1%}')
+    print(f'  Fujitsu No-Tool Rate: {no_tool:.1%}')
 if 'delta' in r:
     delta = r['delta']['tool_flip_asr']
     print(f'  Fujitsu Delta:        {delta:+.1%}')
+utm = r.get('unified_tool_metrics', {})
+mal = utm.get('malicious_tool_called_rate')
+cor = utm.get('correct_tool_called_rate')
+if mal is not None or cor is not None:
+    print(f'  --- Unified: Malicious={mal:.1%}(lower=better) Correct={cor:.1%}(higher=better)')
 " 2>/dev/null || echo "  Fujitsu: (parse error)"
             fi
             if [[ -f "$RUN_DIR/eval/agentdojo_eval.json" ]]; then
@@ -758,12 +860,20 @@ if gen_b or gen_c:
     b_tcr = gen_b.get('tool_call_rate')
     c_tcr = gen_c.get('tool_call_rate')
     hrr = gen_c.get('harmful_resistance_rate')
+    bmr = gen_c.get('benign_tool_match_rate')
     if b_tcr is not None:
         print(f'  AgentDojo Tool-Call Rate (baseline): {b_tcr:.1%}')
     if c_tcr is not None:
         print(f'  AgentDojo Tool-Call Rate (CB):       {c_tcr:.1%}')
     if hrr is not None:
         print(f'  AgentDojo Harmful Resist:            {hrr:.1%}')
+    if bmr is not None:
+        print(f'  AgentDojo Benign Tool Match:         {bmr:.1%}')
+utm = r.get('unified_tool_metrics', {})
+mal = utm.get('malicious_tool_called_rate')
+cor = utm.get('correct_tool_called_rate')
+if mal is not None or cor is not None:
+    print(f'  --- Unified: Malicious={mal:.1%}(lower=better) Correct={cor:.1%}(higher=better)')
 " 2>/dev/null || echo "  AgentDojo: (parse error)"
             fi
             echo ""
@@ -789,7 +899,7 @@ echo ""
 
 # Generate summary CSV
 SUMMARY_CSV="$SWEEP_DIR/summary.csv"
-echo "alpha,layers,policy,mwcs_schedule,mwcs_step,agentdojo_eval_split,fujitsu_baseline_asr,fujitsu_cb_asr,fujitsu_delta,agentdojo_diff,agentdojo_benign_match,agentdojo_harmful_resist,agentdojo_baseline_tool_call_rate,agentdojo_cb_tool_call_rate,status,verification_status" > "$SUMMARY_CSV"
+echo "alpha,layers,policy,mwcs_schedule,mwcs_step,agentdojo_eval_split,fujitsu_baseline_asr,fujitsu_cb_asr,fujitsu_correct_rate,fujitsu_no_tool_rate,fujitsu_delta,agentdojo_diff,agentdojo_benign_match,agentdojo_harmful_resist,agentdojo_baseline_tool_call_rate,agentdojo_cb_tool_call_rate,fujitsu_malicious,fujitsu_correct,agentdojo_malicious,agentdojo_correct,status,verification_status" > "$SUMMARY_CSV"
 
 for run_dir in "$SWEEP_DIR"/a*; do
     if [[ -d "$run_dir" ]]; then
@@ -822,30 +932,41 @@ print(
         # Get metrics
         fujitsu_baseline="N/A"
         fujitsu_cb="N/A"
+        fujitsu_correct_rate="N/A"
+        fujitsu_no_tool_rate="N/A"
         fujitsu_delta="N/A"
         agentdojo_diff="N/A"
         agentdojo_benign_match="N/A"
         agentdojo_harmful_resist="N/A"
         agentdojo_baseline_tool_call_rate="N/A"
         agentdojo_cb_tool_call_rate="N/A"
+        fujitsu_malicious="N/A"
+        fujitsu_correct="N/A"
+        agentdojo_malicious="N/A"
+        agentdojo_correct="N/A"
         status="unknown"
         verification_status_csv="N/A"
 
         if [[ -f "$run_dir/eval/fujitsu_eval.json" ]]; then
-            read fujitsu_baseline fujitsu_cb fujitsu_delta < <(python3 -c "
+            read fujitsu_baseline fujitsu_cb fujitsu_correct_rate fujitsu_no_tool_rate fujitsu_delta fujitsu_malicious fujitsu_correct < <(python3 -c "
 import json
 with open('$run_dir/eval/fujitsu_eval.json') as f:
     r = json.load(f)
 baseline = r.get('baseline', {}).get('tool_flip_asr', {}).get('attack_success_rate', 'N/A')
 cb = r.get('cb_model', {}).get('tool_flip_asr', {}).get('attack_success_rate', 'N/A')
+correct = r.get('cb_model', {}).get('tool_flip_asr', {}).get('correct_behavior_rate', 'N/A')
+no_tool = r.get('cb_model', {}).get('tool_flip_asr', {}).get('no_tool_call_rate', 'N/A')
 delta = r.get('delta', {}).get('tool_flip_asr', 'N/A')
-print(baseline, cb, delta)
-" 2>/dev/null || echo "N/A N/A N/A")
+utm = r.get('unified_tool_metrics', {})
+mal = utm.get('malicious_tool_called_rate', 'N/A')
+cor = utm.get('correct_tool_called_rate', 'N/A')
+print(baseline, cb, correct, no_tool, delta, mal, cor)
+" 2>/dev/null || echo "N/A N/A N/A N/A N/A N/A N/A")
             status="success"
         fi
 
         if [[ -f "$run_dir/eval/agentdojo_eval.json" ]]; then
-            read agentdojo_diff agentdojo_benign_match agentdojo_harmful_resist agentdojo_baseline_tool_call_rate agentdojo_cb_tool_call_rate < <(python3 -c "
+            read agentdojo_diff agentdojo_benign_match agentdojo_harmful_resist agentdojo_baseline_tool_call_rate agentdojo_cb_tool_call_rate agentdojo_malicious agentdojo_correct < <(python3 -c "
 import json
 with open('$run_dir/eval/agentdojo_eval.json') as f:
     r = json.load(f)
@@ -854,8 +975,11 @@ bmr = r.get('cb_model', {}).get('generation_comparison', {}).get('benign_tool_ma
 hrr = r.get('cb_model', {}).get('generation_comparison', {}).get('harmful_resistance_rate', 'N/A')
 btcr = r.get('baseline', {}).get('generation_comparison', {}).get('tool_call_rate', 'N/A')
 ctcr = r.get('cb_model', {}).get('generation_comparison', {}).get('tool_call_rate', 'N/A')
-print(diff, bmr, hrr, btcr, ctcr)
-" 2>/dev/null || echo "N/A N/A N/A N/A N/A")
+utm = r.get('unified_tool_metrics', {})
+mal = utm.get('malicious_tool_called_rate', 'N/A')
+cor = utm.get('correct_tool_called_rate', 'N/A')
+print(diff, bmr, hrr, btcr, ctcr, mal, cor)
+" 2>/dev/null || echo "N/A N/A N/A N/A N/A N/A N/A")
         fi
 
         if [[ -f "$run_dir/verification_report.json" ]]; then
@@ -869,7 +993,7 @@ print('pass' if r.get('summary', {}).get('passed') else 'fail')
             verification_status_csv="unknown"
         fi
 
-        echo "$alpha,$layers,$policy,$mwcs_schedule,$mwcs_step,$agentdojo_eval_split,$fujitsu_baseline,$fujitsu_cb,$fujitsu_delta,$agentdojo_diff,$agentdojo_benign_match,$agentdojo_harmful_resist,$agentdojo_baseline_tool_call_rate,$agentdojo_cb_tool_call_rate,$status,$verification_status_csv" >> "$SUMMARY_CSV"
+        echo "$alpha,$layers,$policy,$mwcs_schedule,$mwcs_step,$agentdojo_eval_split,$fujitsu_baseline,$fujitsu_cb,$fujitsu_correct_rate,$fujitsu_no_tool_rate,$fujitsu_delta,$agentdojo_diff,$agentdojo_benign_match,$agentdojo_harmful_resist,$agentdojo_baseline_tool_call_rate,$agentdojo_cb_tool_call_rate,$fujitsu_malicious,$fujitsu_correct,$agentdojo_malicious,$agentdojo_correct,$status,$verification_status_csv" >> "$SUMMARY_CSV"
     fi
 done
 

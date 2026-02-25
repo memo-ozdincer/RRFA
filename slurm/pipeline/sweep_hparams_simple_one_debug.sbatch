@@ -1,19 +1,31 @@
 #!/bin/bash
-#SBATCH --job-name=sweep_hparams_simple
+#SBATCH --job-name=sweep_debug_one
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=24
-#SBATCH --time=09:00:00
+#SBATCH --time=02:00:00
 #SBATCH --output=/scratch/memoozd/cb-scratch/logs/%x_%j.out
 #SBATCH --error=/scratch/memoozd/cb-scratch/logs/%x_%j.err
 #SBATCH --account=def-zhijing
+
+# =============================================================================
+# DEBUG: Single-sample sweep for inspecting traces and eval output
+# =============================================================================
+# Purpose: Run one config with minimal samples to verify:
+#   1. Traces look correct
+#   2. Eval JSON contains unified_tool_metrics
+#   3. Malicious/correct tool call rates are computed
+#   4. Summary CSV has all columns populated
+#
+# Usage:
+#   sbatch slurm/pipeline/sweep_hparams_simple_one_debug.sbatch
+# =============================================================================
 
 set -euo pipefail
 
 # =============================================================================
 # Environment Setup
 # =============================================================================
-# Ensure we are running from the repo root
 PROJECT_DIR="/project/def-zhijing/memoozd"
 REPO_DIR="$PROJECT_DIR/rrfa"
 VENV_DIR="$PROJECT_DIR/.venvs/cb_env"
@@ -42,7 +54,6 @@ fi
 SWEEP_SCRIPT="slurm/pipeline/sweep_hparams.sbatch"
 
 if [[ ! -f "$SWEEP_SCRIPT" ]]; then
-    # Try absolute path
     SWEEP_SCRIPT="$REPO_DIR/slurm/pipeline/sweep_hparams.sbatch"
 fi
 
@@ -54,46 +65,48 @@ if [[ ! -f "$SWEEP_SCRIPT" ]]; then
     exit 1
 fi
 
-export TOTAL_STEPS="${TOTAL_STEPS:-200}"
-export ALPHAS="${ALPHAS:-5.0,10.0,15.0}"
+# =============================================================================
+# DEBUG OVERRIDES: minimal config for inspection
+# =============================================================================
+export QUICK_TEST="true"
+export TOTAL_STEPS="${TOTAL_STEPS:-10}"
+export ALPHAS="${ALPHAS:-5.0}"
 export LAYER_CONFIGS="${LAYER_CONFIGS:-10,20}"
-export POLICIES="${POLICIES:-assistant_only,cb_full_sequence,tool_calls_only}"
+export POLICIES="${POLICIES:-assistant_only}"
 export MWCS_SCHEDULE="${MWCS_SCHEDULE:-capability_focus}"
 export MWCS_REGISTRY="${MWCS_REGISTRY:-$REPO_DIR/configs/mwcs_registry_v1.json}"
 export MWCS_STEP="${MWCS_STEP:-0}"
 export AGENTDOJO_EVAL_SPLIT="${AGENTDOJO_EVAL_SPLIT:-complete}"
-export LIMIT_EVAL="${LIMIT_EVAL:-100}"
-export LIMIT_GEN="${LIMIT_GEN:-5000}"
-export NUM_EXAMPLES="${NUM_EXAMPLES:-50}"
+export LIMIT_EVAL="${LIMIT_EVAL:-1}"
+export LIMIT_GEN="${LIMIT_GEN:-1}"
+export NUM_EXAMPLES="${NUM_EXAMPLES:-1}"
 export SHOW_EXAMPLES="${SHOW_EXAMPLES:-true}"
 export FULL_RENDER_AUDIT="${FULL_RENDER_AUDIT:-true}"
-export EVAL_INTERMEDIATE_CHECKPOINTS="${EVAL_INTERMEDIATE_CHECKPOINTS:-true}"
-export CHECKPOINT_EVAL_STEPS="${CHECKPOINT_EVAL_STEPS:-80,100,110,150}"
-export CHECKPOINT_EVAL_LIMIT="${CHECKPOINT_EVAL_LIMIT:-${LIMIT_EVAL}}"
+export EVAL_INTERMEDIATE_CHECKPOINTS="${EVAL_INTERMEDIATE_CHECKPOINTS:-false}"
+export CHECKPOINT_EVAL_STEPS="${CHECKPOINT_EVAL_STEPS:-}"
+export CHECKPOINT_EVAL_LIMIT="${CHECKPOINT_EVAL_LIMIT:-1}"
 export BATCH_SIZE="${BATCH_SIZE:-1}"
-export GRAD_ACCUM="${GRAD_ACCUM:-4}"
+export GRAD_ACCUM="${GRAD_ACCUM:-1}"
 export VERIFY_PIPELINE="${VERIFY_PIPELINE:-true}"
 export VERIFY_FAIL_ON_ERROR="${VERIFY_FAIL_ON_ERROR:-false}"
 export TRIPLET_BETA_HARMFUL="${TRIPLET_BETA_HARMFUL:-0.25}"
 export TRIPLET_GAMMA_KL="${TRIPLET_GAMMA_KL:-0.8}"
 export TRIPLET_MARGIN_BENIGN="${TRIPLET_MARGIN_BENIGN:-80.0}"
 export TRIPLET_MARGIN_HARMFUL="${TRIPLET_MARGIN_HARMFUL:-220.0}"
-export SAVE_STEPS="${SAVE_STEPS:-10}"
+export SAVE_STEPS="${SAVE_STEPS:-5}"
 
-echo "Starting sweep_hparams_simple.sbatch..."
+echo "=========================================="
+echo "DEBUG: Single-sample sweep"
+echo "=========================================="
 echo "  ALPHAS: ${ALPHAS}"
 echo "  LAYER_CONFIGS: ${LAYER_CONFIGS}"
 echo "  POLICIES: ${POLICIES}"
-echo "  MWCS_SCHEDULE: ${MWCS_SCHEDULE} (step=${MWCS_STEP})"
-echo "  MWCS_REGISTRY: ${MWCS_REGISTRY}"
-echo "  AGENTDOJO_EVAL_SPLIT: ${AGENTDOJO_EVAL_SPLIT}"
-echo "  FULL_RENDER_AUDIT: ${FULL_RENDER_AUDIT}"
+echo "  LIMIT_EVAL: ${LIMIT_EVAL}"
+echo "  LIMIT_GEN: ${LIMIT_GEN}"
+echo "  TOTAL_STEPS: ${TOTAL_STEPS}"
 echo "  EVAL_INTERMEDIATE_CHECKPOINTS: ${EVAL_INTERMEDIATE_CHECKPOINTS}"
-echo "  CHECKPOINT_EVAL_STEPS: ${CHECKPOINT_EVAL_STEPS}"
-echo "  CHECKPOINT_EVAL_LIMIT: ${CHECKPOINT_EVAL_LIMIT}"
 echo "  Datasets: Fujitsu, AgentDojo"
-echo "  Logging: Compatible with scripts/visualize_sweep_results.py"
-echo "  Verification: VERIFY_PIPELINE=${VERIFY_PIPELINE}, VERIFY_FAIL_ON_ERROR=${VERIFY_FAIL_ON_ERROR}"
+echo ""
 
 # =============================================================================
 # Cache Setup (Offline Mode)
@@ -126,7 +139,6 @@ if [[ -d "$SNAPSHOT_ROOT" ]]; then
         MODEL="$SNAPSHOT_PATH"
     else
         echo "WARNING: Snapshot directory exists but is empty: $SNAPSHOT_ROOT"
-        # Fallback to name, will fail if offline
         MODEL="$MODEL_NAME"
     fi
 else
@@ -137,29 +149,21 @@ fi
 # =============================================================================
 # Auto-Generation of Missing Data
 # =============================================================================
-# Check if Fujitsu DS/DR traces exist. If not, generate them.
-# This ensures the sweep can run even if data prep wasn't done manually.
-
 TRACES_DIR="/scratch/memoozd/cb-scratch/data/traces"
 FUJITSU_SKELETON="$TRACES_DIR/fujitsu_b4_skeletons.jsonl"
 FUJITSU_DS="$TRACES_DIR/fujitsu_b4_ds.jsonl"
 FUJITSU_DR="$TRACES_DIR/fujitsu_b4_dr.jsonl"
 TOOL_SCHEMA="configs/tool_schemas/b4_standard_v1.json"
-# MODEL is now set above via cache resolution
 
-# Helper to generate DS/DR
 generate_data() {
     local name="$1"
     local skeleton="$2"
     local ds="$3"
     local dr="$4"
     local schema="$5"
-    # Check for DS/DR (Generation)
     if [[ ! -f "$ds" || ! -f "$dr" ]]; then
         if [[ -f "$skeleton" ]]; then
             echo "Generating missing $name data (DS/DR)..."
-            
-            # Generate DS (Harmful)
             if [[ ! -f "$ds" ]]; then
                 echo "  Generating DS (Harmful)..."
                 python src/data_generation/generate_completions.py \
@@ -173,8 +177,6 @@ generate_data() {
                     --use-vllm \
                     --limit "$LIMIT_GEN"
             fi
-            
-            # Generate DR (Benign)
             if [[ ! -f "$dr" ]]; then
                 echo "  Generating DR (Benign)..."
                 python src/data_generation/generate_completions.py \
@@ -195,11 +197,10 @@ generate_data() {
     fi
 }
 
-# Run generation
 generate_data "Fujitsu B4" "$FUJITSU_SKELETON" "$FUJITSU_DS" "$FUJITSU_DR" "$TOOL_SCHEMA"
 
 echo ""
-echo "Data preparation complete. Launching sweep..."
+echo "Data preparation complete. Launching debug sweep..."
 echo ""
 
 exec bash "$SWEEP_SCRIPT"

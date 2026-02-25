@@ -20,6 +20,15 @@ This checklist is designed for cluster runs launched from:
   - Generation comparison now supports per-sample tool inference when embedded tools are missing
   - Evaluation context source reports `per_sample_inferred`
 - Added external pre-tokenized lossmask sanity checks at train start.
+- Updated triplet defaults to keep triplet terms active longer:
+  - `TRIPLET_GAMMA_KL=0.8`
+  - `TRIPLET_MARGIN_BENIGN=80.0`
+  - `TRIPLET_MARGIN_HARMFUL=220.0`
+- Added intermediate-checkpoint evaluation controls:
+  - `EVAL_INTERMEDIATE_CHECKPOINTS=true`
+  - `CHECKPOINT_EVAL_STEPS=80,100,110,150`
+  - `CHECKPOINT_EVAL_LIMIT=<limit>`
+  - `SAVE_STEPS=10` (so the above checkpoints exist)
 - Visualization summary now prioritizes concrete metrics:
   - Fujitsu ASR deltas
   - AgentDojo diff/tool-call/resistance
@@ -52,6 +61,20 @@ for S in balanced_cb attack_focus capability_focus; do
  done
 ```
 
+Default sweep lane (if you do not override):
+- `MWCS_SCHEDULE=capability_focus`
+- `POLICIES=assistant_only,cb_full_sequence,tool_calls_only`
+
+## Intermediate Checkpoint Eval Mechanics
+Expected behavior for sweep/unified runs:
+- Checkpoints are created every `SAVE_STEPS` (default `10`).
+- If `EVAL_INTERMEDIATE_CHECKPOINTS=true`, pipeline evaluates each step in
+  `CHECKPOINT_EVAL_STEPS` (default `80,100,110,150`).
+- Missing checkpoints are skipped with a log line; run does not fail just for a missing step.
+- For each present checkpoint, expected files:
+  - `eval/checkpoints/checkpoint-<step>/fujitsu_eval.json`
+  - `eval/checkpoints/checkpoint-<step>/agentdojo_eval.json` (if AgentDojo eval file exists)
+
 ## Per-Run Required Checks
 For each run directory `<RUN_DIR>`:
 
@@ -79,6 +102,25 @@ python scripts/verify_pipeline_run.py \
   - `cb_model.generation_comparison.tool_call_rate`
 - Flag regression when CB is near 0 while baseline is substantially higher.
 
+5. Intermediate checkpoint behavior
+- Inspect:
+  - `<RUN_DIR>/eval/checkpoints/checkpoint-80/`
+  - `<RUN_DIR>/eval/checkpoints/checkpoint-100/`
+  - `<RUN_DIR>/eval/checkpoints/checkpoint-110/`
+  - `<RUN_DIR>/eval/checkpoints/checkpoint-150/`
+- Compare final vs early checkpoints to detect over-suppression later in training.
+- If final checkpoint has near-zero CB tool-call rate but checkpoint-80/100 does not,
+  treat final as over-suppressed and consider earlier checkpoint for selection.
+
+6. Metric validity guard (concrete metrics only)
+- Prefer decisions based on:
+  - `tool_flip_asr.attack_success_rate`
+  - `generation_comparison.tool_call_rate`
+  - `generation_comparison.harmful_resistance_rate`
+  - `output_comparison.difference_rate`
+  - verifier summary (`errors`, `warnings`, `passed`)
+- Do not use deprecated/hallucinated metrics as selection criteria.
+
 ## Sweep-Level Comparisons
 After sweep completion:
 
@@ -91,6 +133,11 @@ Review in the summary:
 - `AD TCR(B)` vs `AD TCR(CB)` should not show collapse.
 - `AD Resist` should increase without killing tool-call capability.
 - `Verif` should be `pass`.
+
+Suggested run selection order:
+1. Filter out runs/checkpoints where verifier fails or `diagnostics.tools_broken=true`.
+2. Keep runs/checkpoints with non-collapsed CB tool-call rate.
+3. Rank by lower Fujitsu ASR and higher AgentDojo resistance.
 
 ## Interpreting “Skipping completion-mask validation ...”
 This now means:
