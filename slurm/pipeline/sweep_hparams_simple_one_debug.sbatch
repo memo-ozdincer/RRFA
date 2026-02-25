@@ -9,9 +9,9 @@
 #SBATCH --account=def-zhijing
 
 # =============================================================================
-# DEBUG: Single-sample sweep for inspecting traces and eval output
+# DEBUG: Single-config stability sweep for inspecting traces and eval output
 # =============================================================================
-# Purpose: Run one config with minimal samples to verify:
+# Purpose: Run one known-good config with small limits to verify:
 #   1. Traces look correct
 #   2. Eval JSON contains unified_tool_metrics
 #   3. Malicious/correct tool call rates are computed
@@ -69,34 +69,34 @@ fi
 # DEBUG OVERRIDES: minimal config for inspection
 # =============================================================================
 export QUICK_TEST="true"
-export TOTAL_STEPS="${TOTAL_STEPS:-10}"
-export ALPHAS="${ALPHAS:-5.0}"
+export TOTAL_STEPS="${TOTAL_STEPS:-50}"
+export ALPHAS="${ALPHAS:-10.0}"
 export LAYER_CONFIGS="${LAYER_CONFIGS:-10,20}"
-export POLICIES="${POLICIES:-assistant_only}"
+export POLICIES="${POLICIES:-cb_full_sequence}"
 export MWCS_SCHEDULE="${MWCS_SCHEDULE:-capability_focus}"
 export MWCS_REGISTRY="${MWCS_REGISTRY:-$REPO_DIR/configs/mwcs_registry_v1.json}"
 export MWCS_STEP="${MWCS_STEP:-0}"
 export AGENTDOJO_EVAL_SPLIT="${AGENTDOJO_EVAL_SPLIT:-complete}"
-export LIMIT_EVAL="${LIMIT_EVAL:-1}"
-export LIMIT_GEN="${LIMIT_GEN:-1}"
-export NUM_EXAMPLES="${NUM_EXAMPLES:-1}"
+export LIMIT_EVAL="${LIMIT_EVAL:-20}"
+export LIMIT_GEN="${LIMIT_GEN:-500}"
+export NUM_EXAMPLES="${NUM_EXAMPLES:-5}"
 export SHOW_EXAMPLES="${SHOW_EXAMPLES:-true}"
-export FULL_RENDER_AUDIT="${FULL_RENDER_AUDIT:-true}"
+export FULL_RENDER_AUDIT="${FULL_RENDER_AUDIT:-false}"
 export EVAL_INTERMEDIATE_CHECKPOINTS="${EVAL_INTERMEDIATE_CHECKPOINTS:-false}"
 export CHECKPOINT_EVAL_STEPS="${CHECKPOINT_EVAL_STEPS:-}"
 export CHECKPOINT_EVAL_LIMIT="${CHECKPOINT_EVAL_LIMIT:-1}"
 export BATCH_SIZE="${BATCH_SIZE:-1}"
-export GRAD_ACCUM="${GRAD_ACCUM:-1}"
+export GRAD_ACCUM="${GRAD_ACCUM:-4}"
 export VERIFY_PIPELINE="${VERIFY_PIPELINE:-true}"
 export VERIFY_FAIL_ON_ERROR="${VERIFY_FAIL_ON_ERROR:-false}"
-export TRIPLET_BETA_HARMFUL="${TRIPLET_BETA_HARMFUL:-0.4}"
-export TRIPLET_GAMMA_KL="${TRIPLET_GAMMA_KL:-0.9}"
-export TRIPLET_MARGIN_BENIGN="${TRIPLET_MARGIN_BENIGN:-500.0}"
-export TRIPLET_MARGIN_HARMFUL="${TRIPLET_MARGIN_HARMFUL:-1500.0}"
-export SAVE_STEPS="${SAVE_STEPS:-5}"
+export TRIPLET_BETA_HARMFUL="${TRIPLET_BETA_HARMFUL:-0.25}"
+export TRIPLET_GAMMA_KL="${TRIPLET_GAMMA_KL:-1.2}"
+export TRIPLET_MARGIN_BENIGN="${TRIPLET_MARGIN_BENIGN:-50.0}"
+export TRIPLET_MARGIN_HARMFUL="${TRIPLET_MARGIN_HARMFUL:-150.0}"
+export SAVE_STEPS="${SAVE_STEPS:-10}"
 
 echo "=========================================="
-echo "DEBUG: Single-sample sweep"
+echo "DEBUG: Single-config stability sweep"
 echo "=========================================="
 echo "  ALPHAS: ${ALPHAS}"
 echo "  LAYER_CONFIGS: ${LAYER_CONFIGS}"
@@ -104,6 +104,7 @@ echo "  POLICIES: ${POLICIES}"
 echo "  LIMIT_EVAL: ${LIMIT_EVAL}"
 echo "  LIMIT_GEN: ${LIMIT_GEN}"
 echo "  TOTAL_STEPS: ${TOTAL_STEPS}"
+echo "  FULL_RENDER_AUDIT: ${FULL_RENDER_AUDIT}"
 echo "  EVAL_INTERMEDIATE_CHECKPOINTS: ${EVAL_INTERMEDIATE_CHECKPOINTS}"
 echo "  Datasets: Fujitsu, AgentDojo"
 echo ""

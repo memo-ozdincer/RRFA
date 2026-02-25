@@ -54,10 +54,15 @@ if [[ ! -f "$SWEEP_SCRIPT" ]]; then
     exit 1
 fi
 
+export QUICK_TEST="${QUICK_TEST:-false}"
 export TOTAL_STEPS="${TOTAL_STEPS:-200}"
-export ALPHAS="${ALPHAS:-5.0,10.0,15.0}"
-export LAYER_CONFIGS="${LAYER_CONFIGS:-10,20}"
-export POLICIES="${POLICIES:-assistant_only,cb_full_sequence,tool_calls_only}"
+# Stability-first sweep grid:
+# - keep policy fixed to known-good cb_full_sequence
+# - sweep alpha around known-good region
+# - test two conservative layer sets
+export ALPHAS="${ALPHAS:-5.0,8.0,10.0,12.0,15.0}"
+export LAYER_CONFIGS="${LAYER_CONFIGS:-10,20|12,18}"
+export POLICIES="${POLICIES:-cb_full_sequence}"
 export MWCS_SCHEDULE="${MWCS_SCHEDULE:-capability_focus}"
 export MWCS_REGISTRY="${MWCS_REGISTRY:-$REPO_DIR/configs/mwcs_registry_v1.json}"
 export MWCS_STEP="${MWCS_STEP:-0}"
@@ -74,13 +79,14 @@ export BATCH_SIZE="${BATCH_SIZE:-1}"
 export GRAD_ACCUM="${GRAD_ACCUM:-4}"
 export VERIFY_PIPELINE="${VERIFY_PIPELINE:-true}"
 export VERIFY_FAIL_ON_ERROR="${VERIFY_FAIL_ON_ERROR:-false}"
-export TRIPLET_BETA_HARMFUL="${TRIPLET_BETA_HARMFUL:-0.4}"
-export TRIPLET_GAMMA_KL="${TRIPLET_GAMMA_KL:-0.9}"
-export TRIPLET_MARGIN_BENIGN="${TRIPLET_MARGIN_BENIGN:-500.0}"
-export TRIPLET_MARGIN_HARMFUL="${TRIPLET_MARGIN_HARMFUL:-1500.0}"
+export TRIPLET_BETA_HARMFUL="${TRIPLET_BETA_HARMFUL:-0.25}"
+export TRIPLET_GAMMA_KL="${TRIPLET_GAMMA_KL:-1.2}"
+export TRIPLET_MARGIN_BENIGN="${TRIPLET_MARGIN_BENIGN:-50.0}"
+export TRIPLET_MARGIN_HARMFUL="${TRIPLET_MARGIN_HARMFUL:-150.0}"
 export SAVE_STEPS="${SAVE_STEPS:-10}"
 
 echo "Starting sweep_hparams_simple.sbatch..."
+echo "  QUICK_TEST: ${QUICK_TEST}"
 echo "  ALPHAS: ${ALPHAS}"
 echo "  LAYER_CONFIGS: ${LAYER_CONFIGS}"
 echo "  POLICIES: ${POLICIES}"
