@@ -498,7 +498,14 @@ def _extract_sample_tools_and_system(sample: Dict[str, Any]) -> Tuple[Optional[L
     messages = sample.get('messages', [])
     if messages and messages[0].get('role') == 'system':
         system_prompt = messages[0].get('content')
-    
+
+    # Fujitsu ETL_A uses a placeholder system prompt that must be replaced by the
+    # schema prompt at generation/eval time. Treat it as absent sample context.
+    if system_prompt and isinstance(system_prompt, str):
+        marker = "System prompt will be provided from tool schema at generation time"
+        if "[PLACEHOLDER:" in system_prompt and marker in system_prompt:
+            system_prompt = None
+
     return tools, system_prompt
 
 
@@ -625,7 +632,21 @@ def _log_eval_context(
     logger.info(f"  {schema_system_prompt[:300]}...")
     
     # Check sample-embedded tools/system prompts
-    sample_tools, sample_sys = _extract_sample_tools_and_system(eval_samples[0] if eval_samples else {})
+    first_sample = eval_samples[0] if eval_samples else {}
+    sample_tools, sample_sys = _extract_sample_tools_and_system(first_sample)
+    raw_sample_system = None
+    raw_messages = first_sample.get("messages", []) if isinstance(first_sample, dict) else []
+    if raw_messages and raw_messages[0].get("role") == "system":
+        raw_sample_system = raw_messages[0].get("content")
+
+    if raw_sample_system and sample_sys is None and isinstance(raw_sample_system, str):
+        marker = "System prompt will be provided from tool schema at generation time"
+        if "[PLACEHOLDER:" in raw_sample_system and marker in raw_sample_system:
+            logger.info(
+                "\n--- SAMPLE-EMBEDDED SYSTEM PROMPT (from sample[0]) ---"
+            )
+            logger.info("  [PLACEHOLDER detected in sample; using schema system prompt for eval]")
+
     if sample_sys:
         logger.info(f"\n--- SAMPLE-EMBEDDED SYSTEM PROMPT (from sample[0]) ---")
         logger.info(f"  {sample_sys[:300]}...")
