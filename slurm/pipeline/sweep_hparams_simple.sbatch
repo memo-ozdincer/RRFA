@@ -63,6 +63,7 @@ export LIMIT_GEN="${LIMIT_GEN:-5000}"
 export NUM_EXAMPLES="${NUM_EXAMPLES:-50}"
 export SHOW_EXAMPLES="${SHOW_EXAMPLES:-true}"
 export BATCH_SIZE="${BATCH_SIZE:-1}"
+export VIS_CHECKPOINT_STEPS="${VIS_CHECKPOINT_STEPS:-80,100,110,150}"
 
 echo "Starting sweep_hparams_simple.sbatch..."
 echo "  ALPHAS: ${ALPHAS}"
@@ -188,4 +189,14 @@ echo ""
 echo "Data preparation complete. Launching sweep..."
 echo ""
 
-exec bash "$SWEEP_SCRIPT"
+bash "$SWEEP_SCRIPT"
+
+LATEST_SWEEP_DIR="$(ls -1dt /scratch/memoozd/cb-scratch/sweeps/hparam_sweep_* 2>/dev/null | head -n 1 || true)"
+if [[ -n "$LATEST_SWEEP_DIR" && -d "$LATEST_SWEEP_DIR" ]]; then
+    echo ""
+    echo "Simple sweep complete."
+    echo "Checkpoint-aware visualization command:"
+    echo "  python scripts/visualize_sweep_results.py \"$LATEST_SWEEP_DIR\" \\"
+    echo "    --compare-checkpoints --checkpoint-steps \"$VIS_CHECKPOINT_STEPS\" --no-color \\"
+    echo "    --csv \"$LATEST_SWEEP_DIR/eval_summary.csv\""
+fi

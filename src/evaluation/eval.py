@@ -443,6 +443,54 @@ def _extract_sample_tools_and_system(sample: Dict[str, Any]) -> Tuple[Optional[L
     return tools, system_prompt
 
 
+def _infer_tool_names_from_sample_messages(sample: Dict[str, Any]) -> List[str]:
+    """Infer tool names that are actually relevant to a sample from trace messages."""
+    names: set[str] = set()
+    for msg in sample.get("messages", []) or []:
+        for tc in msg.get("tool_calls") or []:
+            fn = tc.get("function") or {}
+            name = fn.get("name")
+            if isinstance(name, str) and name:
+                names.add(name)
+        if msg.get("role") == "tool":
+            tool_name = msg.get("name")
+            if isinstance(tool_name, str) and tool_name:
+                names.add(tool_name)
+    return sorted(names)
+
+
+def _resolve_tools_for_sample(
+    sample: Dict[str, Any],
+    schema_tools: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], str]:
+    """
+    Resolve tools for a single sample.
+
+    Priority:
+    1) Sample-embedded tool definitions (exact per-sample tools)
+    2) Per-sample inferred tool names from messages, filtered against schema
+    3) Empty list if sample implies tools but none map to schema (strict, avoids leakage)
+    4) Schema fallback (last resort)
+    """
+    embedded_tools, _ = _extract_sample_tools_and_system(sample)
+    if embedded_tools:
+        return embedded_tools, "sample_embedded"
+
+    inferred_names = _infer_tool_names_from_sample_messages(sample)
+    if inferred_names:
+        filtered = [
+            t
+            for t in schema_tools
+            if (t.get("function") or {}).get("name") in set(inferred_names)
+        ]
+        if filtered:
+            return filtered, "per_sample_inferred"
+        # Sample has tool evidence, but not in provided schema; safest is no tools.
+        return [], "per_sample_inferred_empty"
+
+    return schema_tools, "schema_fallback"
+
+
 def _log_eval_context(
     eval_samples: List[Dict[str, Any]],
     schema_tools: List[Dict[str, Any]],
@@ -635,7 +683,7 @@ def _evaluate_model_on_samples(
             logger.info(f"  First 5 IDs: {first_ids}")
 
         generation_comparison = evaluate_generation_comparison(
-            model, tokenizer, eval_samples, actual_tools, actual_system_prompt,
+            model, tokenizer, eval_samples, tools, actual_system_prompt,
             model_name="cb_model" if adapter_path else "baseline",
             verbose=verbose
         )
@@ -1934,6 +1982,14 @@ def evaluate_generation_comparison(
     correct_tool_calls = 0
     malicious_evaluable_total = 0
     correct_evaluable_total = 0
+    tools_source_counts: Dict[str, int] = {
+        "sample_embedded": 0,
+        "per_sample_inferred": 0,
+        "per_sample_inferred_empty": 0,
+        "schema_fallback": 0,
+    }
+    samples_with_embedded_tools = 0
+    samples_with_inferred_tools = 0
 
     for sample in iterator:
         messages = sample.get("messages", [])
@@ -1955,8 +2011,15 @@ def evaluate_generation_comparison(
                     if name:
                         reference_tools.add(name)
 
+        sample_tools, tool_source = _resolve_tools_for_sample(sample, tools)
+        tools_source_counts[tool_source] = tools_source_counts.get(tool_source, 0) + 1
+        if tool_source == "sample_embedded":
+            samples_with_embedded_tools += 1
+        elif tool_source in {"per_sample_inferred", "per_sample_inferred_empty"}:
+            samples_with_inferred_tools += 1
+
         try:
-            response = generate_with_tools(model, tokenizer, messages, tools)
+            response = generate_with_tools(model, tokenizer, messages, sample_tools)
         except Exception as e:
             logger.error(f"Generation error for {sample.get('id')}: {e}")
             continue
@@ -2027,6 +2090,7 @@ def evaluate_generation_comparison(
             "called_correct_tool": called_correct_tool,
             "has_tool_syntax": has_tool_syntax,
             "is_valid_json": is_valid_json,
+            "tool_source": tool_source,
             "response_preview": response[:500] if len(response) > 500 else response,
             "response_full": response,
             "sample_context": _extract_sample_context(sample),
@@ -2058,6 +2122,9 @@ def evaluate_generation_comparison(
         "correct_tool_calls": correct_tool_calls,
         "malicious_evaluable_total": malicious_evaluable_total,
         "correct_evaluable_total": correct_evaluable_total,
+        "tools_source_counts": tools_source_counts,
+        "samples_with_embedded_tools": samples_with_embedded_tools,
+        "samples_with_inferred_tools": samples_with_inferred_tools,
     }
 
     # Add reference-comparison metrics when available

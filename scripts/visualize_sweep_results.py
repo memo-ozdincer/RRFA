@@ -923,6 +923,7 @@ def analyze_run(
             "malformed_tool_call_rate": gen_cmp.get("malformed_tool_call_rate", 0) * 100,
             "malicious_evaluable_total": gen_cmp.get("malicious_evaluable_total", 0),
             "correct_evaluable_total": gen_cmp.get("correct_evaluable_total", 0),
+            "tools_source_counts": gen_cmp.get("tools_source_counts", {}),
         }
 
         # Show sample details if requested

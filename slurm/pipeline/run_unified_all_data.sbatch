@@ -32,6 +32,7 @@ export STRICT_SIMULATED_MATCH="${STRICT_SIMULATED_MATCH:-true}"
 export LIMIT_GEN="${LIMIT_GEN:-5000}"
 export EVAL_MERGE_ADAPTER="${EVAL_MERGE_ADAPTER:-true}"
 export EVAL_LIMIT="${EVAL_LIMIT:-100}"
+export VIS_CHECKPOINT_STEPS="${VIS_CHECKPOINT_STEPS:-80,100,110,150}"
 
 # Run unified pipeline and then print a checkpoint-aware visualize command.
 bash "$UNIFIED_PIPELINE"
@@ -42,6 +43,6 @@ if [[ -n "$LATEST_RUN_DIR" && -d "$LATEST_RUN_DIR" ]]; then
     echo "All-data profile complete."
     echo "Visualize with primary metrics + checkpoint comparison:"
     echo "  python scripts/visualize_sweep_results.py \"$LATEST_RUN_DIR\" \\"
-    echo "    --compare-checkpoints --no-color \\"
+    echo "    --compare-checkpoints --checkpoint-steps \"$VIS_CHECKPOINT_STEPS\" --no-color \\"
     echo "    --csv \"$LATEST_RUN_DIR/eval_summary.csv\""
 fi
