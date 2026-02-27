@@ -22,6 +22,9 @@ Usage:
     
     # Analyze specific run
     python scripts/visualize_sweep_results.py <sweep_dir> --run a5.0_l10_20_assistant_only
+
+    # Compare final vs intermediate checkpoints
+    python scripts/visualize_sweep_results.py <sweep_dir> --compare-checkpoints --checkpoint-steps 80,100,150
     
 """
 
@@ -423,6 +426,14 @@ def parse_run_name(run_name: str) -> Tuple[Dict[str, str], Optional[str]]:
     return hparams, lossmask
 
 
+def parse_checkpoint_step(name: str) -> Optional[int]:
+    """Parse checkpoint step from names like checkpoint-80."""
+    match = re.match(r"^checkpoint-(\d+)$", name)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
 # =============================================================================
 # Sample Display
 # =============================================================================
@@ -623,6 +634,8 @@ def print_sample_detail(
         "correct_behavior": GREEN,
         "no_tool_call": YELLOW,
         "other_tool": BLUE,
+        "multiple_tool_calls": MAGENTA,
+        "malformed_tool_call": YELLOW,
     }
     
     b_color = outcome_colors.get(baseline_outcome, "")
@@ -666,11 +679,20 @@ def analyze_run(
     filter_success: bool = False,
     filter_failure: bool = False,
     use_color: bool = True,
+    eval_dir: Optional[Path] = None,
+    run_label: Optional[str] = None,
+    checkpoint_label: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Analyze a single run directory."""
-    hparams, lossmask = parse_run_name(run_dir.name)
+    base_run_name = run_dir.name
+    hparams, lossmask = parse_run_name(base_run_name)
+    resolved_run_name = run_label or base_run_name
+    eval_root = eval_dir or (run_dir / "eval")
     results = {
-        "run_name": run_dir.name,
+        "run_name": resolved_run_name,
+        "base_run_name": base_run_name,
+        "checkpoint": checkpoint_label or "final",
+        "eval_dir": str(eval_root),
         "hparams": hparams,
         "lossmask": lossmask,
         "fujitsu": None,
@@ -679,10 +701,10 @@ def analyze_run(
     }
     
     # Load evaluation results
-    fujitsu_eval_json = run_dir / "eval" / "fujitsu_eval.json"
-    fujitsu_paired = run_dir / "eval" / "fujitsu_eval.paired_outputs.jsonl"
-    agentdojo_eval_json = run_dir / "eval" / "agentdojo_eval.json"
-    agentdojo_paired = run_dir / "eval" / "agentdojo_eval.paired_outputs.jsonl"
+    fujitsu_eval_json = eval_root / "fujitsu_eval.json"
+    fujitsu_paired = eval_root / "fujitsu_eval.paired_outputs.jsonl"
+    agentdojo_eval_json = eval_root / "agentdojo_eval.json"
+    agentdojo_paired = eval_root / "agentdojo_eval.paired_outputs.jsonl"
     
     # Try to load traces for context (from multiple possible locations)
     dataset_traces: Dict[str, List[Dict[str, Any]]] = {
@@ -725,6 +747,22 @@ def analyze_run(
             "baseline_asr": baseline.get("attack_success_rate", 0) * 100,
             "cb_asr": cb.get("attack_success_rate", 0) * 100,
             "delta": delta.get("tool_flip_asr", 0) * 100,
+            "baseline_malicious_tool_rate": baseline.get(
+                "malicious_tool_call_rate", baseline.get("attack_success_rate", 0)
+            ) * 100,
+            "cb_malicious_tool_rate": cb.get(
+                "malicious_tool_call_rate", cb.get("attack_success_rate", 0)
+            ) * 100,
+            "baseline_correct_tool_rate": baseline.get(
+                "correct_tool_call_rate", baseline.get("correct_behavior_rate", 0)
+            ) * 100,
+            "cb_correct_tool_rate": cb.get(
+                "correct_tool_call_rate", cb.get("correct_behavior_rate", 0)
+            ) * 100,
+            "cb_no_tool_call_rate": cb.get("no_tool_call_rate", 0) * 100,
+            "cb_other_tool_call_rate": cb.get("other_tool_call_rate", 0) * 100,
+            "cb_multiple_tool_call_rate": cb.get("multiple_tool_call_rate", 0) * 100,
+            "cb_malformed_tool_call_rate": cb.get("malformed_tool_call_rate", 0) * 100,
             "total": len(paired),
             "improvements": sum(1 for p in paired if p.get("baseline_outcome") == "attack_success" and p.get("cb_outcome") != "attack_success"),
             "regressions": sum(1 for p in paired if p.get("baseline_outcome") != "attack_success" and p.get("cb_outcome") == "attack_success"),
@@ -733,7 +771,7 @@ def analyze_run(
         # Show sample details if requested
         if show_samples > 0 and paired:
             print(f"\n{'#'*80}")
-            print(f"# FUJITSU SAMPLES: {run_dir.name}")
+            print(f"# FUJITSU SAMPLES: {resolved_run_name}")
             print(f"{'#'*80}")
 
             paired_with_context = attach_trace_context(paired, dataset_traces["fujitsu"])
@@ -769,8 +807,8 @@ def analyze_run(
     # ---------------------------------------------------------
     # LLMail-Inject Analysis
     # ---------------------------------------------------------
-    llmail_eval_json = run_dir / "eval" / "llmail_eval.json"
-    llmail_paired = run_dir / "eval" / "llmail_eval.paired_outputs.jsonl"
+    llmail_eval_json = eval_root / "llmail_eval.json"
+    llmail_paired = eval_root / "llmail_eval.paired_outputs.jsonl"
     
     if only_dataset in ("all", "llmail") and llmail_eval_json.exists():
         eval_data = load_json(llmail_eval_json)
@@ -832,7 +870,7 @@ def analyze_run(
         # Show sample details if requested
         if show_samples > 0 and paired:
             print(f"\n{'#'*80}")
-            print(f"# LLMAIL-INJECT SAMPLES: {run_dir.name}")
+            print(f"# LLMAIL-INJECT SAMPLES: {resolved_run_name}")
             print(f"{'#'*80}")
 
             paired_with_context = attach_trace_context(paired, dataset_traces["llmail"])
@@ -872,17 +910,25 @@ def analyze_run(
         paired = load_jsonl(agentdojo_paired)
 
         output_comparison = eval_data.get("output_comparison", {})
+        gen_cmp = eval_data.get("cb_model", {}).get("generation_comparison", {})
 
         results["agentdojo"] = {
             "total": output_comparison.get("total_compared", 0),
             "different": output_comparison.get("different", 0),
             "diff_rate": output_comparison.get("difference_rate", 0) * 100,
+            "malicious_tool_rate": gen_cmp.get("malicious_tool_call_rate", 0) * 100,
+            "correct_tool_rate": gen_cmp.get("correct_tool_call_rate", 0) * 100,
+            "no_tool_call_rate": gen_cmp.get("no_tool_call_rate", 0) * 100,
+            "multiple_tool_call_rate": gen_cmp.get("multiple_tool_call_rate", 0) * 100,
+            "malformed_tool_call_rate": gen_cmp.get("malformed_tool_call_rate", 0) * 100,
+            "malicious_evaluable_total": gen_cmp.get("malicious_evaluable_total", 0),
+            "correct_evaluable_total": gen_cmp.get("correct_evaluable_total", 0),
         }
 
         # Show sample details if requested
         if show_samples > 0 and paired:
             print(f"\n{'#'*80}")
-            print(f"# AGENTDOJO SAMPLES: {run_dir.name}")
+            print(f"# AGENTDOJO SAMPLES: {resolved_run_name}")
             print(f"{'#'*80}")
 
             paired_with_context = attach_trace_context(paired, dataset_traces["agentdojo"])
@@ -930,21 +976,23 @@ def print_summary_table(runs: List[Dict[str, Any]], use_color: bool = True) -> N
     RED = "\033[91m" if use_color else ""
     RESET = "\033[0m" if use_color else ""
     
-    print(f"\n{BOLD}{'='*150}{RESET}")
+    print(f"\n{BOLD}{'='*200}{RESET}")
     print(f"{BOLD}SWEEP RESULTS SUMMARY{RESET}")
-    print(f"{'='*150}")
+    print(f"{'='*200}")
     
     # Header
     header = (
-        f"{'Run Name':<35} {'Hparams':<18} {'Lossmask':<28} "
+        f"{'Run Name':<35} {'Ckpt':<10} {'Hparams':<18} {'Lossmask':<28} "
+        f"{'CB Mal':<8} {'CB Corr':<8} {'CB No':<8} {'CB Multi':<9} "
         f"{'Base ASR':<10} {'CB ASR':<8} {'Reduct':<10} {'AgentDojo':<10} "
         f"{'LLMail':<10} {'LL Cap':<8} {'LL TgtAcc':<10}"
     )
     print(f"{BOLD}{header}{RESET}")
-    print(f"{'-'*170}")
+    print(f"{'-'*230}")
 
     for run in runs:
         run_name = run.get("run_name", "?")
+        checkpoint = run.get("checkpoint", "final")
         hparams = run.get("hparams") or {}
         lossmask = run.get("lossmask") or "N/A"
         hparams_str = ",".join(f"{k}{v}" for k, v in sorted(hparams.items())) or "N/A"
@@ -966,6 +1014,20 @@ def print_summary_table(runs: List[Dict[str, Any]], use_color: bool = True) -> N
                 red_str = f"{RED}{red_str}{RESET}"
         else:
             base_str = cb_str = red_str = "N/A"
+
+        if fujitsu:
+            mal_str = f"{fujitsu.get('cb_malicious_tool_rate', 0):.1f}%"
+            corr_str = f"{fujitsu.get('cb_correct_tool_rate', 0):.1f}%"
+            no_str = f"{fujitsu.get('cb_no_tool_call_rate', 0):.1f}%"
+            multi_str = f"{fujitsu.get('cb_multiple_tool_call_rate', 0):.1f}%"
+        elif run.get("agentdojo"):
+            agentdojo = run.get("agentdojo", {})
+            mal_str = f"{agentdojo.get('malicious_tool_rate', 0):.1f}%"
+            corr_str = f"{agentdojo.get('correct_tool_rate', 0):.1f}%"
+            no_str = f"{agentdojo.get('no_tool_call_rate', 0):.1f}%"
+            multi_str = f"{agentdojo.get('multiple_tool_call_rate', 0):.1f}%"
+        else:
+            mal_str = corr_str = no_str = multi_str = "N/A"
 
         agentdojo = run.get("agentdojo", {})
         if agentdojo:
@@ -996,7 +1058,8 @@ def print_summary_table(runs: List[Dict[str, Any]], use_color: bool = True) -> N
             ta_str = "N/A"
 
         print(
-            f"{run_name:<35} {hparams_str:<18} {lossmask:<28} "
+            f"{run_name:<35} {checkpoint:<10} {hparams_str:<18} {lossmask:<28} "
+            f"{mal_str:<8} {corr_str:<8} {no_str:<8} {multi_str:<9} "
             f"{base_str:<10} {cb_str:<8} {red_str:<10} {agent_str:<10} "
             f"{llmail_str:<10} {cap_str:<8} {ta_str:<10}"
         )
@@ -1028,11 +1091,20 @@ def print_best_runs(
         lossmask = run.get("lossmask") or "N/A"
         hparams_str = ",".join(f"{k}{v}" for k, v in sorted(hparams.items())) or "N/A"
         print(f"\n{GREEN}{i}. {run['run_name']}{RESET}")
+        print(f"   Checkpoint: {run.get('checkpoint', 'final')}")
         print(f"   Hparams: {hparams_str}")
         print(f"   Lossmask: {lossmask}")
         print(f"   Baseline ASR: {metric['baseline_asr']:.1f}% → "
               f"CB ASR: {metric['cb_asr']:.1f}% "
               f"(Reduction: {metric['baseline_asr'] - metric['cb_asr']:.1f}pp)")
+        if metric_dataset == "fujitsu":
+            print(
+                f"   CB malicious/correct/no/multi: "
+                f"{metric.get('cb_malicious_tool_rate', 0):.1f}% / "
+                f"{metric.get('cb_correct_tool_rate', 0):.1f}% / "
+                f"{metric.get('cb_no_tool_call_rate', 0):.1f}% / "
+                f"{metric.get('cb_multiple_tool_call_rate', 0):.1f}%"
+            )
         print(f"   Improvements: {metric.get('improvements', 0)}, "
               f"Regressions: {metric.get('regressions', 0)}")
         if metric_dataset == "llmail":
@@ -1165,8 +1237,7 @@ def plot_metrics(runs: List[Dict[str, Any]]) -> None:
 
 
 def compare_samples(
-    runs: List[Dict[str, Any]],
-    run_dirs: List[Path],
+    run_targets: List[Dict[str, Any]],
     num_samples: int = 1,
     start_sample: int = 0,
     dataset: str = "fujitsu"
@@ -1187,20 +1258,22 @@ def compare_samples(
 
     # Load paired outputs for all runs
     run_data = []
-    for run_dir in run_dirs:
+    for target in run_targets:
+        run_name = target.get("label", target.get("run_dir", Path("?")).name)
+        eval_dir = Path(target.get("eval_dir", Path(".")))
         if dataset == "fujitsu":
-            path = run_dir / "eval" / "fujitsu_eval.paired_outputs.jsonl"
+            path = eval_dir / "fujitsu_eval.paired_outputs.jsonl"
         elif dataset == "agentdojo":
-            path = run_dir / "eval" / "agentdojo_eval.paired_outputs.jsonl"
+            path = eval_dir / "agentdojo_eval.paired_outputs.jsonl"
         elif dataset == "llmail":
-            path = run_dir / "eval" / "llmail_eval.paired_outputs.jsonl"
+            path = eval_dir / "llmail_eval.paired_outputs.jsonl"
         else:
             continue
             
         if path.exists():
             data = load_jsonl(path)
             data_map = {_row_key(d, idx): d for idx, d in enumerate(data)}
-            run_data.append((run_dir.name, data_map))
+            run_data.append((run_name, data_map))
     
     if not run_data:
         print(f"No data found for dataset {dataset}")
@@ -1335,7 +1408,7 @@ Examples:
         "--run",
         type=str,
         default=None,
-        help="Only analyze a specific run (by name, e.g., a5.0_l10_20_assistant_only)"
+        help="Only analyze a specific run (a5.0_l10_20_assistant_only) or run target (run@checkpoint-100)"
     )
     parser.add_argument(
         "--no-color",
@@ -1368,6 +1441,22 @@ Examples:
         default="all",
         choices=["all", "fujitsu", "agentdojo", "llmail"],
         help="Restrict analysis/visualization to a single dataset"
+    )
+    parser.add_argument(
+        "--compare-checkpoints",
+        action="store_true",
+        help="Include intermediate eval checkpoints (eval/checkpoints/checkpoint-*) as separate rows"
+    )
+    parser.add_argument(
+        "--checkpoint-steps",
+        type=str,
+        default=None,
+        help="Optional comma-separated checkpoint steps to include (e.g. 80,100,150)"
+    )
+    parser.add_argument(
+        "--checkpoints-only",
+        action="store_true",
+        help="With --compare-checkpoints, skip final eval rows and show only checkpoint rows"
     )
     
     args = parser.parse_args()
@@ -1413,24 +1502,20 @@ Examples:
                 print(f"Found traces directory: {traces_dir}")
                 break
     
-    # Find run directories
+    # Find base run directories
     # Mode 1: sweep directory with a* subdirs (from sweep_hparams.sbatch)
     # Mode 2: single run directory with eval/ inside (from unified_pipeline.sbatch)
     # Mode 3: directory containing run_* subdirs (from unified_pipeline.sbatch)
     run_dirs = sorted([
         d for d in args.sweep_dir.iterdir()
-        if d.is_dir() and d.name.startswith("a")  # Run dirs start with alpha param
+        if d.is_dir() and d.name.startswith("a")
     ])
-
     if not run_dirs:
-        # Check for run_* subdirs (unified pipeline with multiple runs)
         run_dirs = sorted([
             d for d in args.sweep_dir.iterdir()
             if d.is_dir() and d.name.startswith("run_")
         ])
-
     if not run_dirs:
-        # Check if this is itself a single run directory (has eval/ subdir)
         eval_subdir = args.sweep_dir / "eval"
         if eval_subdir.is_dir():
             run_dirs = [args.sweep_dir]
@@ -1439,21 +1524,81 @@ Examples:
             print("Expected: a* subdirs (sweep), run_* subdirs (unified), or eval/ subdir (single run)")
             sys.exit(1)
 
-    print(f"Found {len(run_dirs)} run(s)")
-    
-    # Filter to specific run if requested
+    # Parse optional checkpoint-step filter
+    checkpoint_step_filter: Optional[set[int]] = None
+    if args.checkpoint_steps:
+        checkpoint_step_filter = set()
+        for token in args.checkpoint_steps.split(","):
+            t = token.strip()
+            if not t:
+                continue
+            if not t.isdigit():
+                print(f"Invalid checkpoint step: '{t}' (expected integers like 80,100)")
+                sys.exit(1)
+            checkpoint_step_filter.add(int(t))
+
+    if args.checkpoints_only and not args.compare_checkpoints:
+        print("Error: --checkpoints-only requires --compare-checkpoints")
+        sys.exit(1)
+
+    # Build run targets (final eval + optional checkpoint evals)
+    run_targets: List[Dict[str, Any]] = []
+    for run_dir in run_dirs:
+        eval_root = run_dir / "eval"
+        if not args.checkpoints_only:
+            run_targets.append({
+                "run_dir": run_dir,
+                "eval_dir": eval_root,
+                "base_run_name": run_dir.name,
+                "label": run_dir.name,
+                "checkpoint": "final",
+            })
+
+        if args.compare_checkpoints:
+            checkpoints_root = eval_root / "checkpoints"
+            if not checkpoints_root.is_dir():
+                continue
+            checkpoint_dirs = [d for d in checkpoints_root.iterdir() if d.is_dir()]
+            checkpoint_dirs.sort(key=lambda p: (parse_checkpoint_step(p.name) is None, parse_checkpoint_step(p.name) or p.name))
+            for ckpt_dir in checkpoint_dirs:
+                step = parse_checkpoint_step(ckpt_dir.name)
+                if checkpoint_step_filter and (step is None or step not in checkpoint_step_filter):
+                    continue
+                checkpoint = f"checkpoint-{step}" if step is not None else ckpt_dir.name
+                label = f"{run_dir.name}@{checkpoint}"
+                run_targets.append({
+                    "run_dir": run_dir,
+                    "eval_dir": ckpt_dir,
+                    "base_run_name": run_dir.name,
+                    "label": label,
+                    "checkpoint": checkpoint,
+                })
+
+    # Filter to specific run/target if requested
     if args.run:
-        run_dirs = [d for d in run_dirs if d.name == args.run]
-        if not run_dirs:
+        filtered_targets = [
+            t for t in run_targets
+            if t["base_run_name"] == args.run or t["label"] == args.run
+        ]
+        if not filtered_targets:
             print(f"Run '{args.run}' not found.")
             sys.exit(1)
-    
-    # Analyze all runs
+        run_targets = filtered_targets
+
+    if not run_targets:
+        print("No run targets found after applying filters.")
+        if args.compare_checkpoints:
+            print("Tip: verify eval/checkpoints/checkpoint-* exists and matches --checkpoint-steps.")
+        sys.exit(1)
+
+    print(f"Found {len(run_targets)} analyzable target(s)")
+
+    # Analyze all targets
     all_results = []
     show_samples = 0 if args.samples_best_only else args.show_samples
-    for run_dir in run_dirs:
+    for target in run_targets:
         result = analyze_run(
-            run_dir,
+            target["run_dir"],
             traces_dir=traces_dir,
             tool_schema=tool_schema,
             llmail_reference=llmail_reference,
@@ -1464,6 +1609,9 @@ Examples:
             filter_success=args.filter_success,
             filter_failure=args.filter_failure,
             use_color=use_color,
+            eval_dir=target["eval_dir"],
+            run_label=target["label"],
+            checkpoint_label=target["checkpoint"],
         )
         all_results.append(result)
     
@@ -1493,16 +1641,16 @@ Examples:
     
     # Compare samples if requested
     if args.compare_samples > 0:
-        compare_samples(all_results, run_dirs, args.compare_samples, args.start_from_sample, args.compare_dataset)
+        compare_samples(run_targets, args.compare_samples, args.start_from_sample, args.compare_dataset)
 
     # Optionally show samples only for best runs
     if args.show_samples > 0 and args.samples_best_only:
         best_runs = get_best_runs(all_results, top_n=args.top_n, metric_dataset=best_metric_dataset)
         best_names = {r.get("run_name") for r in best_runs}
-        for run_dir in run_dirs:
-            if run_dir.name in best_names:
+        for target in run_targets:
+            if target["label"] in best_names:
                 analyze_run(
-                    run_dir,
+                    target["run_dir"],
                     traces_dir=traces_dir,
                     tool_schema=tool_schema,
                     llmail_reference=llmail_reference,
@@ -1513,6 +1661,9 @@ Examples:
                     filter_success=args.filter_success,
                     filter_failure=args.filter_failure,
                     use_color=use_color,
+                    eval_dir=target["eval_dir"],
+                    run_label=target["label"],
+                    checkpoint_label=target["checkpoint"],
                 )
     
     # Export to CSV if requested
@@ -1520,8 +1671,15 @@ Examples:
         with open(args.csv, "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow([
-                "run_name", "baseline_asr", "cb_asr", "reduction",
+                "run_name", "base_run_name", "checkpoint",
+                "baseline_asr", "cb_asr", "reduction",
+                "baseline_malicious_tool_rate", "cb_malicious_tool_rate",
+                "baseline_correct_tool_rate", "cb_correct_tool_rate",
+                "cb_no_tool_call_rate", "cb_other_tool_call_rate",
+                "cb_multiple_tool_call_rate", "cb_malformed_tool_call_rate",
                 "improvements", "regressions", "agentdojo_diff_rate",
+                "agentdojo_malicious_tool_rate", "agentdojo_correct_tool_rate",
+                "agentdojo_no_tool_call_rate", "agentdojo_multiple_tool_call_rate",
                 "llmail_cb_asr", "llmail_capability", "llmail_target_acc",
                 "llmail_json_parse_fail", "tools_broken", "stage1_passed",
             ])
@@ -1531,12 +1689,26 @@ Examples:
                 llmail = r.get("llmail") or {}
                 writer.writerow([
                     r.get("run_name", ""),
+                    r.get("base_run_name", ""),
+                    r.get("checkpoint", ""),
                     fujitsu.get("baseline_asr", "") if fujitsu else "",
                     fujitsu.get("cb_asr", "") if fujitsu else "",
                     fujitsu.get("baseline_asr", 0) - fujitsu.get("cb_asr", 0) if fujitsu else "",
+                    fujitsu.get("baseline_malicious_tool_rate", "") if fujitsu else "",
+                    fujitsu.get("cb_malicious_tool_rate", "") if fujitsu else "",
+                    fujitsu.get("baseline_correct_tool_rate", "") if fujitsu else "",
+                    fujitsu.get("cb_correct_tool_rate", "") if fujitsu else "",
+                    fujitsu.get("cb_no_tool_call_rate", "") if fujitsu else "",
+                    fujitsu.get("cb_other_tool_call_rate", "") if fujitsu else "",
+                    fujitsu.get("cb_multiple_tool_call_rate", "") if fujitsu else "",
+                    fujitsu.get("cb_malformed_tool_call_rate", "") if fujitsu else "",
                     fujitsu.get("improvements", "") if fujitsu else "",
                     fujitsu.get("regressions", "") if fujitsu else "",
                     agentdojo.get("diff_rate", "") if agentdojo else "",
+                    agentdojo.get("malicious_tool_rate", "") if agentdojo else "",
+                    agentdojo.get("correct_tool_rate", "") if agentdojo else "",
+                    agentdojo.get("no_tool_call_rate", "") if agentdojo else "",
+                    agentdojo.get("multiple_tool_call_rate", "") if agentdojo else "",
                     llmail.get("cb_asr", "") if llmail else "",
                     llmail.get("capability_retention", "") if llmail else "",
                     llmail.get("target_accuracy_rate", "") if llmail else "",

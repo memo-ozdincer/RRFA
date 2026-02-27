@@ -662,10 +662,26 @@ with open('$RUN_DIR/eval/fujitsu_eval.json') as f:
     r = json.load(f)
 if 'baseline' in r:
     baseline_asr = r['baseline']['tool_flip_asr']['attack_success_rate']
+    baseline_mal = r['baseline']['tool_flip_asr'].get('malicious_tool_call_rate', baseline_asr)
+    baseline_corr = r['baseline']['tool_flip_asr'].get('correct_tool_call_rate', r['baseline']['tool_flip_asr'].get('correct_behavior_rate', 0))
     print(f'  Fujitsu Baseline ASR: {baseline_asr:.1%}')
+    print(f'  Fujitsu Baseline Malicious Tool Rate: {baseline_mal:.1%}')
+    print(f'  Fujitsu Baseline Correct Tool Rate:   {baseline_corr:.1%}')
 if 'cb_model' in r:
     asr = r['cb_model']['tool_flip_asr']['attack_success_rate']
+    cb_mal = r['cb_model']['tool_flip_asr'].get('malicious_tool_call_rate', asr)
+    cb_corr = r['cb_model']['tool_flip_asr'].get('correct_tool_call_rate', r['cb_model']['tool_flip_asr'].get('correct_behavior_rate', 0))
+    cb_no = r['cb_model']['tool_flip_asr'].get('no_tool_call_rate', 0)
+    cb_other = r['cb_model']['tool_flip_asr'].get('other_tool_call_rate', 0)
+    cb_multi = r['cb_model']['tool_flip_asr'].get('multiple_tool_call_rate', 0)
+    cb_malformed = r['cb_model']['tool_flip_asr'].get('malformed_tool_call_rate', 0)
     print(f'  Fujitsu CB ASR:       {asr:.1%}')
+    print(f'  Fujitsu CB Malicious Tool Rate: {cb_mal:.1%}')
+    print(f'  Fujitsu CB Correct Tool Rate:   {cb_corr:.1%}')
+    print(f'  Fujitsu CB No-Tool Rate:        {cb_no:.1%}')
+    print(f'  Fujitsu CB Other-Tool Rate:     {cb_other:.1%}')
+    print(f'  Fujitsu CB Multi-Tool Rate:     {cb_multi:.1%}')
+    print(f'  Fujitsu CB Malformed-Tool Rate: {cb_malformed:.1%}')
 if 'delta' in r:
     delta = r['delta']['tool_flip_asr']
     print(f'  Fujitsu Delta:        {delta:+.1%}')
@@ -723,7 +739,7 @@ echo ""
 
 # Generate summary CSV
 SUMMARY_CSV="$SWEEP_DIR/summary.csv"
-echo "alpha,layers,policy,fujitsu_baseline_asr,fujitsu_cb_asr,fujitsu_delta,agentdojo_diff,agentdojo_benign_match,agentdojo_harmful_resist,llmail_baseline_asr,llmail_cb_asr,llmail_delta,llmail_usefulness,llmail_capability,llmail_target_acc,llmail_json_parse_fail,tools_broken,status" > "$SUMMARY_CSV"
+echo "alpha,layers,policy,fujitsu_baseline_asr,fujitsu_cb_asr,fujitsu_delta,fujitsu_baseline_malicious_rate,fujitsu_cb_malicious_rate,fujitsu_baseline_correct_rate,fujitsu_cb_correct_rate,fujitsu_cb_no_tool_rate,fujitsu_cb_other_tool_rate,fujitsu_cb_multi_tool_rate,fujitsu_cb_malformed_tool_rate,agentdojo_diff,agentdojo_benign_match,agentdojo_harmful_resist,llmail_baseline_asr,llmail_cb_asr,llmail_delta,llmail_usefulness,llmail_capability,llmail_target_acc,llmail_json_parse_fail,tools_broken,status" > "$SUMMARY_CSV"
 
 for run_dir in "$SWEEP_DIR"/a*; do
     if [[ -d "$run_dir" ]]; then
@@ -739,6 +755,14 @@ for run_dir in "$SWEEP_DIR"/a*; do
         fujitsu_baseline="N/A"
         fujitsu_cb="N/A"
         fujitsu_delta="N/A"
+        fujitsu_baseline_malicious="N/A"
+        fujitsu_cb_malicious="N/A"
+        fujitsu_baseline_correct="N/A"
+        fujitsu_cb_correct="N/A"
+        fujitsu_cb_no_tool="N/A"
+        fujitsu_cb_other_tool="N/A"
+        fujitsu_cb_multi_tool="N/A"
+        fujitsu_cb_malformed_tool="N/A"
         agentdojo_diff="N/A"
         agentdojo_benign_match="N/A"
         agentdojo_harmful_resist="N/A"
@@ -753,15 +777,23 @@ for run_dir in "$SWEEP_DIR"/a*; do
         status="unknown"
 
         if [[ -f "$run_dir/eval/fujitsu_eval.json" ]]; then
-            read fujitsu_baseline fujitsu_cb fujitsu_delta < <(python3 -c "
+            read fujitsu_baseline fujitsu_cb fujitsu_delta fujitsu_baseline_malicious fujitsu_cb_malicious fujitsu_baseline_correct fujitsu_cb_correct fujitsu_cb_no_tool fujitsu_cb_other_tool fujitsu_cb_multi_tool fujitsu_cb_malformed_tool < <(python3 -c "
 import json
 with open('$run_dir/eval/fujitsu_eval.json') as f:
     r = json.load(f)
 baseline = r.get('baseline', {}).get('tool_flip_asr', {}).get('attack_success_rate', 'N/A')
 cb = r.get('cb_model', {}).get('tool_flip_asr', {}).get('attack_success_rate', 'N/A')
 delta = r.get('delta', {}).get('tool_flip_asr', 'N/A')
-print(baseline, cb, delta)
-" 2>/dev/null || echo "N/A N/A N/A")
+baseline_mal = r.get('baseline', {}).get('tool_flip_asr', {}).get('malicious_tool_call_rate', baseline)
+cb_mal = r.get('cb_model', {}).get('tool_flip_asr', {}).get('malicious_tool_call_rate', cb)
+baseline_corr = r.get('baseline', {}).get('tool_flip_asr', {}).get('correct_tool_call_rate', r.get('baseline', {}).get('tool_flip_asr', {}).get('correct_behavior_rate', 'N/A'))
+cb_corr = r.get('cb_model', {}).get('tool_flip_asr', {}).get('correct_tool_call_rate', r.get('cb_model', {}).get('tool_flip_asr', {}).get('correct_behavior_rate', 'N/A'))
+cb_no = r.get('cb_model', {}).get('tool_flip_asr', {}).get('no_tool_call_rate', 'N/A')
+cb_other = r.get('cb_model', {}).get('tool_flip_asr', {}).get('other_tool_call_rate', 'N/A')
+cb_multi = r.get('cb_model', {}).get('tool_flip_asr', {}).get('multiple_tool_call_rate', 'N/A')
+cb_malformed = r.get('cb_model', {}).get('tool_flip_asr', {}).get('malformed_tool_call_rate', 'N/A')
+print(baseline, cb, delta, baseline_mal, cb_mal, baseline_corr, cb_corr, cb_no, cb_other, cb_multi, cb_malformed)
+" 2>/dev/null || echo "N/A N/A N/A N/A N/A N/A N/A N/A N/A N/A N/A")
             status="success"
         fi
 
@@ -794,7 +826,7 @@ print(bl, cb, d, u, cap, ta, jpf, tb)
 " 2>/dev/null || echo "N/A N/A N/A N/A N/A N/A N/A N/A")
         fi
 
-        echo "$alpha,$layers,$policy,$fujitsu_baseline,$fujitsu_cb,$fujitsu_delta,$agentdojo_diff,$agentdojo_benign_match,$agentdojo_harmful_resist,$llmail_baseline,$llmail_cb,$llmail_delta,$llmail_useful,$llmail_capability,$llmail_target_acc,$llmail_json_parse_fail,$tools_broken,$status" >> "$SUMMARY_CSV"
+        echo "$alpha,$layers,$policy,$fujitsu_baseline,$fujitsu_cb,$fujitsu_delta,$fujitsu_baseline_malicious,$fujitsu_cb_malicious,$fujitsu_baseline_correct,$fujitsu_cb_correct,$fujitsu_cb_no_tool,$fujitsu_cb_other_tool,$fujitsu_cb_multi_tool,$fujitsu_cb_malformed_tool,$agentdojo_diff,$agentdojo_benign_match,$agentdojo_harmful_resist,$llmail_baseline,$llmail_cb,$llmail_delta,$llmail_useful,$llmail_capability,$llmail_target_acc,$llmail_json_parse_fail,$tools_broken,$status" >> "$SUMMARY_CSV"
     fi
 done
 

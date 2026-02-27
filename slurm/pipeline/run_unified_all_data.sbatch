@@ -22,35 +22,26 @@ if [[ ! -f "$UNIFIED_PIPELINE" ]]; then
 fi
 
 # Dataset profile
-export DATASETS="${DATASETS:-agentdojo,fujitsu_b4,llmail_inject}"
+export DATASETS="${DATASETS:-agentdojo,fujitsu_b4}"
 
 # Keep outputs isolated from other profiles unless overridden.
 export OUTPUT_BASE="${OUTPUT_BASE:-/scratch/memoozd/cb-scratch/data_all}"
 
-# LLMail retain mode: how LLMail benign data is sourced for training.
-#   "generated"       - use model-generated DR completions (default)
-#   "synthetic"       - use deterministic synthetic benign send-email traces (50 golden)
-#   "contextualized"  - scenario-grounded retain traces with model inference (recommended)
-#   "none"            - no LLMail retain data (LLMail used as CB set only)
-# Variant recipes:
-#   LLMAIL_RETAIN_MODE=none            → all data + LLMail as CB set only
-#   LLMAIL_RETAIN_MODE=synthetic       → all data + LLMail CB + 50 golden traces
-#   LLMAIL_RETAIN_MODE=generated       → all data + LLMail CB + model-generated retain (default)
-#   LLMAIL_RETAIN_MODE=contextualized  → all data + LLMail CB + scenario-grounded retain
-export LLMAIL_RETAIN_MODE="${LLMAIL_RETAIN_MODE:-generated}"
-
-# LLMail challenge-faithful defaults
-export LLMAIL_TOOL_SCHEMA="${LLMAIL_TOOL_SCHEMA:-configs/tool_schemas/llmail_inject_challenge_v2.json}"
-export LLMAIL_CONTEXT_MODE="${LLMAIL_CONTEXT_MODE:-tool_message_retrieval}"
-export LLMAIL_EXCLUDE_NOT_RETRIEVED="${LLMAIL_EXCLUDE_NOT_RETRIEVED:-true}"
-export LLMAIL_SCENARIOS_PATH="${LLMAIL_SCENARIOS_PATH:-data/llmail_inject/scenarios.json}"
-
 # Generation/eval controls synced with sweep_hparams_simple behavior
 export STRICT_SIMULATED_MATCH="${STRICT_SIMULATED_MATCH:-true}"
-export SKIP_LLMAIL_NOT_RETRIEVED="${SKIP_LLMAIL_NOT_RETRIEVED:-true}"
 export LIMIT_GEN="${LIMIT_GEN:-5000}"
-export LLMAIL_LIMIT="${LLMAIL_LIMIT:-}"
-export LLMAIL_RETRIEVED_ONLY="${LLMAIL_RETRIEVED_ONLY:-true}"
 export EVAL_MERGE_ADAPTER="${EVAL_MERGE_ADAPTER:-true}"
+export EVAL_LIMIT="${EVAL_LIMIT:-100}"
 
-exec bash "$UNIFIED_PIPELINE"
+# Run unified pipeline and then print a checkpoint-aware visualize command.
+bash "$UNIFIED_PIPELINE"
+
+LATEST_RUN_DIR="$(ls -1dt "${OUTPUT_BASE}"/run_* 2>/dev/null | head -n 1 || true)"
+if [[ -n "$LATEST_RUN_DIR" && -d "$LATEST_RUN_DIR" ]]; then
+    echo ""
+    echo "All-data profile complete."
+    echo "Visualize with primary metrics + checkpoint comparison:"
+    echo "  python scripts/visualize_sweep_results.py \"$LATEST_RUN_DIR\" \\"
+    echo "    --compare-checkpoints --no-color \\"
+    echo "    --csv \"$LATEST_RUN_DIR/eval_summary.csv\""
+fi
