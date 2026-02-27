@@ -1233,16 +1233,10 @@ class CircuitBreakerTrainer:
         benign_loss_mask = batch.get('benign_loss_mask', None)
         benign_sample_weight = batch.get('benign_sample_weight', None)
 
-        # Keep unweighted masks for triplet pooling (sample_weight cancels in
-        # _masked_mean_per_sample's numerator/denominator, so it must be applied
-        # separately).  Weighted masks are used only for KL / token-level losses
-        # where _masked_mean correctly propagates per-sample importance.
-        harmful_loss_mask_kl = harmful_loss_mask
-        benign_loss_mask_kl = benign_loss_mask
         if harmful_loss_mask is not None and harmful_sample_weight is not None:
-            harmful_loss_mask_kl = harmful_loss_mask * harmful_sample_weight.unsqueeze(-1)
+            harmful_loss_mask = harmful_loss_mask * harmful_sample_weight.unsqueeze(-1)
         if benign_loss_mask is not None and benign_sample_weight is not None:
-            benign_loss_mask_kl = benign_loss_mask * benign_sample_weight.unsqueeze(-1)
+            benign_loss_mask = benign_loss_mask * benign_sample_weight.unsqueeze(-1)
 
         # Get batch sizes for later splitting
         harmful_batch_size = harmful_input_ids.shape[0]
@@ -1431,7 +1425,7 @@ class CircuitBreakerTrainer:
                 benign_student_logits=student_logits_benign,
                 benign_teacher_logits=teacher_logits_benign,
                 benign_attention_mask=benign_attention_mask,
-                benign_loss_mask=benign_loss_mask_kl,
+                benign_loss_mask=benign_loss_mask,
                 alpha_benign=float(getattr(self.config, "triplet_alpha_benign", 0.5)),
                 beta_harmful=float(getattr(self.config, "triplet_beta_harmful", 0.4)),
                 gamma_kl=float(getattr(self.config, "triplet_gamma_kl", 0.9)),
@@ -1454,6 +1448,7 @@ class CircuitBreakerTrainer:
                 "triplet_alpha": triplet_metrics["triplet_alpha"],
                 "triplet_beta": triplet_metrics["triplet_beta"],
                 "triplet_gamma": triplet_metrics["triplet_gamma"],
+                "alpha": alpha,
             }
         elif loss_mode == LOSS_MODE_LEGACY_CB:
             loss_reroute, reroute_metrics = reroute_loss(
@@ -1461,7 +1456,7 @@ class CircuitBreakerTrainer:
                 harmful_frozen_reps,
                 self.config.cb_target_layers,
                 harmful_attention_mask,
-                loss_mask=harmful_loss_mask_kl,
+                loss_mask=harmful_loss_mask,
                 return_metrics=True,
             )
             loss_retain = retain_loss(
@@ -1469,7 +1464,7 @@ class CircuitBreakerTrainer:
                 benign_frozen_reps,
                 self.config.cb_target_layers,
                 benign_attention_mask,
-                loss_mask=benign_loss_mask_kl,
+                loss_mask=benign_loss_mask,
             )
             if beta_kl > 0:
                 if teacher_logits_benign is None:
@@ -1478,7 +1473,7 @@ class CircuitBreakerTrainer:
                     student_logits=student_logits_benign,
                     teacher_logits=teacher_logits_benign,
                     attention_mask=benign_attention_mask,
-                    loss_mask=benign_loss_mask_kl,
+                    loss_mask=benign_loss_mask,
                     temperature=kl_temp,
                 )
             else:
@@ -1498,12 +1493,12 @@ class CircuitBreakerTrainer:
             loss_reroute = random_reroute_loss(
                 model_reps=harmful_model_reps,
                 target_layers=self.config.cb_target_layers,
-                loss_mask=harmful_loss_mask_kl,
+                loss_mask=harmful_loss_mask,
             )
             loss_retain = retain_ce_loss(
                 logits=student_logits_benign,
                 labels=benign_input_ids,
-                loss_mask=benign_loss_mask_kl,
+                loss_mask=benign_loss_mask,
             )
             total_loss = cs * loss_reroute + cr * loss_retain
             metrics = {
@@ -1542,23 +1537,6 @@ class CircuitBreakerTrainer:
                 self.config.max_grad_norm,
             )
 
-        # Gradient diagnostics (every 50 steps on main process) must run
-        # before optimizer.zero_grad(), otherwise they always read as zero.
-        if self.global_step % 50 == 1 and self.accelerator.is_main_process:
-            grad_stats = self._compute_gradient_stats()
-            metrics.update(grad_stats)
-            if grad_stats.get('grad_norm_total', 0) < 1e-8:
-                self.accelerator.print(
-                    f"  WARNING: Very small gradients detected! "
-                    f"grad_norm={grad_stats.get('grad_norm_total', 0):.2e}"
-                )
-            if reroute_metrics is not None:
-                self.accelerator.print(
-                    f"  Reroute metrics: cos_sim_mean={reroute_metrics['cos_sim_mean']:.4f}, "
-                    f"positive_frac={reroute_metrics['cos_sim_positive_frac']:.2%}, "
-                    f"target={reroute_metrics['target_type']}"
-                )
-
         # Optimizer step
         self.optimizer.step()
         self.scheduler.step()
@@ -1578,6 +1556,22 @@ class CircuitBreakerTrainer:
             if reroute_metrics.get('target_type') != 'frozen_baseline':
                 self.accelerator.print(
                     f"  WARNING: Unexpected reroute target type: {reroute_metrics.get('target_type')}"
+                )
+
+        # Gradient diagnostics (every 50 steps on main process)
+        if self.global_step % 50 == 1 and self.accelerator.is_main_process:
+            grad_stats = self._compute_gradient_stats()
+            metrics.update(grad_stats)
+            if grad_stats.get('grad_norm_total', 0) < 1e-8:
+                self.accelerator.print(
+                    f"  WARNING: Very small gradients detected! "
+                    f"grad_norm={grad_stats.get('grad_norm_total', 0):.2e}"
+                )
+            if reroute_metrics is not None:
+                self.accelerator.print(
+                    f"  Reroute metrics: cos_sim_mean={reroute_metrics['cos_sim_mean']:.4f}, "
+                    f"positive_frac={reroute_metrics['cos_sim_positive_frac']:.2%}, "
+                    f"target={reroute_metrics['target_type']}"
                 )
 
         return metrics
@@ -1690,104 +1684,6 @@ class CircuitBreakerTrainer:
         
         self.accelerator.print("=" * 60 + "\n")
 
-    def _validate_external_lossmasks(self):
-        """
-        Lightweight sanity checks for externally pre-tokenized datasets.
-
-        We cannot decode/reconstruct completion boundaries here, but we can still
-        verify that masks are non-empty, bounded, and aligned with attention masks.
-        """
-        self.accelerator.print("\n" + "=" * 60)
-        self.accelerator.print("VALIDATING EXTERNAL LOSSMASKS")
-        self.accelerator.print("=" * 60)
-
-        if not hasattr(self.dataset, "__len__") or not hasattr(self.dataset, "__getitem__"):
-            self.accelerator.print("  Dataset does not support direct indexing; skipping validation.")
-            self.accelerator.print("=" * 60 + "\n")
-            return
-
-        num_to_check = min(8, len(self.dataset))
-        if num_to_check == 0:
-            self.accelerator.print("  No samples to validate.")
-            self.accelerator.print("=" * 60 + "\n")
-            return
-
-        stats = {
-            "samples_checked": 0,
-            "harmful_nonzero_tokens": 0,
-            "harmful_total_tokens": 0,
-            "benign_nonzero_tokens": 0,
-            "benign_total_tokens": 0,
-            "zero_mask_samples": 0,
-            "invalid_weight_samples": 0,
-        }
-
-        for idx in range(num_to_check):
-            sample = self.dataset[idx]
-            stats["samples_checked"] += 1
-
-            for side in ("harmful", "benign"):
-                mask = sample.get(f"{side}_loss_mask")
-                attn = sample.get(f"{side}_attention_mask")
-                weight = sample.get(f"{side}_sample_weight")
-
-                if mask is None:
-                    continue
-
-                mask = mask.float()
-                if attn is None:
-                    attn = torch.ones_like(mask, dtype=torch.long)
-                attn = attn.long()
-
-                active = attn > 0
-                total_tokens = int(active.sum().item())
-                nonzero_tokens = int(((mask > 0) & active).sum().item())
-
-                stats[f"{side}_total_tokens"] += total_tokens
-                stats[f"{side}_nonzero_tokens"] += nonzero_tokens
-
-                if total_tokens > 0 and nonzero_tokens == 0:
-                    stats["zero_mask_samples"] += 1
-
-                if weight is not None:
-                    weight_value = float(weight.item()) if torch.is_tensor(weight) else float(weight)
-                    if not math.isfinite(weight_value) or weight_value <= 0:
-                        stats["invalid_weight_samples"] += 1
-
-        def _ratio(nonzero_key: str, total_key: str) -> float:
-            total = stats[total_key]
-            if total <= 0:
-                return 0.0
-            return stats[nonzero_key] / total
-
-        harmful_ratio = _ratio("harmful_nonzero_tokens", "harmful_total_tokens")
-        benign_ratio = _ratio("benign_nonzero_tokens", "benign_total_tokens")
-
-        self.accelerator.print(f"  Samples checked: {stats['samples_checked']}")
-        self.accelerator.print(
-            f"  Harmful mask coverage: {stats['harmful_nonzero_tokens']}/{stats['harmful_total_tokens']} "
-            f"({harmful_ratio:.2%})"
-        )
-        self.accelerator.print(
-            f"  Benign mask coverage:  {stats['benign_nonzero_tokens']}/{stats['benign_total_tokens']} "
-            f"({benign_ratio:.2%})"
-        )
-
-        if stats["zero_mask_samples"] > 0:
-            self.accelerator.print(
-                f"  WARNING: {stats['zero_mask_samples']} checked samples had zero non-masked tokens."
-            )
-        if stats["invalid_weight_samples"] > 0:
-            self.accelerator.print(
-                f"  WARNING: {stats['invalid_weight_samples']} checked samples had invalid sample weights."
-            )
-        if harmful_ratio < 0.001 or benign_ratio < 0.001:
-            self.accelerator.print(
-                "  WARNING: Very low lossmask coverage detected. Re-check ETL_B policy/MWCS settings."
-            )
-
-        self.accelerator.print("=" * 60 + "\n")
-
     def train(self):
         """Main training loop."""
         self.accelerator.print("=" * 60)
@@ -1805,10 +1701,7 @@ class CircuitBreakerTrainer:
         if isinstance(self.dataset, CircuitBreakerDataset):
             self._validate_completion_masking()
         else:
-            self.accelerator.print(
-                "External pre-tokenized dataset detected; running lightweight lossmask sanity checks."
-            )
-            self._validate_external_lossmasks()
+            self.accelerator.print("Skipping completion-mask validation (external pre-tokenized dataset)")
         
         progress_bar = tqdm(
             total=self.config.total_steps,
@@ -1849,12 +1742,7 @@ class CircuitBreakerTrainer:
                         log_msg += f", kl={metrics['loss_kl']:.4f}"
                     if 'loss_triplet_kl' in metrics:
                         log_msg += f", triplet_kl={metrics['loss_triplet_kl']:.4f}"
-                    if 'triplet_beta' in metrics:
-                        log_msg += f", triplet_beta={metrics['triplet_beta']:.4f}"
-                    if 'triplet_gamma' in metrics:
-                        log_msg += f", triplet_gamma={metrics['triplet_gamma']:.4f}"
-                    if 'alpha' in metrics:
-                        log_msg += f", alpha={metrics['alpha']:.4f}"
+                    log_msg += f", α={metrics['alpha']:.4f}"
                     self.accelerator.print(log_msg)
                     
                     if self.config.use_wandb:

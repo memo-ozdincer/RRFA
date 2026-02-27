@@ -51,18 +51,11 @@ def load_run_evals(sweep_dir: Path) -> List[Dict[str, Any]]:
 
         # Parse run name
         import re
-        m_explicit = re.match(r"a([\d.]+)_l([\d_]+)_p(.+?)_mw(.+)", run_dir.name)
-        if m_explicit:
-            entry["alpha"] = float(m_explicit.group(1))
-            entry["layers"] = m_explicit.group(2).replace("_", ",")
-            entry["policy"] = m_explicit.group(3)
-            entry["mwcs_schedule"] = m_explicit.group(4)
-        else:
-            m = re.match(r"a([\d.]+)_l([\d_]+)_(.*)", run_dir.name)
-            if m:
-                entry["alpha"] = float(m.group(1))
-                entry["layers"] = m.group(2).replace("_", ",")
-                entry["policy"] = m.group(3)
+        m = re.match(r"a([\d.]+)_l([\d_]+)_(.*)", run_dir.name)
+        if m:
+            entry["alpha"] = float(m.group(1))
+            entry["layers"] = m.group(2).replace("_", ",")
+            entry["policy"] = m.group(3)
 
         # Fujitsu
         fujitsu_path = run_dir / "eval" / "fujitsu_eval.json"
@@ -369,19 +362,10 @@ def main():
     elif args.csv:
         rows = load_summary_csv(args.csv)
         for row in rows:
-            mwcs = row.get("mwcs_schedule", "")
-            if mwcs:
-                run_name = (
-                    f"a{row.get('alpha', '?')}_l{row.get('layers', '?').replace(',', '_')}"
-                    f"_p{row.get('policy', '?')}_mw{mwcs}"
-                )
-            else:
-                run_name = f"a{row.get('alpha', '?')}_l{row.get('layers', '?').replace(',', '_')}_{row.get('policy', '?')}"
-            entry: Dict[str, Any] = {"run_name": run_name}
+            entry: Dict[str, Any] = {"run_name": f"a{row.get('alpha', '?')}_l{row.get('layers', '?').replace(',', '_')}_{row.get('policy', '?')}"}
             entry["alpha"] = _safe_float(row.get("alpha"))
             entry["layers"] = row.get("layers", "")
             entry["policy"] = row.get("policy", "")
-            entry["mwcs_schedule"] = row.get("mwcs_schedule", "")
             entry["fujitsu_baseline_asr"] = _safe_float(row.get("fujitsu_baseline_asr"))
             entry["fujitsu_cb_asr"] = _safe_float(row.get("fujitsu_cb_asr"))
             entry["llmail_baseline_asr"] = _safe_float(row.get("llmail_baseline_asr"))

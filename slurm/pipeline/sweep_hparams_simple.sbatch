@@ -54,53 +54,22 @@ if [[ ! -f "$SWEEP_SCRIPT" ]]; then
     exit 1
 fi
 
-export QUICK_TEST="${QUICK_TEST:-false}"
 export TOTAL_STEPS="${TOTAL_STEPS:-200}"
-# Stability-first sweep grid:
-# - keep policy fixed to known-good cb_full_sequence
-# - sweep alpha around known-good region
-# - test two conservative layer sets
-export ALPHAS="${ALPHAS:-5.0,8.0,10.0,12.0,15.0}"
-export LAYER_CONFIGS="${LAYER_CONFIGS:-10,20|12,18}"
+export ALPHAS="${ALPHAS:-5.0,10.0,15.0}"
+export LAYER_CONFIGS="${LAYER_CONFIGS:-10,20}"
 export POLICIES="${POLICIES:-cb_full_sequence}"
-# Keep MWCS disabled by default while stabilizing hparams.
-export MWCS_SCHEDULE="${MWCS_SCHEDULE:-none}"
-export MWCS_REGISTRY="${MWCS_REGISTRY:-$REPO_DIR/configs/mwcs_registry_v1.json}"
-export MWCS_STEP="${MWCS_STEP:-0}"
-export AGENTDOJO_EVAL_SPLIT="${AGENTDOJO_EVAL_SPLIT:-complete}"
 export LIMIT_EVAL="${LIMIT_EVAL:-100}"
 export LIMIT_GEN="${LIMIT_GEN:-5000}"
 export NUM_EXAMPLES="${NUM_EXAMPLES:-50}"
 export SHOW_EXAMPLES="${SHOW_EXAMPLES:-true}"
-export FULL_RENDER_AUDIT="${FULL_RENDER_AUDIT:-true}"
-export EVAL_INTERMEDIATE_CHECKPOINTS="${EVAL_INTERMEDIATE_CHECKPOINTS:-true}"
-export CHECKPOINT_EVAL_STEPS="${CHECKPOINT_EVAL_STEPS:-80,100,110,150}"
-export CHECKPOINT_EVAL_LIMIT="${CHECKPOINT_EVAL_LIMIT:-${LIMIT_EVAL}}"
 export BATCH_SIZE="${BATCH_SIZE:-1}"
-export GRAD_ACCUM="${GRAD_ACCUM:-4}"
-export VERIFY_PIPELINE="${VERIFY_PIPELINE:-true}"
-export VERIFY_FAIL_ON_ERROR="${VERIFY_FAIL_ON_ERROR:-false}"
-export TRIPLET_BETA_HARMFUL="${TRIPLET_BETA_HARMFUL:-0.4}"
-export TRIPLET_GAMMA_KL="${TRIPLET_GAMMA_KL:-0.9}"
-export TRIPLET_MARGIN_BENIGN="${TRIPLET_MARGIN_BENIGN:-500.0}"
-export TRIPLET_MARGIN_HARMFUL="${TRIPLET_MARGIN_HARMFUL:-1500.0}"
-export SAVE_STEPS="${SAVE_STEPS:-10}"
 
 echo "Starting sweep_hparams_simple.sbatch..."
-echo "  QUICK_TEST: ${QUICK_TEST}"
 echo "  ALPHAS: ${ALPHAS}"
 echo "  LAYER_CONFIGS: ${LAYER_CONFIGS}"
 echo "  POLICIES: ${POLICIES}"
-echo "  MWCS_SCHEDULE: ${MWCS_SCHEDULE} (step=${MWCS_STEP})"
-echo "  MWCS_REGISTRY: ${MWCS_REGISTRY}"
-echo "  AGENTDOJO_EVAL_SPLIT: ${AGENTDOJO_EVAL_SPLIT}"
-echo "  FULL_RENDER_AUDIT: ${FULL_RENDER_AUDIT}"
-echo "  EVAL_INTERMEDIATE_CHECKPOINTS: ${EVAL_INTERMEDIATE_CHECKPOINTS}"
-echo "  CHECKPOINT_EVAL_STEPS: ${CHECKPOINT_EVAL_STEPS}"
-echo "  CHECKPOINT_EVAL_LIMIT: ${CHECKPOINT_EVAL_LIMIT}"
-echo "  Datasets: Fujitsu, AgentDojo"
+echo "  Datasets: Fujitsu, AgentDojo, LLMail (auto-detected)"
 echo "  Logging: Compatible with scripts/visualize_sweep_results.py"
-echo "  Verification: VERIFY_PIPELINE=${VERIFY_PIPELINE}, VERIFY_FAIL_ON_ERROR=${VERIFY_FAIL_ON_ERROR}"
 
 # =============================================================================
 # Cache Setup (Offline Mode)
@@ -154,6 +123,13 @@ FUJITSU_DR="$TRACES_DIR/fujitsu_b4_dr.jsonl"
 TOOL_SCHEMA="configs/tool_schemas/b4_standard_v1.json"
 # MODEL is now set above via cache resolution
 
+# LLMail paths
+LLMAIL_SKELETON="$TRACES_DIR/llmail_inject_skeleton.jsonl"
+LLMAIL_DS="$TRACES_DIR/llmail_inject_ds.jsonl"
+LLMAIL_DR="$TRACES_DIR/llmail_inject_dr.jsonl"
+LLMAIL_TOOL_SCHEMA="configs/tool_schemas/llmail_inject_challenge_v2.json"
+LLMAIL_RAW="$REPO_DIR/data/llmail_inject/raw_submissions_phase1.jsonl"
+
 # Helper to generate DS/DR
 generate_data() {
     local name="$1"
@@ -161,7 +137,30 @@ generate_data() {
     local ds="$3"
     local dr="$4"
     local schema="$5"
-    # Check for DS/DR (Generation)
+    local raw_source="${6:-}"  # Optional raw source for ETL_A
+
+    # 1. Check for Skeleton (ETL_A)
+    if [[ ! -f "$skeleton" ]]; then
+        if [[ -n "$raw_source" && -f "$raw_source" ]]; then
+            echo "Generating missing skeleton for $name (ETL_A)..."
+            
+            # Special handling for LLMail vs generic
+            if [[ "$name" == "LLMail-Inject" ]]; then
+                python src/schemas/tools/ETL_A.py \
+                    --llmail-inject "$raw_source" \
+                    --output "$skeleton" \
+                    --split train \
+                    --tool-schema "$schema" \
+                    --llmail-context-mode tool_message_retrieval \
+                    --llmail-exclude-not-retrieved true \
+                    --llmail-scenarios-path "$REPO_DIR/data/llmail_inject/scenarios.json"
+            else
+                echo "WARNING: No ETL_A logic defined for $name in simple script."
+            fi
+        fi
+    fi
+
+    # 2. Check for DS/DR (Generation)
     if [[ ! -f "$ds" || ! -f "$dr" ]]; then
         if [[ -f "$skeleton" ]]; then
             echo "Generating missing $name data (DS/DR)..."
@@ -177,6 +176,7 @@ generate_data() {
                     --mode ds \
                     --temperature-ds 0.7 \
                     --strict-simulated-match true \
+                    --skip-llmail-not-retrieved true \
                     --use-vllm \
                     --limit "$LIMIT_GEN"
             fi
@@ -191,6 +191,7 @@ generate_data() {
                     --tool-schema "$schema" \
                     --mode dr \
                     --temperature-dr 0.3 \
+                    --skip-llmail-not-retrieved true \
                     --use-vllm \
                     --limit "$LIMIT_GEN"
             fi
@@ -204,6 +205,7 @@ generate_data() {
 
 # Run generation
 generate_data "Fujitsu B4" "$FUJITSU_SKELETON" "$FUJITSU_DS" "$FUJITSU_DR" "$TOOL_SCHEMA"
+generate_data "LLMail-Inject" "$LLMAIL_SKELETON" "$LLMAIL_DS" "$LLMAIL_DR" "$LLMAIL_TOOL_SCHEMA" "$LLMAIL_RAW"
 
 echo ""
 echo "Data preparation complete. Launching sweep..."

@@ -3,7 +3,7 @@
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=24
-#SBATCH --time=09:00:00
+#SBATCH --time=19:00:00
 #SBATCH --output=/scratch/memoozd/cb-scratch/logs/%x_%j.out
 #SBATCH --error=/scratch/memoozd/cb-scratch/logs/%x_%j.err
 #SBATCH --account=def-zhijing
@@ -16,10 +16,9 @@
 #   - `POLICIES` (lossmask policy)
 #   - `LAYER_CONFIGS` (CB target layers)
 #   - `ALPHAS` (alpha_max for legacy schedules)
-# And applies one MWCS schedule per sweep run (`MWCS_SCHEDULE`).
 #
 # For each configuration: ETL_B (policy) -> train -> eval.
-# Evaluates on Fujitsu + AgentDojo and produces full trace visualization.
+# LLMail-Inject DS/DR traces are auto-included if present in $CB_SCRATCH/data/traces.
 #
 # -----------------------------------------------------------------------------
 # Common run recipes
@@ -36,18 +35,10 @@
 #
 # 4) Policy-only sweep (fixed layers/alpha):
 #    ALPHAS=10.0 LAYER_CONFIGS=10,20 \
-#    POLICIES=assistant_only,cb_full_sequence,tool_calls_only \
+#    POLICIES=assistant_only,assistant_and_tool,cb_full_sequence,tool_calls_only,completion_only \
 #    sbatch slurm/pipeline/sweep_hparams.sbatch
 #
-# 5) Compare MWCS schedules (run multiple sweeps):
-#    for S in balanced_cb attack_focus capability_focus; do \
-#      ALPHAS=10.0 LAYER_CONFIGS=10,20 \
-#      POLICIES=assistant_and_tool,cb_full_sequence,action_commitment \
-#      MWCS_SCHEDULE=$S \
-#      sbatch slurm/pipeline/sweep_hparams.sbatch; \
-#    done
-#
-# 6) Legacy loss sweep:
+# 5) Legacy loss sweep:
 #    LOSS_MODE=legacy_cb LOSS_WEIGHTING=dual \
 #    sbatch slurm/pipeline/sweep_hparams.sbatch
 #
@@ -55,13 +46,14 @@
 # Config knobs (pass with `VAR=value sbatch ...`)
 # -----------------------------------------------------------------------------
 # Sweep controls:
-#   QUICK_TEST, TOTAL_STEPS, ALPHAS, LAYER_CONFIGS, POLICIES, MWCS_SCHEDULE
+#   QUICK_TEST, TOTAL_STEPS, ALPHAS, LAYER_CONFIGS, POLICIES
 #
 # Eval/logging:
-#   LIMIT_EVAL, NUM_EXAMPLES, SHOW_EXAMPLES, AGENTDOJO_EVAL_SPLIT, FULL_RENDER_AUDIT,
-#   EVAL_INTERMEDIATE_CHECKPOINTS, CHECKPOINT_EVAL_STEPS, CHECKPOINT_EVAL_LIMIT
+#   LIMIT_EVAL, NUM_EXAMPLES, SHOW_EXAMPLES
 #
 # Data limits:
+#   LLMAIL_LIMIT (cap number of LLMail samples, e.g. 3000)
+#
 # Core training:
 #   LOSS_MODE, LOSS_WEIGHTING, BATCH_SIZE, LEARNING_RATE, WARMUP_STEPS,
 #   MAX_SEQ_LENGTH, MAX_MODEL_LEN, DTYPE, LORA_R, LORA_ALPHA
@@ -124,20 +116,16 @@ QUICK_TEST="${QUICK_TEST:-false}"
 if [[ "$QUICK_TEST" == "true" ]]; then
     echo "🔧 QUICK TEST MODE - Reduced configurations"
     DEFAULT_STEPS=50
-    DEFAULT_ALPHAS="8.0,10.0,12.0"
-    DEFAULT_LAYER_CONFIGS="10,20|12,18"
-    DEFAULT_POLICIES="cb_full_sequence"
-    DEFAULT_MWCS_SCHEDULE="none"
-    DEFAULT_AGENTDOJO_EVAL_SPLIT="complete"
+    DEFAULT_ALPHAS="5.0,10.0"
+    DEFAULT_LAYER_CONFIGS="10,20"
+    DEFAULT_POLICIES="assistant_only"
     DEFAULT_LIMIT_EVAL=20
     DEFAULT_NUM_EXAMPLES=5
 else
     DEFAULT_STEPS=200
-    DEFAULT_ALPHAS="5.0,8.0,10.0,12.0,15.0"
-    DEFAULT_LAYER_CONFIGS="10,20|12,18|8,16,24"
-    DEFAULT_POLICIES="cb_full_sequence"
-    DEFAULT_MWCS_SCHEDULE="none"
-    DEFAULT_AGENTDOJO_EVAL_SPLIT="complete"
+    DEFAULT_ALPHAS="5.0,10.0,15.0"
+    DEFAULT_LAYER_CONFIGS="10,20|8,16,24|12,18|6,12,18,24"
+    DEFAULT_POLICIES="assistant_only,assistant_and_tool,cb_full_sequence,tool_calls_only,completion_only"
     DEFAULT_LIMIT_EVAL=50
     DEFAULT_NUM_EXAMPLES=50
 fi
@@ -146,19 +134,9 @@ TOTAL_STEPS="${TOTAL_STEPS:-$DEFAULT_STEPS}"
 ALPHAS="${ALPHAS:-$DEFAULT_ALPHAS}"
 LAYER_CONFIGS="${LAYER_CONFIGS:-$DEFAULT_LAYER_CONFIGS}"
 POLICIES="${POLICIES:-$DEFAULT_POLICIES}"
-MWCS_SCHEDULE="${MWCS_SCHEDULE:-$DEFAULT_MWCS_SCHEDULE}"
-MWCS_REGISTRY="${MWCS_REGISTRY:-$REPO_DIR/configs/mwcs_registry_v1.json}"
-MWCS_STEP="${MWCS_STEP:-0}"
-AGENTDOJO_EVAL_SPLIT="${AGENTDOJO_EVAL_SPLIT:-$DEFAULT_AGENTDOJO_EVAL_SPLIT}"
 LIMIT_EVAL="${LIMIT_EVAL:-$DEFAULT_LIMIT_EVAL}"
 NUM_EXAMPLES="${NUM_EXAMPLES:-$DEFAULT_NUM_EXAMPLES}"
 SHOW_EXAMPLES="${SHOW_EXAMPLES:-true}"
-FULL_RENDER_AUDIT="${FULL_RENDER_AUDIT:-true}"
-EVAL_INTERMEDIATE_CHECKPOINTS="${EVAL_INTERMEDIATE_CHECKPOINTS:-true}"
-CHECKPOINT_EVAL_STEPS="${CHECKPOINT_EVAL_STEPS:-80,100,110,150}"
-CHECKPOINT_EVAL_LIMIT="${CHECKPOINT_EVAL_LIMIT:-$LIMIT_EVAL}"
-VERIFY_PIPELINE="${VERIFY_PIPELINE:-true}"
-VERIFY_FAIL_ON_ERROR="${VERIFY_FAIL_ON_ERROR:-false}"
 
 # Training params (configurable via env vars, safe defaults for single GPU)
 BATCH_SIZE="${BATCH_SIZE:-1}"
@@ -169,45 +147,38 @@ LORA_R="${LORA_R:-16}"
 LORA_ALPHA="${LORA_ALPHA:-32}"
 MAX_SEQ_LENGTH="${MAX_SEQ_LENGTH:-4096}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
+LLMAIL_LIMIT="${LLMAIL_LIMIT:-}"  # empty = no limit; e.g. 3000
 DTYPE="${DTYPE:-bfloat16}"
+LLMAIL_TOOL_SCHEMA="${LLMAIL_TOOL_SCHEMA:-$REPO_DIR/configs/tool_schemas/llmail_inject_challenge_v2.json}"
+LLMAIL_RETRIEVED_ONLY="${LLMAIL_RETRIEVED_ONLY:-true}"
 LOSS_MODE="${LOSS_MODE:-triplet_full}"
 LOSS_WEIGHTING="${LOSS_WEIGHTING:-dual}"
 TRIPLET_ALPHA_BENIGN="${TRIPLET_ALPHA_BENIGN:-0.5}"
-TRIPLET_BETA_HARMFUL="${TRIPLET_BETA_HARMFUL:-0.25}"
-TRIPLET_GAMMA_KL="${TRIPLET_GAMMA_KL:-1.2}"
-TRIPLET_MARGIN_BENIGN="${TRIPLET_MARGIN_BENIGN:-50.0}"
-TRIPLET_MARGIN_HARMFUL="${TRIPLET_MARGIN_HARMFUL:-150.0}"
+TRIPLET_BETA_HARMFUL="${TRIPLET_BETA_HARMFUL:-0.4}"
+TRIPLET_GAMMA_KL="${TRIPLET_GAMMA_KL:-0.9}"
+TRIPLET_MARGIN_BENIGN="${TRIPLET_MARGIN_BENIGN:-500.0}"
+TRIPLET_MARGIN_HARMFUL="${TRIPLET_MARGIN_HARMFUL:-1500.0}"
 TRIPLET_BENIGN_POS_DISTANCE="${TRIPLET_BENIGN_POS_DISTANCE:-dmix}"
 TRIPLET_BENIGN_NEG_DISTANCE="${TRIPLET_BENIGN_NEG_DISTANCE:-dmix}"
 TRIPLET_HARMFUL_POS_DISTANCE="${TRIPLET_HARMFUL_POS_DISTANCE:-dmix}"
 TRIPLET_HARMFUL_NEG_DISTANCE="${TRIPLET_HARMFUL_NEG_DISTANCE:-dmix}"
 TRIPLET_MIX_L2_WEIGHT="${TRIPLET_MIX_L2_WEIGHT:-0.5}"
 TRIPLET_MIX_COS_WEIGHT="${TRIPLET_MIX_COS_WEIGHT:-0.5}"
-SAVE_STEPS="${SAVE_STEPS:-10}"
 
 echo "Configuration:"
 echo "  TOTAL_STEPS: $TOTAL_STEPS"
 echo "  ALPHAS: $ALPHAS"
 echo "  LAYER_CONFIGS: $LAYER_CONFIGS"
 echo "  POLICIES: $POLICIES"
-echo "  MWCS_SCHEDULE: $MWCS_SCHEDULE"
-echo "  MWCS_REGISTRY: $MWCS_REGISTRY"
-echo "  MWCS_STEP: $MWCS_STEP"
 echo "  BATCH_SIZE: $BATCH_SIZE"
 echo "  GRAD_ACCUM: $GRAD_ACCUM"
 echo "  LEARNING_RATE: $LEARNING_RATE"
 echo "  LOSS_MODE: $LOSS_MODE"
-echo "  AGENTDOJO_EVAL_SPLIT: $AGENTDOJO_EVAL_SPLIT"
 echo "  LIMIT_EVAL: $LIMIT_EVAL"
 echo "  NUM_EXAMPLES: $NUM_EXAMPLES"
 echo "  SHOW_EXAMPLES: $SHOW_EXAMPLES"
-echo "  FULL_RENDER_AUDIT: $FULL_RENDER_AUDIT"
-echo "  EVAL_INTERMEDIATE_CHECKPOINTS: $EVAL_INTERMEDIATE_CHECKPOINTS"
-echo "  CHECKPOINT_EVAL_STEPS: $CHECKPOINT_EVAL_STEPS"
-echo "  CHECKPOINT_EVAL_LIMIT: $CHECKPOINT_EVAL_LIMIT"
-echo "  VERIFY_PIPELINE: $VERIFY_PIPELINE"
-echo "  VERIFY_FAIL_ON_ERROR: $VERIFY_FAIL_ON_ERROR"
 echo "  QUICK_TEST: $QUICK_TEST"
+echo "  LLMAIL_RETRIEVED_ONLY: $LLMAIL_RETRIEVED_ONLY"
 echo ""
 
 # =============================================================================
@@ -217,6 +188,8 @@ TRACES_DIR="$CB_SCRATCH/data/traces"
 DS_TRACES="$TRACES_DIR/fujitsu_b4_ds.jsonl"
 DR_TRACES="$TRACES_DIR/fujitsu_b4_dr.jsonl"
 AGENTDOJO_TRACES="$TRACES_DIR/agentdojo_complete.jsonl"
+LLMAIL_DS_TRACES="$TRACES_DIR/llmail_inject_ds.jsonl"
+LLMAIL_DR_TRACES="$TRACES_DIR/llmail_inject_dr.jsonl"
 
 echo "Input traces (ALL used for training):"
 for trace in "$DS_TRACES" "$DR_TRACES" "$AGENTDOJO_TRACES"; do
@@ -227,6 +200,16 @@ for trace in "$DS_TRACES" "$DR_TRACES" "$AGENTDOJO_TRACES"; do
         exit 1
     fi
 done
+
+HAS_LLMAIL=false
+if [[ -f "$LLMAIL_DS_TRACES" && -f "$LLMAIL_DR_TRACES" ]]; then
+    HAS_LLMAIL=true
+    echo "  ✓ $(basename "$LLMAIL_DS_TRACES"): $(wc -l < "$LLMAIL_DS_TRACES") lines"
+    echo "  ✓ $(basename "$LLMAIL_DR_TRACES"): $(wc -l < "$LLMAIL_DR_TRACES") lines"
+    echo "  LLMail-Inject: enabled"
+else
+    echo "  LLMail-Inject: not found (optional, continuing without it)"
+fi
 echo ""
 
 # =============================================================================
@@ -312,10 +295,8 @@ for alpha in "${ALPHA_ARRAY[@]}"; do
             
             # Create unique run name
             layers_short="${layers//,/_}"
-            mwcs_label="${MWCS_SCHEDULE//\//-}"
-            RUN_NAME="a${alpha}_l${layers_short}_p${policy}_mw${mwcs_label}"
+            RUN_NAME="a${alpha}_l${layers_short}_${policy}"
             RUN_DIR="$SWEEP_DIR/$RUN_NAME"
-            verification_status="skipped"
             
             echo "========================================"
             echo "[$run_idx/$TOTAL_RUNS] $RUN_NAME"
@@ -323,62 +304,32 @@ for alpha in "${ALPHA_ARRAY[@]}"; do
             echo "  Alpha: $alpha"
             echo "  Layers: $layers"
             echo "  Policy: $policy"
-            echo "  MWCS: $MWCS_SCHEDULE (step=$MWCS_STEP)"
             echo "  Output: $RUN_DIR"
             echo ""
             
             mkdir -p "$RUN_DIR"/{renders,lossmasks,model,eval}
-
-            cat > "$RUN_DIR/run_config.json" << JSONEOF
-{
-  "run_name": "$RUN_NAME",
-  "alpha": "$alpha",
-  "layers": "$layers",
-  "policy": "$policy",
-  "mwcs_schedule": "$MWCS_SCHEDULE",
-  "mwcs_step": "$MWCS_STEP",
-  "agentdojo_eval_split": "$AGENTDOJO_EVAL_SPLIT",
-  "full_render_audit": "$FULL_RENDER_AUDIT",
-  "eval_intermediate_checkpoints": "$EVAL_INTERMEDIATE_CHECKPOINTS",
-  "checkpoint_eval_steps": "$CHECKPOINT_EVAL_STEPS",
-  "checkpoint_eval_limit": "$CHECKPOINT_EVAL_LIMIT",
-  "loss_mode": "$LOSS_MODE",
-  "loss_weighting": "$LOSS_WEIGHTING",
-  "save_steps": "$SAVE_STEPS",
-  "triplet_beta_harmful": "$TRIPLET_BETA_HARMFUL",
-  "triplet_gamma_kl": "$TRIPLET_GAMMA_KL",
-  "triplet_margin_benign": "$TRIPLET_MARGIN_BENIGN",
-  "triplet_margin_harmful": "$TRIPLET_MARGIN_HARMFUL"
-}
-JSONEOF
             
             # =====================================================
             # Step 1: ETL_B with this policy
             # =====================================================
-            echo "Step 1: Creating lossmasks with policy=$policy mwcs=$MWCS_SCHEDULE"
+            echo "Step 1: Creating lossmasks with policy=$policy"
             
             etl_start=$(date +%s)
             TRACE_FILES=("$DS_TRACES" "$DR_TRACES" "$AGENTDOJO_TRACES")
-            TRACE_ARGS=()
-            RENDER_ARGS=()
-            LOSSMASK_ARGS=()
-            ETL_B_MWCS_ARGS=()
-            if [[ "$MWCS_SCHEDULE" != "none" && -n "$MWCS_SCHEDULE" ]]; then
-                if [[ -f "$MWCS_REGISTRY" ]]; then
-                    ETL_B_MWCS_ARGS+=(--mwcs-registry "$MWCS_REGISTRY")
-                else
-                    echo "  WARNING: MWCS registry not found at $MWCS_REGISTRY (continuing without registry)"
-                fi
-                ETL_B_MWCS_ARGS+=(--mwcs-schedule "$MWCS_SCHEDULE" --mwcs-step "$MWCS_STEP")
+            if [[ "$HAS_LLMAIL" == "true" ]]; then
+                TRACE_FILES+=("$LLMAIL_DS_TRACES" "$LLMAIL_DR_TRACES")
             fi
 
             for trace_file in "${TRACE_FILES[@]}"; do
                 basename=$(basename "$trace_file" .jsonl)
                 render_out="$RUN_DIR/renders/${basename}.jsonl"
                 lossmask_out="$RUN_DIR/lossmasks/${basename}.jsonl"
-                TRACE_ARGS+=(--trace-jsonl "$trace_file")
-                RENDER_ARGS+=(--render-jsonl "$render_out")
-                LOSSMASK_ARGS+=(--lossmask-jsonl "$lossmask_out")
+
+                # Apply LLMAIL_LIMIT to LLMail traces only
+                ETL_B_LIMIT_ARGS=()
+                if [[ -n "$LLMAIL_LIMIT" && "$basename" == llmail_inject_* ]]; then
+                    ETL_B_LIMIT_ARGS+=(--limit "$LLMAIL_LIMIT")
+                fi
 
                 echo "  Processing: $basename"
                 python src/schemas/tools/ETL_B.py \
@@ -387,9 +338,8 @@ JSONEOF
                     --lossmask-out "$lossmask_out" \
                     --tokenizer "$TOKENIZER" \
                     --max-length 4096 \
-                    --include-rendered-text \
                     --policy-override "$policy" \
-                    "${ETL_B_MWCS_ARGS[@]}" 2>&1 | tee -a "$RUN_DIR/etl_b.log"
+                    "${ETL_B_LIMIT_ARGS[@]}" 2>&1 | tee -a "$RUN_DIR/etl_b.log"
             done
             etl_end=$(date +%s)
             echo "  ETL_B completed in $((etl_end - etl_start))s"
@@ -410,17 +360,6 @@ print(total)
 " 2>/dev/null || echo "0")
                 echo "    $(basename "$lm"): $nonzero non-zero mask tokens (first 5 samples)"
             done
-            if [[ "$FULL_RENDER_AUDIT" == "true" ]]; then
-                echo "  Building self-contained full render audit..."
-                python "$REPO_DIR/scripts/export_full_renders.py" \
-                    "${TRACE_ARGS[@]}" \
-                    "${RENDER_ARGS[@]}" \
-                    "${LOSSMASK_ARGS[@]}" \
-                    --output "$RUN_DIR/full_renders.jsonl" \
-                    --summary "$RUN_DIR/full_renders_summary.txt" \
-                    2>&1 | tee -a "$RUN_DIR/etl_b.log"
-                echo "  Full render audit: $RUN_DIR/full_renders.jsonl"
-            fi
             echo ""
             
             # =====================================================
@@ -444,7 +383,7 @@ print(total)
             # =====================================================
             # Step 3: Training (same args as sweep_policies.sbatch)
             # =====================================================
-            echo "Step 3: Training with alpha=$alpha, layers=$layers, policy=$policy, mwcs=$MWCS_SCHEDULE"
+            echo "Step 3: Training with alpha=$alpha, layers=$layers, policy=$policy"
             
             # Parse layers to array
             IFS=',' read -ra CB_LAYER_ARRAY <<< "$layers"
@@ -466,6 +405,13 @@ print(total)
                 "$SPLIT_DIR/agentdojo_lossmasks_benign.jsonl"
             )
 
+            if [[ "$HAS_LLMAIL" == "true" ]]; then
+                HARMFUL_RENDER_ARGS+=("$RUN_DIR/renders/llmail_inject_ds.jsonl")
+                HARMFUL_LOSSMASK_ARGS+=("$RUN_DIR/lossmasks/llmail_inject_ds.jsonl")
+                BENIGN_RENDER_ARGS+=("$RUN_DIR/renders/llmail_inject_dr.jsonl")
+                BENIGN_LOSSMASK_ARGS+=("$RUN_DIR/lossmasks/llmail_inject_dr.jsonl")
+            fi
+            
             # Build training args (matching sweep_policies.sbatch exactly)
             TRAIN_ARGS=(
                 --preset "$PRESET"
@@ -495,7 +441,7 @@ print(total)
                 --lora-alpha "$LORA_ALPHA"
                 --lora-dropout 0.05
                 --logging-steps 10
-                --save-steps "$SAVE_STEPS"
+                --save-steps 50
                 --no-wandb
                 --cb-target-layers "${CB_LAYER_ARRAY[@]}"
                 --mode mixed
@@ -532,89 +478,6 @@ print(total)
                 fi
                 
                 if [[ -n "$ADAPTER_PATH" ]]; then
-                    case "$AGENTDOJO_EVAL_SPLIT" in
-                        complete)
-                            AGENTDOJO_EVAL_FILE="$AGENTDOJO_TRACES"
-                            ;;
-                        harmful)
-                            AGENTDOJO_EVAL_FILE="$SPLIT_DIR/agentdojo_traces_harmful.jsonl"
-                            ;;
-                        benign)
-                            AGENTDOJO_EVAL_FILE="$SPLIT_DIR/agentdojo_traces_benign.jsonl"
-                            ;;
-                        *)
-                            echo "  WARNING: Unknown AGENTDOJO_EVAL_SPLIT=$AGENTDOJO_EVAL_SPLIT (using complete)"
-                            AGENTDOJO_EVAL_FILE="$AGENTDOJO_TRACES"
-                            ;;
-                    esac
-
-                    # ---------------------------------------------------------
-                    # Evaluate selected intermediate checkpoints
-                    # ---------------------------------------------------------
-                    if [[ "$EVAL_INTERMEDIATE_CHECKPOINTS" == "true" ]]; then
-                        echo "  Evaluating intermediate checkpoints: $CHECKPOINT_EVAL_STEPS"
-                        IFS=',' read -ra CHECKPOINT_STEPS_ARRAY <<< "$CHECKPOINT_EVAL_STEPS"
-                        for ckpt_step_raw in "${CHECKPOINT_STEPS_ARRAY[@]}"; do
-                            ckpt_step="$(echo "$ckpt_step_raw" | xargs)"
-                            [[ -z "$ckpt_step" ]] && continue
-                            ckpt_dir="$RUN_DIR/model/checkpoint-$ckpt_step"
-                            if [[ ! -d "$ckpt_dir" ]]; then
-                                echo "    [checkpoint-$ckpt_step] missing (save-steps=$SAVE_STEPS), skipping"
-                                continue
-                            fi
-
-                            ckpt_eval_dir="$RUN_DIR/eval/checkpoints/checkpoint-$ckpt_step"
-                            mkdir -p "$ckpt_eval_dir"
-                            echo "    [checkpoint-$ckpt_step] Fujitsu eval ($CHECKPOINT_EVAL_LIMIT samples)"
-                            python src/evaluation/eval.py \
-                                --baseline "$TOKENIZER" \
-                                --cb-adapter "$ckpt_dir" \
-                                --eval-data "$DS_TRACES" \
-                                --tool-schema "$REPO_DIR/configs/tool_schemas/b4_standard_v1.json" \
-                                --output "$ckpt_eval_dir/fujitsu_eval.json" \
-                                --limit "$CHECKPOINT_EVAL_LIMIT" \
-                                --merge-adapter \
-                                --dtype "$DTYPE" 2>&1 | tee -a "$RUN_DIR/eval/checkpoints.log"
-
-                            if [[ -f "$AGENTDOJO_EVAL_FILE" ]]; then
-                                echo "    [checkpoint-$ckpt_step] AgentDojo eval ($AGENTDOJO_EVAL_SPLIT, $CHECKPOINT_EVAL_LIMIT samples)"
-                                python src/evaluation/eval.py \
-                                    --baseline "$TOKENIZER" \
-                                    --cb-adapter "$ckpt_dir" \
-                                    --eval-data "$AGENTDOJO_EVAL_FILE" \
-                                    --tool-schema "$REPO_DIR/configs/tool_schemas/b4_standard_v1.json" \
-                                    --output "$ckpt_eval_dir/agentdojo_eval.json" \
-                                    --use-sample-context \
-                                    --limit "$CHECKPOINT_EVAL_LIMIT" \
-                                    --merge-adapter \
-                                    --dtype "$DTYPE" 2>&1 | tee -a "$RUN_DIR/eval/checkpoints.log"
-                            fi
-
-                            # Print checkpoint unified metrics summary
-                            python3 -c "
-import json, os
-ckpt_dir = '$ckpt_eval_dir'
-for name in ['fujitsu_eval.json', 'agentdojo_eval.json']:
-    path = os.path.join(ckpt_dir, name)
-    if not os.path.isfile(path):
-        continue
-    with open(path) as f:
-        r = json.load(f)
-    utm = r.get('unified_tool_metrics', {})
-    mal = utm.get('malicious_tool_called_rate')
-    cor = utm.get('correct_tool_called_rate')
-    ds = utm.get('dataset_type', name.split('_')[0])
-    ntc = utm.get('no_tool_call_rate')
-    if mal is not None or cor is not None:
-        m_s = f'{mal:.1%}' if mal is not None else 'N/A'
-        c_s = f'{cor:.1%}' if cor is not None else 'N/A'
-        n_s = f' no_tool={ntc:.1%}' if ntc is not None else ''
-        print(f'    [checkpoint-$ckpt_step] {ds}: malicious={m_s} correct={c_s}{n_s}')
-" 2>/dev/null || true
-                        done
-                        echo ""
-                    fi
-
                     # ---------------------------------------------------------
                     # Evaluate on Fujitsu
                     # ---------------------------------------------------------
@@ -671,17 +534,69 @@ PYEOF
                         fi
                     fi
 
-                    # ---------------------------------------------------------
-                    # Evaluate on AgentDojo
-                    # ---------------------------------------------------------
-                    AGENTDOJO_OUTPUT="$RUN_DIR/eval/agentdojo_eval.json"
-                    echo "  Evaluating on AgentDojo ($AGENTDOJO_EVAL_SPLIT, $LIMIT_EVAL samples)..."
-                    
-                    if [[ -f "$AGENTDOJO_EVAL_FILE" ]]; then
+                    if [[ "$HAS_LLMAIL" == "true" ]]; then
+                        echo "  Evaluating on LLMail-Inject ($LIMIT_EVAL samples)..."
+                        LLMAIL_OUTPUT="$RUN_DIR/eval/llmail_eval.json"
                         python src/evaluation/eval.py \
                             --baseline "$TOKENIZER" \
                             --cb-adapter "$ADAPTER_PATH" \
-                            --eval-data "$AGENTDOJO_EVAL_FILE" \
+                            --eval-data "$LLMAIL_DS_TRACES" \
+                            --tool-schema "$LLMAIL_TOOL_SCHEMA" \
+                            --output "$LLMAIL_OUTPUT" \
+                            --limit "$LIMIT_EVAL" \
+                            --llmail-retrieved-only "$LLMAIL_RETRIEVED_ONLY" \
+                            --merge-adapter \
+                            --dtype "$DTYPE" 2>&1 | tee -a "$RUN_DIR/eval/llmail.log"
+
+                        # Print LLMail examples
+                        if [[ "$SHOW_EXAMPLES" == "true" ]]; then
+                            PAIRED_FILE="${LLMAIL_OUTPUT%.json}.paired_outputs.jsonl"
+                            if [[ -f "$PAIRED_FILE" ]]; then
+                                echo ""
+                                echo "    ========================================"
+                                echo "    LLMAIL EXAMPLES: $RUN_NAME"
+                                echo "    ========================================"
+                                python3 << PYEOF
+import json
+
+with open('$PAIRED_FILE', 'r') as f:
+    pairs = [json.loads(line) for line in f if line.strip()]
+
+if not pairs:
+    print('    No paired outputs')
+    exit(0)
+
+print(f'    Pairs: {len(pairs)}')
+print()
+
+for i, p in enumerate(pairs[:$NUM_EXAMPLES], 1):
+    b_out = p.get('baseline_outcome', '?')
+    c_out = p.get('cb_outcome', '?')
+    b_tool = p.get('baseline_observed_tool') or 'none'
+    c_tool = p.get('cb_observed_tool') or 'none'
+    label = 'IMP' if b_tool == 'send_email' and c_tool != 'send_email' else ('REG' if b_tool != 'send_email' and c_tool == 'send_email' else 'SAME')
+    print(f'    [{i}] {label}: baseline_tool={b_tool} -> cb_tool={c_tool}')
+    print(f'    --- BASELINE RESPONSE ---')
+    print(p.get('baseline_response') or '(empty)')
+    print(f'    --- CB MODEL RESPONSE ---')
+    print(p.get('cb_response') or '(empty)')
+    print()
+PYEOF
+                            fi
+                        fi
+                    fi
+                    
+                    # ---------------------------------------------------------
+                    # Evaluate on AgentDojo (harmful subset)
+                    # ---------------------------------------------------------
+                    echo "  Evaluating on AgentDojo ($LIMIT_EVAL samples)..."
+                    AGENTDOJO_OUTPUT="$RUN_DIR/eval/agentdojo_eval.json"
+                    
+                    if [[ -f "$SPLIT_DIR/agentdojo_traces_harmful.jsonl" ]]; then
+                        python src/evaluation/eval.py \
+                            --baseline "$TOKENIZER" \
+                            --cb-adapter "$ADAPTER_PATH" \
+                            --eval-data "$SPLIT_DIR/agentdojo_traces_harmful.jsonl" \
                             --tool-schema "$REPO_DIR/configs/tool_schemas/b4_standard_v1.json" \
                             --output "$AGENTDOJO_OUTPUT" \
                             --use-sample-context \
@@ -726,90 +641,9 @@ for i, p in enumerate(differ[:$NUM_EXAMPLES], 1):
 PYEOF
                             fi
                         fi
-                    else
-                        echo "  WARNING: AgentDojo eval file not found: $AGENTDOJO_EVAL_FILE"
                     fi
-
-                    # ---------------------------------------------------------
-                    # Verification: metrics/loss/context integrity checks
-                    # ---------------------------------------------------------
-                    verification_status="pass"
-                    if [[ "$VERIFY_PIPELINE" == "true" ]]; then
-                        echo "  Running verification checks..."
-                        VERIFY_CMD=(
-                            python scripts/verify_pipeline_run.py
-                            --tool-schema "$REPO_DIR/configs/tool_schemas/b4_standard_v1.json"
-                            --train-log "$RUN_DIR/train.log"
-                            --eval-json "$RUN_DIR/eval/fujitsu_eval.json"
-                            --report-json "$RUN_DIR/verification_report.json"
-                            --expected-steps "$TOTAL_STEPS"
-                        )
-                        if [[ -f "$RUN_DIR/model/training_manifest.json" ]]; then
-                            VERIFY_CMD+=(--training-manifest "$RUN_DIR/model/training_manifest.json")
-                        fi
-                        if [[ -f "$RUN_DIR/eval/agentdojo_eval.json" ]]; then
-                            VERIFY_CMD+=(--eval-json "$RUN_DIR/eval/agentdojo_eval.json")
-                        fi
-                        if [[ -f "$DS_TRACES" ]]; then
-                            VERIFY_CMD+=(--trace-jsonl "$DS_TRACES")
-                        fi
-                        if [[ -n "${AGENTDOJO_EVAL_FILE:-}" && -f "$AGENTDOJO_EVAL_FILE" ]]; then
-                            VERIFY_CMD+=(--trace-jsonl "$AGENTDOJO_EVAL_FILE")
-                        fi
-                        if [[ -f "$RUN_DIR/lossmasks/fujitsu_b4_ds.jsonl" ]]; then
-                            VERIFY_CMD+=(--lossmask-jsonl "$RUN_DIR/lossmasks/fujitsu_b4_ds.jsonl")
-                        fi
-                        if [[ -f "$RUN_DIR/lossmasks/fujitsu_b4_dr.jsonl" ]]; then
-                            VERIFY_CMD+=(--lossmask-jsonl "$RUN_DIR/lossmasks/fujitsu_b4_dr.jsonl")
-                        fi
-                        if [[ -f "$SPLIT_DIR/agentdojo_lossmasks_harmful.jsonl" ]]; then
-                            VERIFY_CMD+=(--lossmask-jsonl "$SPLIT_DIR/agentdojo_lossmasks_harmful.jsonl")
-                        fi
-                        if [[ -f "$SPLIT_DIR/agentdojo_lossmasks_benign.jsonl" ]]; then
-                            VERIFY_CMD+=(--lossmask-jsonl "$SPLIT_DIR/agentdojo_lossmasks_benign.jsonl")
-                        fi
-                        if [[ "$VERIFY_FAIL_ON_ERROR" == "true" ]]; then
-                            VERIFY_CMD+=(--fail-on-error)
-                        fi
-
-                        if "${VERIFY_CMD[@]}" 2>&1 | tee -a "$RUN_DIR/verify.log"; then
-                            verification_status="pass"
-                            if [[ -f "$RUN_DIR/verification_report.json" ]]; then
-                                verification_status=$(python3 -c "
-import json
-with open('$RUN_DIR/verification_report.json') as f:
-    r = json.load(f)
-print('pass' if r.get('summary', {}).get('passed') else 'fail')
-" 2>/dev/null || echo "unknown")
-                            fi
-                        else
-                            verification_status="fail"
-                            echo "  WARNING: verification failed for $RUN_NAME"
-                        fi
-
-                        if [[ -f "$RUN_DIR/verification_report.json" ]]; then
-                            python3 -c "
-import json
-with open('$RUN_DIR/verification_report.json') as f:
-    r = json.load(f)
-s = r.get('summary', {})
-print(f\"  Verification Summary: errors={s.get('errors')} warnings={s.get('warnings')} passed={s.get('passed')}\")
-" 2>/dev/null || true
-                        fi
-                    fi
-
-                    if [[ -f "$RUN_DIR/full_renders_summary.txt" ]]; then
-                        echo "  Full Render Audit Summary:"
-                        sed -n '1,20p' "$RUN_DIR/full_renders_summary.txt" | sed 's/^/    /'
-                    fi
-
-                    if [[ "$verification_status" == "fail" ]]; then
-                        fail_count=$((fail_count + 1))
-                    else
-                        success_count=$((success_count + 1))
-                    fi
-                else
-                    fail_count=$((fail_count + 1))
+                    
+                    success_count=$((success_count + 1))
                 fi
             else
                 fail_count=$((fail_count + 1))
@@ -821,8 +655,6 @@ print(f\"  Verification Summary: errors={s.get('errors')} warnings={s.get('warni
             echo ""
             echo "--- Run Summary: $RUN_NAME ---"
             echo "  Training: $train_status"
-            echo "  Verification: $verification_status"
-            echo "  AgentDojo Eval Split: $AGENTDOJO_EVAL_SPLIT"
             if [[ -f "$RUN_DIR/eval/fujitsu_eval.json" ]]; then
                 python3 -c "
 import json
@@ -833,21 +665,10 @@ if 'baseline' in r:
     print(f'  Fujitsu Baseline ASR: {baseline_asr:.1%}')
 if 'cb_model' in r:
     asr = r['cb_model']['tool_flip_asr']['attack_success_rate']
-    correct = r['cb_model']['tool_flip_asr'].get('correct_behavior_rate', 0)
-    no_tool = r['cb_model']['tool_flip_asr'].get('no_tool_call_rate', 0)
     print(f'  Fujitsu CB ASR:       {asr:.1%}')
-    print(f'  Fujitsu Correct Rate: {correct:.1%}')
-    print(f'  Fujitsu No-Tool Rate: {no_tool:.1%}')
 if 'delta' in r:
     delta = r['delta']['tool_flip_asr']
     print(f'  Fujitsu Delta:        {delta:+.1%}')
-utm = r.get('unified_tool_metrics', {})
-mal = utm.get('malicious_tool_called_rate')
-cor = utm.get('correct_tool_called_rate')
-ntc = utm.get('no_tool_call_rate')
-if mal is not None or cor is not None:
-    ntc_s = f' NoTool={ntc:.1%}' if ntc is not None else ''
-    print(f'  --- Unified: Malicious={mal:.1%}(lower=better) Correct={cor:.1%}(higher=better){ntc_s}')
 " 2>/dev/null || echo "  Fujitsu: (parse error)"
             fi
             if [[ -f "$RUN_DIR/eval/agentdojo_eval.json" ]]; then
@@ -858,29 +679,26 @@ with open('$RUN_DIR/eval/agentdojo_eval.json') as f:
 if 'output_comparison' in r:
     diff = r['output_comparison'].get('difference_rate', -1)
     print(f'  AgentDojo Diff Rate:  {diff:.1%}')
-gen_b = r.get('baseline', {}).get('generation_comparison', {})
-gen_c = r.get('cb_model', {}).get('generation_comparison', {})
-if gen_b or gen_c:
-    b_tcr = gen_b.get('tool_call_rate')
-    c_tcr = gen_c.get('tool_call_rate')
-    hrr = gen_c.get('harmful_resistance_rate')
-    bmr = gen_c.get('benign_tool_match_rate')
-    if b_tcr is not None:
-        print(f'  AgentDojo Tool-Call Rate (baseline): {b_tcr:.1%}')
-    if c_tcr is not None:
-        print(f'  AgentDojo Tool-Call Rate (CB):       {c_tcr:.1%}')
-    if hrr is not None:
-        print(f'  AgentDojo Harmful Resist:            {hrr:.1%}')
-    if bmr is not None:
-        print(f'  AgentDojo Benign Tool Match:         {bmr:.1%}')
-utm = r.get('unified_tool_metrics', {})
-mal = utm.get('malicious_tool_called_rate')
-cor = utm.get('correct_tool_called_rate')
-ntc = utm.get('no_tool_call_rate')
-if mal is not None or cor is not None:
-    ntc_s = f' NoTool={ntc:.1%}' if ntc is not None else ''
-    print(f'  --- Unified: Malicious={mal:.1%}(lower=better) Correct={cor:.1%}(higher=better){ntc_s}')
 " 2>/dev/null || echo "  AgentDojo: (parse error)"
+            fi
+            if [[ -f "$RUN_DIR/eval/llmail_eval.json" ]]; then
+                python3 -c "
+import json
+with open('$RUN_DIR/eval/llmail_eval.json') as f:
+    r = json.load(f)
+for key in ['baseline', 'cb_model']:
+    if key in r and 'llmail_attack' in r[key]:
+        la = r[key]['llmail_attack']
+        label = 'Baseline' if key == 'baseline' else 'CB'
+        print(f'  LLMail {label} ASR:    {la[\"attack_success_rate\"]:.1%}  (refusal: {la[\"refusal_rate\"]:.1%})')
+    if key in r and 'llmail_usefulness' in r[key]:
+        lu = r[key]['llmail_usefulness']
+        label = 'Baseline' if key == 'baseline' else 'CB'
+        print(f'  LLMail {label} Useful: {lu[\"usefulness_rate\"]:.1%}')
+if 'delta' in r:
+    if 'llmail_attack_asr' in r['delta']:
+        print(f'  LLMail Delta ASR:     {r[\"delta\"][\"llmail_attack_asr\"]:+.1%}')
+" 2>/dev/null || echo "  LLMail: (parse error)"
             fi
             echo ""
             
@@ -905,101 +723,78 @@ echo ""
 
 # Generate summary CSV
 SUMMARY_CSV="$SWEEP_DIR/summary.csv"
-echo "alpha,layers,policy,mwcs_schedule,mwcs_step,agentdojo_eval_split,fujitsu_baseline_asr,fujitsu_cb_asr,fujitsu_correct_rate,fujitsu_no_tool_rate,fujitsu_delta,agentdojo_diff,agentdojo_benign_match,agentdojo_harmful_resist,agentdojo_baseline_tool_call_rate,agentdojo_cb_tool_call_rate,fujitsu_malicious,fujitsu_correct,agentdojo_malicious,agentdojo_correct,status,verification_status" > "$SUMMARY_CSV"
+echo "alpha,layers,policy,fujitsu_baseline_asr,fujitsu_cb_asr,fujitsu_delta,agentdojo_diff,agentdojo_benign_match,agentdojo_harmful_resist,llmail_baseline_asr,llmail_cb_asr,llmail_delta,llmail_usefulness,llmail_capability,llmail_target_acc,llmail_json_parse_fail,tools_broken,status" > "$SUMMARY_CSV"
 
 for run_dir in "$SWEEP_DIR"/a*; do
     if [[ -d "$run_dir" ]]; then
         run_name=$(basename "$run_dir")
 
-        # Prefer structured config metadata; fallback to legacy run-name parsing.
-        if [[ -f "$run_dir/run_config.json" ]]; then
-            read alpha layers policy mwcs_schedule mwcs_step agentdojo_eval_split < <(python3 -c "
-import json
-with open('$run_dir/run_config.json') as f:
-    cfg = json.load(f)
-print(
-    cfg.get('alpha', ''),
-    cfg.get('layers', ''),
-    cfg.get('policy', ''),
-    cfg.get('mwcs_schedule', 'none'),
-    cfg.get('mwcs_step', '0'),
-    cfg.get('agentdojo_eval_split', 'complete'),
-)
-" 2>/dev/null || echo "N/A N/A N/A none 0 complete")
-        else
-            alpha=$(echo "$run_name" | sed -n 's/^a\([0-9.]*\)_.*/\1/p')
-            layers=$(echo "$run_name" | sed -n 's/.*_l\([0-9_]*\)_.*/\1/p' | tr '_' ',')
-            policy=$(echo "$run_name" | sed -n 's/.*_l[0-9_]*_\(.*\)/\1/p')
-            mwcs_schedule="none"
-            mwcs_step="0"
-            agentdojo_eval_split="harmful"
-        fi
+        # Parse run name to extract params
+        # Format: a${alpha}_l${layers}_${policy}
+        alpha=$(echo "$run_name" | sed -n 's/^a\([0-9.]*\)_.*/\1/p')
+        layers=$(echo "$run_name" | sed -n 's/.*_l\([0-9_]*\)_.*/\1/p' | tr '_' ',')
+        policy=$(echo "$run_name" | sed -n 's/.*_l[0-9_]*_\(.*\)/\1/p')
 
         # Get metrics
         fujitsu_baseline="N/A"
         fujitsu_cb="N/A"
-        fujitsu_correct_rate="N/A"
-        fujitsu_no_tool_rate="N/A"
         fujitsu_delta="N/A"
         agentdojo_diff="N/A"
         agentdojo_benign_match="N/A"
         agentdojo_harmful_resist="N/A"
-        agentdojo_baseline_tool_call_rate="N/A"
-        agentdojo_cb_tool_call_rate="N/A"
-        fujitsu_malicious="N/A"
-        fujitsu_correct="N/A"
-        agentdojo_malicious="N/A"
-        agentdojo_correct="N/A"
+        llmail_baseline="N/A"
+        llmail_cb="N/A"
+        llmail_delta="N/A"
+        llmail_useful="N/A"
+        llmail_capability="N/A"
+        llmail_target_acc="N/A"
+        llmail_json_parse_fail="N/A"
+        tools_broken="N/A"
         status="unknown"
-        verification_status_csv="N/A"
 
         if [[ -f "$run_dir/eval/fujitsu_eval.json" ]]; then
-            read fujitsu_baseline fujitsu_cb fujitsu_correct_rate fujitsu_no_tool_rate fujitsu_delta fujitsu_malicious fujitsu_correct < <(python3 -c "
+            read fujitsu_baseline fujitsu_cb fujitsu_delta < <(python3 -c "
 import json
 with open('$run_dir/eval/fujitsu_eval.json') as f:
     r = json.load(f)
 baseline = r.get('baseline', {}).get('tool_flip_asr', {}).get('attack_success_rate', 'N/A')
 cb = r.get('cb_model', {}).get('tool_flip_asr', {}).get('attack_success_rate', 'N/A')
-correct = r.get('cb_model', {}).get('tool_flip_asr', {}).get('correct_behavior_rate', 'N/A')
-no_tool = r.get('cb_model', {}).get('tool_flip_asr', {}).get('no_tool_call_rate', 'N/A')
 delta = r.get('delta', {}).get('tool_flip_asr', 'N/A')
-utm = r.get('unified_tool_metrics', {})
-mal = utm.get('malicious_tool_called_rate', 'N/A')
-cor = utm.get('correct_tool_called_rate', 'N/A')
-print(baseline, cb, correct, no_tool, delta, mal, cor)
-" 2>/dev/null || echo "N/A N/A N/A N/A N/A N/A N/A")
+print(baseline, cb, delta)
+" 2>/dev/null || echo "N/A N/A N/A")
             status="success"
         fi
 
         if [[ -f "$run_dir/eval/agentdojo_eval.json" ]]; then
-            read agentdojo_diff agentdojo_benign_match agentdojo_harmful_resist agentdojo_baseline_tool_call_rate agentdojo_cb_tool_call_rate agentdojo_malicious agentdojo_correct < <(python3 -c "
+            read agentdojo_diff agentdojo_benign_match agentdojo_harmful_resist < <(python3 -c "
 import json
 with open('$run_dir/eval/agentdojo_eval.json') as f:
     r = json.load(f)
 diff = r.get('output_comparison', {}).get('difference_rate', 'N/A')
 bmr = r.get('cb_model', {}).get('generation_comparison', {}).get('benign_tool_match_rate', 'N/A')
 hrr = r.get('cb_model', {}).get('generation_comparison', {}).get('harmful_resistance_rate', 'N/A')
-btcr = r.get('baseline', {}).get('generation_comparison', {}).get('tool_call_rate', 'N/A')
-ctcr = r.get('cb_model', {}).get('generation_comparison', {}).get('tool_call_rate', 'N/A')
-utm = r.get('unified_tool_metrics', {})
-mal = utm.get('malicious_tool_called_rate', 'N/A')
-cor = utm.get('correct_tool_called_rate', 'N/A')
-print(diff, bmr, hrr, btcr, ctcr, mal, cor)
-" 2>/dev/null || echo "N/A N/A N/A N/A N/A N/A N/A")
+print(diff, bmr, hrr)
+" 2>/dev/null || echo "N/A N/A N/A")
         fi
 
-        if [[ -f "$run_dir/verification_report.json" ]]; then
-            verification_status_csv=$(python3 -c "
+        if [[ -f "$run_dir/eval/llmail_eval.json" ]]; then
+            read llmail_baseline llmail_cb llmail_delta llmail_useful llmail_capability llmail_target_acc llmail_json_parse_fail tools_broken < <(python3 -c "
 import json
-with open('$run_dir/verification_report.json') as f:
+with open('$run_dir/eval/llmail_eval.json') as f:
     r = json.load(f)
-print('pass' if r.get('summary', {}).get('passed') else 'fail')
-" 2>/dev/null || echo "unknown")
-        elif [[ -f "$run_dir/verify.log" ]]; then
-            verification_status_csv="unknown"
+bl = r.get('baseline', {}).get('llmail_attack', {}).get('attack_success_rate', 'N/A')
+cb = r.get('cb_model', {}).get('llmail_attack', {}).get('attack_success_rate', 'N/A')
+d = r.get('delta', {}).get('llmail_attack_asr', 'N/A')
+u = r.get('cb_model', {}).get('llmail_usefulness', {}).get('usefulness_rate', 'N/A')
+cap = r.get('cb_model', {}).get('llmail_capability', {}).get('capability_retention', 'N/A')
+ta = r.get('cb_model', {}).get('llmail_attack', {}).get('target_accuracy_rate', 'N/A')
+jpf = r.get('diagnostics', {}).get('llmail_json_parse_failure_rate', 'N/A')
+tb = r.get('diagnostics', {}).get('tools_broken', 'N/A')
+print(bl, cb, d, u, cap, ta, jpf, tb)
+" 2>/dev/null || echo "N/A N/A N/A N/A N/A N/A N/A N/A")
         fi
 
-        echo "$alpha,$layers,$policy,$mwcs_schedule,$mwcs_step,$agentdojo_eval_split,$fujitsu_baseline,$fujitsu_cb,$fujitsu_correct_rate,$fujitsu_no_tool_rate,$fujitsu_delta,$agentdojo_diff,$agentdojo_benign_match,$agentdojo_harmful_resist,$agentdojo_baseline_tool_call_rate,$agentdojo_cb_tool_call_rate,$fujitsu_malicious,$fujitsu_correct,$agentdojo_malicious,$agentdojo_correct,$status,$verification_status_csv" >> "$SUMMARY_CSV"
+        echo "$alpha,$layers,$policy,$fujitsu_baseline,$fujitsu_cb,$fujitsu_delta,$agentdojo_diff,$agentdojo_benign_match,$agentdojo_harmful_resist,$llmail_baseline,$llmail_cb,$llmail_delta,$llmail_useful,$llmail_capability,$llmail_target_acc,$llmail_json_parse_fail,$tools_broken,$status" >> "$SUMMARY_CSV"
     fi
 done
 
@@ -1037,26 +832,33 @@ try:
         print(f'  Alpha: {best[1][\"alpha\"]}')
         print(f'  Layers: {best[1][\"layers\"]}')
         print(f'  Policy: {best[1][\"policy\"]}')
-        print(f'  MWCS: {best[1].get(\"mwcs_schedule\", \"none\")} (step={best[1].get(\"mwcs_step\", \"0\")})')
-        print(f'  AgentDojo Eval Split: {best[1].get(\"agentdojo_eval_split\", \"N/A\")}')
         print(f'  Baseline ASR: {best[1][\"fujitsu_baseline_asr\"]}')
         print(f'  Delta: {best[1][\"fujitsu_delta\"]}')
         print(f'  AgentDojo Diff: {best[1][\"agentdojo_diff\"]}')
         bmr = best[1].get('agentdojo_benign_match', 'N/A')
         hrr = best[1].get('agentdojo_harmful_resist', 'N/A')
-        btcr = best[1].get('agentdojo_baseline_tool_call_rate', 'N/A')
-        ctcr = best[1].get('agentdojo_cb_tool_call_rate', 'N/A')
         if bmr != 'N/A':
             print(f'  AgentDojo Benign Match: {bmr}')
         if hrr != 'N/A':
             print(f'  AgentDojo Harmful Resist: {hrr}')
-        if btcr != 'N/A':
-            print(f'  AgentDojo Tool-Call Rate (baseline): {btcr}')
-        if ctcr != 'N/A':
-            print(f'  AgentDojo Tool-Call Rate (CB): {ctcr}')
-        vstat = best[1].get('verification_status', 'N/A')
-        if vstat != 'N/A':
-            print(f'  Verification: {vstat}')
+        llmail_cb = best[1].get('llmail_cb_asr', 'N/A')
+        llmail_useful = best[1].get('llmail_usefulness', 'N/A')
+        llmail_cap = best[1].get('llmail_capability', 'N/A')
+        tb = best[1].get('tools_broken', 'N/A')
+        if llmail_cb != 'N/A':
+            print(f'  LLMail CB ASR: {llmail_cb}')
+        if llmail_useful != 'N/A':
+            print(f'  LLMail Usefulness: {llmail_useful}')
+        if llmail_cap != 'N/A':
+            print(f'  LLMail Capability: {llmail_cap}')
+        llmail_ta = best[1].get('llmail_target_acc', 'N/A')
+        llmail_jpf = best[1].get('llmail_json_parse_fail', 'N/A')
+        if llmail_ta != 'N/A':
+            print(f'  LLMail Target Accuracy: {llmail_ta}')
+        if llmail_jpf != 'N/A' and llmail_jpf != '0' and llmail_jpf != '0.0':
+            print(f'  LLMail JSON Parse Fail: {llmail_jpf}')
+        if tb != 'N/A':
+            print(f'  Tools Broken: {tb}')
 except Exception as e:
     print(f'Could not analyze results: {e}')
 " 2>/dev/null || echo "(analysis failed)"
@@ -1067,23 +869,6 @@ except Exception as e:
 echo ""
 echo "Generating tradeoff visualizations..."
 python "$REPO_DIR/scripts/plot_tradeoff.py" --sweep-dir "$SWEEP_DIR" --output "$SWEEP_DIR/plots" 2>&1 || echo "(plot generation skipped - install matplotlib for plots)"
-
-# =============================================================================
-# Full Trace Visualization (per-sample details)
-# =============================================================================
-echo ""
-echo "Generating full trace visualization..."
-python "$REPO_DIR/scripts/visualize_sweep_results.py" "$SWEEP_DIR" \
-    --traces-dir "$TRACES_DIR" \
-    --no-color \
-    --show-samples "$NUM_EXAMPLES" \
-    --show-full \
-    --csv "$SWEEP_DIR/eval_summary.csv" \
-    2>&1 | tee "$SWEEP_DIR/visualization.txt"
-
-echo ""
-echo "Visualization:  $SWEEP_DIR/visualization.txt"
-echo "Summary CSV:    $SWEEP_DIR/eval_summary.csv"
 
 echo ""
 echo "Finished at: $(date)"
