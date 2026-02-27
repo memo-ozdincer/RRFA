@@ -1348,6 +1348,7 @@ Examples:
     )
     parser.add_argument(
         "sweep_dir",
+        nargs="?",
         type=Path,
         help="Path to sweep output directory (e.g., /scratch/.../sweeps/hparam_sweep_YYYYMMDD_HHMMSS)"
     )
@@ -1447,9 +1448,17 @@ Examples:
     )
     
     args = parser.parse_args()
-    
+
+    # Allow sweep dir to be passed as --traces-dir if the positional was omitted
+    if args.sweep_dir is None:
+        if args.traces_dir is not None:
+            args.sweep_dir = args.traces_dir
+            args.traces_dir = None
+        else:
+            parser.error("sweep_dir is required")
+
     use_color = not args.no_color
-    
+
     # Check sweep directory exists
     if not args.sweep_dir.exists():
         print(f"Error: Sweep directory not found: {args.sweep_dir}")
