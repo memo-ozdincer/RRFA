@@ -57,7 +57,7 @@ fi
 export TOTAL_STEPS="${TOTAL_STEPS:-200}"
 export ALPHAS="${ALPHAS:-5.0,10.0,15.0}"
 export LAYER_CONFIGS="${LAYER_CONFIGS:-10,20}"
-export POLICIES="${POLICIES:-cb_full_sequence}"
+export POLICIES="${POLICIES:-cb_full_sequence,assistant_only}"
 export LIMIT_EVAL="${LIMIT_EVAL:-100}"
 export LIMIT_GEN="${LIMIT_GEN:-5000}"
 export NUM_EXAMPLES="${NUM_EXAMPLES:-50}"
