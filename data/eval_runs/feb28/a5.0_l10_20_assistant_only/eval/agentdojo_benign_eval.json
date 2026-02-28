@@ -1,0 +1,15 @@
+{
+  "cb_model": {
+    "generation_comparison": {
+      "correct_tool_call_rate": 0.899,
+      "no_tool_call_rate": 0.101,
+      "n_samples": 99
+    }
+  },
+  "baseline": {
+    "generation_comparison": {
+      "correct_tool_call_rate": 1.0,
+      "n_samples": 99
+    }
+  }
+}

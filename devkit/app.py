@@ -172,14 +172,10 @@ def render_message_html(msg: Dict, msg_idx: int, injection_span: Optional[Dict] 
     else:
         content_html = html_lib.escape(content)
 
-    # Truncate for display (keep full in expandable)
     display_content = content_html
-    if len(content) > 500:
-        display_content = content_html[:500] + "..."
 
     tool_badge = ""
     if msg.get("tool_calls"):
-        tc_count = len(msg["tool_calls"])
         tc_names = [tc.get("function", {}).get("name", "?") for tc in msg["tool_calls"]]
         tool_badge = f' <span style="background:#ffc107;color:#000;padding:1px 6px;border-radius:10px;font-size:0.8em">tool_calls: {", ".join(tc_names)}</span>'
 
@@ -187,16 +183,14 @@ def render_message_html(msg: Dict, msg_idx: int, injection_span: Optional[Dict] 
     if msg.get("name"):
         name_badge = f' <span style="background:#17a2b8;color:white;padding:1px 6px;border-radius:10px;font-size:0.8em">{html_lib.escape(msg["name"])}</span>'
 
-    return f"""
-    <div style="border-left:4px solid {color};background:{bg};padding:8px 12px;margin:4px 0;border-radius:0 6px 6px 0;">
-        <div style="font-weight:bold;color:{color};margin-bottom:4px;">
-            [{msg_idx}] {role.upper()}{tool_badge}{name_badge}
-        </div>
-        <div style="white-space:pre-wrap;font-family:monospace;font-size:0.85em;line-height:1.4;">
-            {display_content}
-        </div>
-    </div>
-    """
+    return (
+        f'<div style="border-left:4px solid {color};background:{bg};padding:8px 12px;'
+        f'margin:4px 0;border-radius:0 6px 6px 0;">'
+        f'<div style="font-weight:bold;color:{color};margin-bottom:4px;">'
+        f'[{msg_idx}] {role.upper()}{tool_badge}{name_badge}</div>'
+        f'<div style="white-space:pre-wrap;font-family:monospace;font-size:0.85em;'
+        f'line-height:1.4;color:#1a1a1a;">{display_content}</div></div>'
+    )
 
 
 def render_lossmask_heatmap_html(
@@ -568,7 +562,7 @@ def page_trace_explorer():
     messages_html = []
     for i, msg in enumerate(t.get("messages", [])):
         messages_html.append(render_message_html(msg, i, injection_span))
-    st.markdown("".join(messages_html), unsafe_allow_html=True)
+    st.html("".join(messages_html))
 
     # Tool calls detail
     for i, msg in enumerate(t.get("messages", [])):
@@ -1027,7 +1021,7 @@ def convert_my_dataset_record(
                     if msg.tool_calls:
                         msg_dict["tool_calls"] = [{"function": {"name": tc.function.name}} for tc in msg.tool_calls]
                     msgs_html.append(render_message_html(msg_dict, i, injection_span))
-                st.markdown("".join(msgs_html), unsafe_allow_html=True)
+                st.html("".join(msgs_html))
 
                 # Schema validation
                 st.subheader("Schema Validation")
@@ -1586,7 +1580,8 @@ def page_augmentation_analysis():
             "Provenance": injection_provs,
         })
         bins = pd.cut(len_df["Length (chars)"], bins=15)
-        st.bar_chart(bins.value_counts().sort_index().rename("Count"))
+        bin_counts = bins.value_counts().sort_index()
+        st.bar_chart(pd.DataFrame({"Count": bin_counts.values}, index=[str(b) for b in bin_counts.index]))
 
         # Position distribution
         st.markdown("**Injection Position in Tool Message** (0=start, 1=end)")
@@ -1595,7 +1590,8 @@ def page_augmentation_analysis():
             "Provenance": injection_provs,
         })
         pos_bins = pd.cut(pos_df["Relative Position"], bins=10)
-        st.bar_chart(pos_bins.value_counts().sort_index().rename("Count"))
+        pos_counts = pos_bins.value_counts().sort_index()
+        st.bar_chart(pd.DataFrame({"Count": pos_counts.values}, index=[str(b) for b in pos_counts.index]))
     else:
         st.info("No injection patterns detected.")
 
@@ -1635,7 +1631,7 @@ def page_augmentation_analysis():
                     st.markdown(f"`{parent.get('id', '?')[:40]}...` | Category: `{trace_category(parent)}`")
                     inj_span = (parent.get("signal_hints") or {}).get("injection_char_span")
                     for i, msg in enumerate(parent.get("messages", [])):
-                        st.markdown(render_message_html(msg, i, inj_span), unsafe_allow_html=True)
+                        st.html(render_message_html(msg, i, inj_span))
                 else:
                     st.warning("Parent trace not found in current file.")
 
@@ -1644,7 +1640,7 @@ def page_augmentation_analysis():
                 st.markdown(f"`{derived.get('id', '?')[:40]}...` | Category: `{trace_category(derived)}`")
                 inj_span = (derived.get("signal_hints") or {}).get("injection_char_span")
                 for i, msg in enumerate(derived.get("messages", [])):
-                    st.markdown(render_message_html(msg, i, inj_span), unsafe_allow_html=True)
+                    st.html(render_message_html(msg, i, inj_span))
 
             # Show diff summary
             if parent:
@@ -1751,6 +1747,249 @@ def page_augmentation_analysis():
         balance_data = Counter(trace_category(t) for t in traces)
         bal_df = pd.DataFrame({"Count": dict(balance_data)})
         st.dataframe(bal_df.T, use_container_width=True)
+
+    # ── Section G: Baseline vs CB Model Comparison ────────────────────
+    st.subheader("Baseline vs CB Model Comparison")
+    st.markdown(
+        "Upload paired output JSONL files from eval runs to compare baseline vs CB model behavior. "
+        "Generate these by running eval with `--baseline` and `--cb-model` flags."
+    )
+
+    uploaded = st.file_uploader(
+        "Upload paired_outputs.jsonl (from eval.py)", type=["jsonl"],
+        key="paired_upload", accept_multiple_files=True,
+    )
+
+    if uploaded:
+        for uf in uploaded:
+            st.markdown(f"---\n**File: `{uf.name}`**")
+            pairs = [json.loads(line) for line in uf.read().decode().strip().split("\n") if line.strip()]
+
+            if not pairs:
+                st.warning("No paired outputs found.")
+                continue
+
+            # Detect dataset type from first pair
+            first = pairs[0]
+            has_expected_tool = "expected_tool" in first
+            source_ds = first.get("source_dataset", "")
+
+            # Overall metrics
+            total = len(pairs)
+            gib_count = sum(1 for p in pairs if _is_gibberish(p.get("cb_response", "")))
+            baseline_outcomes = Counter(p.get("baseline_outcome", "unknown") for p in pairs)
+            cb_outcomes = Counter(p.get("cb_outcome", "unknown") for p in pairs)
+
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Total Pairs", total)
+            m2.metric("CB Gibberish", f"{gib_count} ({100*gib_count/max(total,1):.0f}%)")
+
+            if has_expected_tool:
+                # Tool-flip style comparison
+                baseline_correct = sum(1 for p in pairs if p.get("baseline_outcome") == "correct_behavior")
+                cb_correct = sum(1 for p in pairs if p.get("cb_outcome") == "correct_behavior")
+                baseline_attack = sum(1 for p in pairs if p.get("baseline_outcome") == "attack_success")
+                cb_attack = sum(1 for p in pairs if p.get("cb_outcome") == "attack_success")
+
+                m3.metric("CB Correct Tool", f"{cb_correct}/{total}", delta=f"{cb_correct - baseline_correct:+d} vs baseline")
+                m4.metric("CB Attack Success", f"{cb_attack}/{total}", delta=f"{cb_attack - baseline_attack:+d} vs baseline", delta_color="inverse")
+
+                # Outcome comparison table
+                st.markdown("**Outcome Comparison**")
+                all_outcomes = sorted(set(list(baseline_outcomes.keys()) + list(cb_outcomes.keys())))
+                outcome_rows = []
+                for o in all_outcomes:
+                    outcome_rows.append({
+                        "Outcome": o,
+                        "Baseline": baseline_outcomes.get(o, 0),
+                        "CB Model": cb_outcomes.get(o, 0),
+                        "Delta": cb_outcomes.get(o, 0) - baseline_outcomes.get(o, 0),
+                    })
+                st.dataframe(pd.DataFrame(outcome_rows), hide_index=True, use_container_width=True)
+
+            else:
+                # Generation comparison style
+                baseline_has_tool = sum(1 for p in pairs if p.get("baseline_observed_tool"))
+                cb_has_tool = sum(1 for p in pairs if p.get("cb_observed_tool"))
+                m3.metric("Baseline Tool Calls", baseline_has_tool)
+                m4.metric("CB Tool Calls", cb_has_tool)
+
+            # Stacked bar chart: baseline vs CB outcomes
+            st.markdown("**Outcome Distribution**")
+            outcome_df = pd.DataFrame({
+                "Baseline": dict(baseline_outcomes),
+                "CB Model": dict(cb_outcomes),
+            }).fillna(0).astype(int)
+            st.bar_chart(outcome_df)
+
+            # Sample browser
+            st.markdown("**Sample Browser**")
+            outcome_filter = st.selectbox(
+                "Filter by CB outcome",
+                ["all"] + sorted(cb_outcomes.keys()),
+                key=f"outcome_filter_{uf.name}",
+            )
+            filtered_pairs = pairs if outcome_filter == "all" else [
+                p for p in pairs if p.get("cb_outcome") == outcome_filter
+            ]
+
+            if filtered_pairs:
+                sample_idx = st.number_input(
+                    "Sample", 0, len(filtered_pairs) - 1, 0,
+                    key=f"sample_idx_{uf.name}",
+                )
+                p = filtered_pairs[sample_idx]
+
+                left, right = st.columns(2)
+                with left:
+                    st.markdown("**Baseline Response**")
+                    st.markdown(f"Outcome: `{p.get('baseline_outcome', '?')}`")
+                    st.markdown(f"Tool: `{p.get('baseline_observed_tool', 'none')}`")
+                    st.text_area(
+                        "Response", p.get("baseline_response", ""),
+                        height=200, key=f"bl_resp_{uf.name}_{sample_idx}",
+                        disabled=True,
+                    )
+                with right:
+                    st.markdown("**CB Model Response**")
+                    st.markdown(f"Outcome: `{p.get('cb_outcome', '?')}`")
+                    st.markdown(f"Tool: `{p.get('cb_observed_tool', 'none')}`")
+                    is_gib = _is_gibberish(p.get("cb_response", ""))
+                    if is_gib:
+                        st.error("GIBBERISH DETECTED")
+                    st.text_area(
+                        "Response", p.get("cb_response", ""),
+                        height=200, key=f"cb_resp_{uf.name}_{sample_idx}",
+                        disabled=True,
+                    )
+    else:
+        st.markdown(
+            "**How to generate paired outputs:**\n"
+            "```bash\n"
+            "python src/evaluation/eval.py \\\n"
+            "    --baseline meta-llama/Llama-3.1-8B-Instruct \\\n"
+            "    --cb-model outputs/your_run/final \\\n"
+            "    --eval-data data/traces/agentdojo_augmented.jsonl \\\n"
+            "    --output eval_results.json \\\n"
+            "    --limit 50\n"
+            "```\n"
+            "This produces `eval_results.paired_outputs.jsonl` — upload that here."
+        )
+
+
+# ===========================================================================
+# Helpers for Eval Results (full-context trace rendering)
+# ===========================================================================
+
+_INJ_RE = re.compile(r"<INFORMATION>(.*?)</INFORMATION>", re.DOTALL | re.IGNORECASE)
+
+
+def _render_trace_context(trace: Dict, key_prefix: str) -> None:
+    """Render full trace context in the eval paired-output viewer.
+
+    Shows system prompt, user query, tool messages with injection highlighting,
+    and attack metadata — modeled on visualize_sweep_results.py.
+    """
+    messages = trace.get("messages", [])
+    labels = trace.get("labels", {})
+    source = trace.get("source", {})
+    source_fields = (trace.get("raw_metadata") or {}).get("source_fields") or {}
+
+    # --- Metadata badges ---
+    badge_parts = []
+    ds = source.get("dataset", "?")
+    badge_parts.append(f"**Dataset:** `{ds}`")
+    if source.get("model_id"):
+        badge_parts.append(f"**Model:** `{source['model_id']}`")
+    if source.get("subset"):
+        badge_parts.append(f"**Suite:** `{source['subset']}`")
+    if labels.get("category"):
+        badge_parts.append(f"**Category:** `{labels['category']}`")
+    if labels.get("attack_type"):
+        badge_parts.append(f"**Attack:** `{labels['attack_type']}`")
+    prov = source_fields.get("augmentation_provenance")
+    if prov and prov != "original":
+        badge_parts.append(f"**Provenance:** `{prov}`")
+    st.markdown(" | ".join(badge_parts))
+
+    # --- Injection detection in messages ---
+    injection_span = (trace.get("signal_hints") or {}).get("injection_char_span")
+
+    # --- Collapsible full conversation ---
+    with st.expander("Full Conversation Context", expanded=False):
+        for idx, msg in enumerate(messages):
+            role = msg.get("role", "?")
+            content = msg.get("content", "")
+
+            # Color-code by role
+            role_colors = {
+                "system": ("#6c757d", "#f0f0f0"),
+                "user": ("#0d6efd", "#e7f1ff"),
+                "assistant": ("#198754", "#d1e7dd"),
+                "tool": ("#dc3545", "#f8d7da"),
+            }
+            color, bg = role_colors.get(role, ("#333", "#fff"))
+
+            # Check for injection in this message
+            has_injection = False
+            inj_matches = []
+            if role == "tool":
+                inj_matches = list(_INJ_RE.finditer(content))
+                if inj_matches:
+                    has_injection = True
+
+            # Build display content
+            if has_injection:
+                # Highlight injections in red
+                display = html_lib.escape(content)
+                for m in reversed(inj_matches):
+                    esc_inj = html_lib.escape(m.group(0))
+                    highlighted = (
+                        f'<span style="background:#ff4444;color:white;padding:2px 4px;'
+                        f'border-radius:3px;font-weight:bold">{esc_inj}</span>'
+                    )
+                    start_esc = len(html_lib.escape(content[:m.start()]))
+                    end_esc = start_esc + len(esc_inj)
+                    display = display[:start_esc] + highlighted + display[end_esc:]
+            elif injection_span and injection_span.get("message_index") == idx:
+                display = highlight_injection(content, injection_span)
+            else:
+                display = html_lib.escape(content)
+
+            # No truncation — show full content to catch diffs
+
+            # Tool name badge
+            name_badge = ""
+            if msg.get("name"):
+                name_badge = (
+                    f' <span style="background:#17a2b8;color:white;padding:1px 6px;'
+                    f'border-radius:10px;font-size:0.8em">{html_lib.escape(msg["name"])}</span>'
+                )
+
+            # Tool calls badge
+            tc_badge = ""
+            if msg.get("tool_calls"):
+                tc_names = [tc.get("function", {}).get("name", "?") for tc in msg["tool_calls"]]
+                tc_badge = (
+                    f' <span style="background:#ffc107;color:#000;padding:1px 6px;'
+                    f'border-radius:10px;font-size:0.8em">calls: {", ".join(tc_names)}</span>'
+                )
+
+            inj_badge = ""
+            if has_injection:
+                inj_badge = (
+                    ' <span style="background:#ff4444;color:white;padding:1px 6px;'
+                    'border-radius:10px;font-size:0.8em">INJECTION</span>'
+                )
+
+            st.html(
+                f'<div style="border-left:4px solid {color};background:{bg};'
+                f'padding:8px 12px;margin:4px 0;border-radius:0 6px 6px 0;">'
+                f'<div style="font-weight:bold;color:{color};margin-bottom:4px;">'
+                f'[{idx}] {role.upper()}{name_badge}{tc_badge}{inj_badge}</div>'
+                f'<div style="white-space:pre-wrap;font-family:monospace;font-size:0.82em;'
+                f'line-height:1.4;color:#1a1a1a;">{display}</div></div>'
+            )
 
 
 # ===========================================================================
@@ -1883,33 +2122,62 @@ def _extract_metrics_from_eval_dir(eval_dir: Path) -> dict:
 def page_eval_results():
     st.header("Eval Results")
 
+    # --- Auto-discover local eval directories ---
+    eval_runs_dir = DATA_DIR / "eval_runs"
+    local_runs = []
+    if eval_runs_dir.is_dir():
+        for d in sorted(eval_runs_dir.iterdir()):
+            if d.is_dir() and (d / "eval").is_dir():
+                local_runs.append(str(d))
+            # Also check if it's a sweep dir with sub-runs
+            elif d.is_dir():
+                for sub in sorted(d.iterdir()):
+                    if sub.is_dir() and (sub / "eval").is_dir():
+                        local_runs.append(str(d))
+                        break
+
     # --- Sweep directory selection ---
     st.sidebar.markdown("---")
+    default_val = local_runs[0] if local_runs else ""
     sweep_path_input = st.sidebar.text_input(
-        "Sweep directory path",
-        placeholder="/scratch/memoozd/cb-scratch/sweeps/hparam_sweep_...",
-        help="Absolute path to a sweep or debug_runs directory",
+        "Eval run / sweep directory",
+        value=default_val,
+        placeholder="data/eval_runs/my_run or /path/to/sweep_dir",
+        help="Path to a single run dir (with eval/) or sweep dir (with sub-run dirs)",
     )
+
+    if local_runs:
+        st.sidebar.markdown("**Local eval runs:**")
+        for lr in local_runs:
+            st.sidebar.code(Path(lr).name, language=None)
 
     sweep_dir = Path(sweep_path_input) if sweep_path_input else None
 
     if not sweep_dir or not sweep_dir.is_dir():
         st.info(
-            "Enter a sweep directory path in the sidebar to load results.\n\n"
-            "Expected structure:\n"
+            "Enter a run/sweep directory path in the sidebar to load results.\n\n"
+            "**SCP from cluster (debug_single_run):**\n"
+            "```bash\n"
+            "# Find your run directory\n"
+            "ls /scratch/memoozd/cb-scratch/debug_runs/\n\n"
+            "# SCP the whole run (includes eval/ with paired outputs)\n"
+            "scp -r cluster:/scratch/memoozd/cb-scratch/debug_runs/YOUR_RUN \\\n"
+            "    data/eval_runs/\n"
+            "```\n\n"
+            "**Expected structure:**\n"
             "```\n"
-            "sweep_dir/\n"
-            "  summary.csv\n"
-            "  preset_a10.0_l10_20_policy/\n"
+            "data/eval_runs/\n"
+            "  my_run/\n"
             "    run_config.json\n"
             "    eval/\n"
             "      fujitsu_eval.json\n"
             "      fujitsu_eval.paired_outputs.jsonl\n"
             "      agentdojo_eval.json\n"
+            "      agentdojo_eval.paired_outputs.jsonl\n"
             "      agentdojo_benign_eval.json\n"
+            "      agentdojo_benign_eval.paired_outputs.jsonl\n"
             "      checkpoints/\n"
             "        checkpoint-50/\n"
-            "          fujitsu_eval.json\n"
             "          ...\n"
             "```"
         )
@@ -2317,6 +2585,15 @@ def page_eval_results():
     stats_parts = [f"**{k}**: {v}" for k, v in sorted(outcome_counts.items())]
     st.write(f"**Showing {len(filtered)}/{len(pairs)} pairs** | " + " | ".join(stats_parts))
 
+    # --- Load traces for full context ---
+    trace_index = {}
+    # Try loading traces from common locations
+    for traces_file in discover_jsonl(TRACES_DIR):
+        for t in load_traces(str(traces_file)):
+            tid = t.get("id")
+            if tid:
+                trace_index[tid] = t
+
     # Display pairs
     for i, p in enumerate(filtered[:50]):
         cat = p.get("category", "?")
@@ -2337,9 +2614,25 @@ def page_eval_results():
             label = "SAME"
 
         with st.expander(f"[{label}] {cat} | {b_tool} -> {c_tool}{gib_tag} | {sample_id}"):
+            # --- Full trace context ---
+            trace = trace_index.get(p.get("id"))
+            if trace:
+                _render_trace_context(trace, f"ctx_{selected_dataset}_{i}")
+
+            # --- Outcome summary ---
+            oc1, oc2, oc3, oc4 = st.columns(4)
+            oc1.markdown(f"**Expected:** `{p.get('expected_tool', 'N/A')}`")
+            oc2.markdown(f"**Baseline:** `{b_out}` / `{b_tool}`")
+            oc3.markdown(f"**CB:** `{c_out}` / `{c_tool}`")
+            if b_out == "attack_success" and c_out != "attack_success":
+                oc4.success("BLOCKED")
+            elif b_out != "attack_success" and c_out == "attack_success":
+                oc4.error("REGRESSION")
+
+            # --- Side-by-side responses ---
             left, right = st.columns(2)
             with left:
-                st.markdown("**Baseline**")
+                st.markdown("**Baseline Response**")
                 st.text_area(
                     "Baseline response",
                     p.get("baseline_response", "(empty)"),
@@ -2349,7 +2642,7 @@ def page_eval_results():
                     label_visibility="collapsed",
                 )
             with right:
-                st.markdown(f"**CB Model**{gib_tag}")
+                st.markdown(f"**CB Model Response**{gib_tag}")
                 st.text_area(
                     "CB response",
                     p.get("cb_response", "(empty)"),

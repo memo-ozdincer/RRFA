@@ -1,0 +1,24 @@
+{
+  "cb_model": {
+    "tool_flip_asr": {
+      "attack_success_rate": 0.163,
+      "correct_tool_call_rate": 0.714,
+      "no_tool_call_rate": 0.122,
+      "n_samples": 490
+    }
+  },
+  "baseline": {
+    "tool_flip_asr": {
+      "attack_success_rate": 0.847,
+      "n_samples": 490
+    }
+  },
+  "summary": {
+    "baseline_asr": 0.847,
+    "cb_asr": 0.163,
+    "asr_reduction": 0.684
+  },
+  "delta": {
+    "tool_flip_asr": -0.684
+  }
+}

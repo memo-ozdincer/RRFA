@@ -1,0 +1,13 @@
+{
+  "run_name": "a10.0_l10_20_cb_full_sequence",
+  "alpha": 10.0,
+  "layer_config": "l10_20",
+  "policy": "cb_full_sequence",
+  "total_steps": 100,
+  "batch_size": 1,
+  "grad_accum": 4,
+  "pooling_preset": "legacy",
+  "distance": "dmix",
+  "margin_benign": 500,
+  "margin_harmful": 1500
+}

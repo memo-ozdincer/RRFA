@@ -1,0 +1,16 @@
+{
+  "cb_model": {
+    "generation_comparison": {
+      "malicious_tool_call_rate": 0.02,
+      "harmful_resistance_rate": 0.98,
+      "no_tool_call_rate": 0.98,
+      "n_samples": 99
+    }
+  },
+  "baseline": {
+    "generation_comparison": {
+      "malicious_tool_call_rate": 1.0,
+      "n_samples": 99
+    }
+  }
+}

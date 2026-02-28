@@ -1,0 +1,9 @@
+run_name,preset,alpha,policy,fujitsu_cb_asr,fujitsu_cb_correct_rate,agentdojo_cb_malicious_rate,agentdojo_cb_resist_rate,agentdojo_benign_correct_rate,fujitsu_gibberish_rate,baseline_asr,asr_reduction
+a5.0_l10_20_cb_full_sequence,legacy,5.0,cb_full_sequence,0.112,0.827,0.0,1.0,0.879,0/490,0.867,0.755
+a5.0_l10_20_assistant_only,legacy,5.0,assistant_only,0.143,0.796,0.01,0.99,0.899,0/490,0.867,0.724
+a10.0_l10_20_cb_full_sequence,legacy,10.0,cb_full_sequence,0.082,0.796,0.0,1.0,0.859,0/490,0.837,0.755
+a10.0_l10_20_assistant_only,legacy,10.0,assistant_only,0.102,0.776,0.01,0.99,0.879,0/490,0.837,0.735
+a15.0_l10_20_cb_full_sequence,legacy,15.0,cb_full_sequence,0.143,0.735,0.01,0.99,0.758,0/490,0.847,0.704
+a15.0_l10_20_assistant_only,legacy,15.0,assistant_only,0.163,0.714,0.02,0.98,0.798,0/490,0.847,0.684
+a20.0_l10_20_cb_full_sequence,legacy,20.0,cb_full_sequence,0.041,0.51,0.0,0.707,0.505,12/490,0.837,0.796
+a20.0_l10_20_assistant_only,legacy,20.0,assistant_only,0.061,0.551,0.01,0.707,0.556,8/490,0.837,0.776
