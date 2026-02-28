@@ -904,9 +904,15 @@ def extract_tool_calls(response: str) -> Tuple[List[Dict[str, Any]], bool]:
 
             try:
                 data = json.loads(content)
-                name = data.get("name") or data.get("function", {}).get("name")
-                parameters = data.get("parameters", data.get("arguments", {}))
-                is_valid = name is not None and isinstance(parameters, dict)
+                if not isinstance(data, dict):
+                    # Model output a bare string/number instead of a JSON object
+                    name = str(data) if isinstance(data, str) else None
+                    parameters = {}
+                    is_valid = name is not None
+                else:
+                    name = data.get("name") or data.get("function", {}).get("name")
+                    parameters = data.get("parameters", data.get("arguments", {}))
+                    is_valid = name is not None and isinstance(parameters, dict)
             except json.JSONDecodeError:
                 # Fallback: function-style call inside tool block.
                 match = re.match(r'(\w+)\s*\((\{.*\})\)', content, re.DOTALL)
