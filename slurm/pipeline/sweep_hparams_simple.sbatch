@@ -187,6 +187,36 @@ generate_data() {
 # Run generation
 generate_data "Fujitsu B4" "$FUJITSU_SKELETON" "$FUJITSU_DS" "$FUJITSU_DR" "$TOOL_SCHEMA"
 
+# AgentDojo: regenerate traces via ETL_A if missing or suspiciously small
+AGENTDOJO_TRACES="$TRACES_DIR/agentdojo_complete.jsonl"
+AGENTDOJO_RAW="$REPO_DIR/data/agent_dojo/agentdojo_spotlight_extract.jsonl"
+AGENTDOJO_MIN_LINES=100  # expect ~3000+; if fewer, regenerate
+
+if [[ -f "$AGENTDOJO_RAW" ]]; then
+    regen=false
+    if [[ ! -f "$AGENTDOJO_TRACES" ]]; then
+        regen=true
+        echo "AgentDojo traces not found. Regenerating via ETL_A..."
+    else
+        n_lines=$(wc -l < "$AGENTDOJO_TRACES")
+        if [[ "$n_lines" -lt "$AGENTDOJO_MIN_LINES" ]]; then
+            regen=true
+            echo "AgentDojo traces too small ($n_lines lines < $AGENTDOJO_MIN_LINES). Regenerating via ETL_A..."
+        fi
+    fi
+    if [[ "$regen" == "true" ]]; then
+        python src/schemas/tools/ETL_A.py \
+            --agentdojo "$AGENTDOJO_RAW" \
+            --output "$AGENTDOJO_TRACES" \
+            --split train
+        echo "AgentDojo ETL_A complete: $(wc -l < "$AGENTDOJO_TRACES") traces"
+    else
+        echo "AgentDojo traces OK: $(wc -l < "$AGENTDOJO_TRACES") lines"
+    fi
+else
+    echo "WARNING: AgentDojo raw file not found at $AGENTDOJO_RAW"
+fi
+
 echo ""
 echo "Data preparation complete. Launching sweep..."
 echo ""

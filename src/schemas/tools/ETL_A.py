@@ -421,7 +421,7 @@ def _detect_model_family(metadata: Dict[str, Any], messages: List[Dict[str, Any]
 
     # Check message content for format patterns
     for msg in messages:
-        content = msg.get("content", "")
+        content = msg.get("content") or ""
         if "<|python_tag|>" in content:
             return "llama"
         if "<function_calls>" in content or "<function_calls>" in content:
@@ -441,7 +441,7 @@ def _detect_format_family(model_family: Optional[str], messages: List[Dict[str, 
 
     # Fall back to content inspection
     for msg in messages:
-        content = msg.get("content", "")
+        content = msg.get("content") or ""
         if "<|python_tag|>" in content:
             return "llama_python_tag"
         if "<function_calls>" in content:
@@ -474,7 +474,7 @@ def _parse_tool_calls(msg: Dict[str, Any], preserve_raw_content: bool = True, st
     # Extract clean content if strip_tool_syntax is enabled
     cleaned_content = None
     if strip_tool_syntax:
-        content = msg.get("content", "")
+        content = msg.get("content") or ""
         if content:
             # Strip tool call syntax based on detected format
             if "<|python_tag|>" in content:
