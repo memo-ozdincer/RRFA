@@ -70,7 +70,7 @@ export TRANSFORMERS_OFFLINE=1
 # =============================================================================
 POOLING_MODE="${POOLING_MODE:-legacy}"
 ALPHA="${ALPHA:-10.0}"
-LAYERS="${LAYERS:-10,20}"
+LAYERS="${LAYERS:-4,8,14}"
 POLICY="${POLICY:-assistant_only}"
 TOTAL_STEPS="${TOTAL_STEPS:-100}"
 LIMIT_EVAL="${LIMIT_EVAL:-50}"

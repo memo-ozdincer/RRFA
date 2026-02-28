@@ -203,11 +203,14 @@ def render_lossmask_heatmap_html(
     tokens: List[str],
     mask: List[float],
     message_spans: Optional[List[Dict]] = None,
+    injection_spans: Optional[List[Dict]] = None,
+    tool_call_spans: Optional[List[Dict]] = None,
     max_tokens: int = 500,
 ) -> str:
     """Render token-level lossmask as colored HTML.
 
     Green = loss applied (mask > 0), gray = masked out (mask = 0).
+    Red underline = injection span. Blue border = tool call span.
     """
     n = min(len(tokens), len(mask), max_tokens)
     if n == 0:
@@ -219,7 +222,37 @@ def render_lossmask_heatmap_html(
         for sp in message_spans:
             span_starts[sp.get("token_start", -1)] = sp.get("role", "?")
 
+    # Build injection token set
+    inj_tokens = set()
+    if injection_spans:
+        for sp in injection_spans:
+            for j in range(sp.get("token_start", 0), sp.get("token_end", 0)):
+                inj_tokens.add(j)
+
+    # Build tool call token set
+    tc_tokens = set()
+    if tool_call_spans:
+        for sp in tool_call_spans:
+            for j in range(sp.get("token_start", 0), sp.get("token_end", 0)):
+                tc_tokens.add(j)
+
+    # Legend
     parts = []
+    parts.append(
+        '<div style="font-size:0.75em;margin-bottom:8px;font-family:sans-serif;">'
+        '<span style="background:rgba(25,135,84,0.6);color:white;padding:1px 4px;border-radius:2px;">Loss applied</span> '
+        '<span style="background:#e9ecef;color:#999;padding:1px 4px;border-radius:2px;">Masked out</span> '
+    )
+    if inj_tokens:
+        parts.append(
+            '<span style="border-bottom:3px solid #dc3545;padding:1px 4px;">Injection span</span> '
+        )
+    if tc_tokens:
+        parts.append(
+            '<span style="border:2px solid #0d6efd;padding:1px 4px;border-radius:2px;">Tool call</span>'
+        )
+    parts.append('</div>')
+
     parts.append('<div style="font-family:monospace;font-size:0.8em;line-height:2.0;word-break:break-all;">')
     for i in range(n):
         # Role boundary marker
@@ -234,16 +267,26 @@ def render_lossmask_heatmap_html(
         m = mask[i]
         tok = html_lib.escape(tokens[i].replace("\n", "\\n").replace("\t", "\\t"))
         if m > 0:
-            # Green gradient based on mask value
             alpha = min(m, 1.0)
             bg = f"rgba(25,135,84,{0.2 + 0.6 * alpha})"
             fg = "white" if alpha > 0.5 else "#000"
         else:
             bg = "#e9ecef"
             fg = "#999"
+
+        # Overlay styles for injection and tool call spans
+        extra_style = ""
+        extra_title = ""
+        if i in inj_tokens:
+            extra_style += "border-bottom:3px solid #dc3545;"
+            extra_title = " [INJECTION]"
+        if i in tc_tokens:
+            extra_style += "border:2px solid #0d6efd;border-radius:2px;"
+            extra_title += " [TOOL_CALL]"
+
         parts.append(
-            f'<span title="[{i}] mask={m:.2f}" style="background:{bg};color:{fg};'
-            f'padding:0 2px;margin:0 1px;border-radius:2px;cursor:default;">{tok}</span>'
+            f'<span title="[{i}] mask={m:.2f}{extra_title}" style="background:{bg};color:{fg};'
+            f'padding:0 2px;margin:0 1px;border-radius:2px;cursor:default;{extra_style}">{tok}</span>'
         )
 
     if n < len(tokens):
@@ -670,10 +713,34 @@ def page_render_lossmask():
             for s in (render.alignment.message_spans or [])
         ] if render.alignment else None
 
-        heatmap_html = render_lossmask_heatmap_html(tokens, lossmask.loss_mask, msg_spans, max_display)
+        # Extract injection and tool call spans for overlay
+        inj_spans = None
+        tc_spans = None
+        if render.signals:
+            if render.signals.injection_spans:
+                inj_spans = [
+                    {"token_start": s.token_start, "token_end": s.token_end}
+                    for s in render.signals.injection_spans
+                ]
+        if render.alignment and render.alignment.tool_call_spans:
+            tc_spans = [
+                {"token_start": s.token_start, "token_end": s.token_end}
+                for s in render.alignment.tool_call_spans
+            ]
+
+        heatmap_html = render_lossmask_heatmap_html(
+            tokens, lossmask.loss_mask, msg_spans,
+            injection_spans=inj_spans,
+            tool_call_spans=tc_spans,
+            max_tokens=max_display,
+        )
         st.markdown(heatmap_html, unsafe_allow_html=True)
 
-        st.caption("Green = loss applied (model learns from these tokens), Gray = masked out (ignored during training). Hover for token index and mask value.")
+        st.caption(
+            "Green = loss applied, Gray = masked out, "
+            "Red underline = injection span, Blue border = tool call. "
+            "Hover for token index and mask value."
+        )
 
 
 # ===========================================================================
@@ -1006,13 +1073,217 @@ def page_stats_validation():
         })
     st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 
-    # Message count distribution
+    # --- Category distribution stacked bar ---
+    st.subheader("Category Distribution by Dataset")
+    cat_rows = []
+    for ds, stats in sorted(ds_stats.items()):
+        total = max(stats["total"], 1)
+        cat_rows.append({
+            "Dataset": ds,
+            "Harmful": stats["harmful"],
+            "Benign": stats["benign"],
+            "Resisted": stats["resisted"],
+            "Unknown": stats["unknown"],
+        })
+    if cat_rows:
+        cat_df = pd.DataFrame(cat_rows).set_index("Dataset")
+        st.bar_chart(cat_df)
+
+    # --- Attack type breakdown ---
+    st.subheader("Attack Type Breakdown")
+    attack_types = Counter()
+    attack_vectors = Counter()
+    for t in all_traces:
+        labels = t.get("labels", {})
+        at = labels.get("attack_type")
+        if at:
+            attack_types[at] += 1
+        ta = t.get("tool_attack", {})
+        av = ta.get("attack_vector") if ta else None
+        if av:
+            attack_vectors[av] += 1
+
+    if attack_types:
+        at_df = pd.DataFrame({"Count": dict(attack_types.most_common(20))})
+        st.markdown("**Attack types** (from `labels.attack_type`)")
+        st.bar_chart(at_df)
+    if attack_vectors:
+        av_df = pd.DataFrame({"Count": dict(attack_vectors.most_common(20))})
+        st.markdown("**Attack vectors** (from `tool_attack.attack_vector`)")
+        st.bar_chart(av_df)
+    if not attack_types and not attack_vectors:
+        st.info("No attack_type or attack_vector labels found in current traces.")
+
+    # --- Tool-flip pairs ---
+    st.subheader("Tool-Flip Pairs (Expected vs Observed)")
+    flip_pairs = Counter()
+    for t in all_traces:
+        ta = t.get("tool_attack", {})
+        if ta:
+            exp = ta.get("expected_tool", "?")
+            obs = ta.get("observed_tool", "?")
+            if exp and obs and exp != obs:
+                flip_pairs[f"{obs} -> {exp}"] += 1
+    if flip_pairs:
+        fp_df = pd.DataFrame(
+            {"Count": dict(flip_pairs.most_common(15))}
+        )
+        st.bar_chart(fp_df)
+        st.caption("Shows: `malicious_tool -> expected_correct_tool` (CB should redirect back)")
+    else:
+        st.info("No tool-flip pairs found.")
+
+    # --- Injection span analysis ---
+    st.subheader("Injection Span Analysis")
+    inj_lengths = []
+    inj_positions = []  # relative position in message (0-1)
+    for t in all_traces:
+        sh = t.get("signal_hints", {})
+        if not sh:
+            continue
+        span = sh.get("injection_char_span")
+        if span and isinstance(span, dict):
+            char_start = span.get("char_start", 0)
+            char_end = span.get("char_end", 0)
+            if char_end > char_start:
+                inj_lengths.append(char_end - char_start)
+                msg_idx = span.get("message_index", 0)
+                msgs = t.get("messages", [])
+                if msg_idx < len(msgs):
+                    msg_len = len(msgs[msg_idx].get("content", ""))
+                    if msg_len > 0:
+                        inj_positions.append(char_start / msg_len)
+
+    if inj_lengths:
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Traces with injection", len(inj_lengths))
+        col2.metric("Avg injection length", f"{sum(inj_lengths)/len(inj_lengths):.0f} chars")
+        col3.metric("Max injection length", f"{max(inj_lengths)} chars")
+
+        st.markdown("**Injection length distribution** (characters)")
+        inj_df = pd.DataFrame({"Injection Length (chars)": inj_lengths})
+        hist = inj_df["Injection Length (chars)"].value_counts().sort_index()
+        # Bin into ranges for readability
+        bins = pd.cut(inj_df["Injection Length (chars)"], bins=20)
+        bin_counts = bins.value_counts().sort_index()
+        st.bar_chart(pd.DataFrame({"Count": bin_counts.values}, index=[str(b) for b in bin_counts.index]))
+    else:
+        st.info("No injection spans found in current traces.")
+
+    # --- Message count distribution ---
     st.subheader("Message Count Distribution")
     msg_counts = [len(t.get("messages", [])) for t in all_traces]
     if msg_counts:
         msg_df = pd.DataFrame({"Messages per trace": msg_counts})
         hist = msg_df["Messages per trace"].value_counts().sort_index().head(30)
         st.bar_chart(pd.DataFrame({"Count": hist.values}, index=hist.index))
+
+    # --- Per-dataset message length (character count) ---
+    st.subheader("Trace Length by Dataset")
+    len_rows = []
+    for t in all_traces:
+        ds = trace_dataset(t)
+        total_chars = sum(len(m.get("content", "")) for m in t.get("messages", []))
+        len_rows.append({"Dataset": ds, "Total Characters": total_chars})
+    if len_rows:
+        len_df = pd.DataFrame(len_rows)
+        # Summary stats per dataset
+        summary = len_df.groupby("Dataset")["Total Characters"].agg(["count", "mean", "min", "max", "median"])
+        summary.columns = ["Count", "Mean", "Min", "Max", "Median"]
+        summary = summary.round(0).astype(int)
+        st.dataframe(summary)
+
+        # Box-plot-like comparison using bar chart of means
+        st.markdown("**Mean trace length per dataset** (characters)")
+        mean_df = len_df.groupby("Dataset")["Total Characters"].mean()
+        st.bar_chart(mean_df)
+
+    # --- Data Quality Checks ---
+    st.subheader("Data Quality Checks")
+
+    if st.button("Run data quality audit"):
+        issues = []
+        checks_passed = 0
+        total_checks = 0
+
+        # Check 1: All harmful traces should have tool_attack or attack labels
+        total_checks += 1
+        harmful_no_attack = [
+            t for t in all_traces
+            if trace_category(t) == "harmful"
+            and not t.get("tool_attack", {}).get("expected_tool")
+            and not t.get("labels", {}).get("attack_type")
+        ]
+        if harmful_no_attack:
+            issues.append(f"- {len(harmful_no_attack)} harmful traces missing attack info (tool_attack.expected_tool or labels.attack_type)")
+        else:
+            checks_passed += 1
+
+        # Check 2: No empty messages
+        total_checks += 1
+        empty_msg_traces = []
+        for t in all_traces:
+            for m in t.get("messages", []):
+                if not m.get("content") and not m.get("tool_calls"):
+                    empty_msg_traces.append(t.get("id", "?")[:30])
+                    break
+        if empty_msg_traces:
+            issues.append(f"- {len(empty_msg_traces)} traces have empty messages (no content and no tool_calls)")
+        else:
+            checks_passed += 1
+
+        # Check 3: Benign traces should not have attack_succeeded=True
+        total_checks += 1
+        benign_attacked = [
+            t for t in all_traces
+            if trace_category(t) == "benign"
+            and t.get("labels", {}).get("attack_succeeded") is True
+        ]
+        if benign_attacked:
+            issues.append(f"- {len(benign_attacked)} benign traces have attack_succeeded=True (label conflict)")
+        else:
+            checks_passed += 1
+
+        # Check 4: Complete traces should have >= 2 messages
+        total_checks += 1
+        short_complete = [
+            t for t in all_traces
+            if trace_completeness(t) == "complete"
+            and len(t.get("messages", [])) < 2
+        ]
+        if short_complete:
+            issues.append(f"- {len(short_complete)} complete traces have <2 messages")
+        else:
+            checks_passed += 1
+
+        # Check 5: DS/DR pairing (Fujitsu)
+        total_checks += 1
+        fujitsu_harmful = sum(1 for t in all_traces if trace_dataset(t) == "fujitsu_b4" and trace_category(t) == "harmful")
+        fujitsu_benign = sum(1 for t in all_traces if trace_dataset(t) == "fujitsu_b4" and trace_category(t) == "benign")
+        if fujitsu_harmful > 0 and fujitsu_benign == 0:
+            issues.append(f"- Fujitsu has {fujitsu_harmful} harmful traces but 0 benign (DS exists but DR may not be in traces dir)")
+        else:
+            checks_passed += 1
+
+        # Check 6: AgentDojo harmful/benign balance
+        total_checks += 1
+        ad_harmful = sum(1 for t in all_traces if trace_dataset(t) == "agentdojo" and trace_category(t) == "harmful")
+        ad_benign = sum(1 for t in all_traces if trace_dataset(t) == "agentdojo" and trace_category(t) == "benign")
+        if ad_harmful > 0 and ad_benign > 0:
+            ratio = ad_harmful / ad_benign
+            if ratio < 0.5 or ratio > 2.0:
+                issues.append(f"- AgentDojo harmful/benign ratio is {ratio:.2f} (harmful={ad_harmful}, benign={ad_benign}) — may cause training imbalance")
+            else:
+                checks_passed += 1
+        else:
+            checks_passed += 1
+
+        if not issues:
+            st.success(f"All {checks_passed}/{total_checks} quality checks passed.")
+        else:
+            st.warning(f"{checks_passed}/{total_checks} checks passed. Issues found:")
+            for issue in issues:
+                st.write(issue)
 
     # Schema roundtrip validation
     st.subheader("Schema Validation")

@@ -55,9 +55,11 @@ if [[ ! -f "$SWEEP_SCRIPT" ]]; then
 fi
 
 export TOTAL_STEPS="${TOTAL_STEPS:-100}"
-export ALPHAS="${ALPHAS:-7.5,10.0}"
-export LAYER_CONFIGS="${LAYER_CONFIGS:-10,20}"
-export POLICIES="${POLICIES:-assistant_only}"
+export ALPHAS="${ALPHAS:-10.0}"
+# Layers target shallow-to-middle of Llama 3.1 8B (32 layers):
+#   4 (shallow/knowledge), 8 (mid-shallow/core), 14 (upper recommended boundary)
+export LAYER_CONFIGS="${LAYER_CONFIGS:-4,8,14}"
+export POLICIES="${POLICIES:-assistant_only,cb_full_sequence}"
 export LIMIT_EVAL="${LIMIT_EVAL:-50}"
 export LIMIT_GEN="${LIMIT_GEN:-5000}"
 export NUM_EXAMPLES="${NUM_EXAMPLES:-10}"
@@ -67,7 +69,7 @@ export VIS_CHECKPOINT_STEPS="${VIS_CHECKPOINT_STEPS:-50,100}"
 
 # Pooling presets: "name:pooling_mode:distance:margin_b:margin_h"
 # Legacy grid around working config (margins 500/1500, alpha 10)
-# 2 presets × 2 alphas = 4 runs, each ~12 min (train + checkpoint eval + benign eval) ≈ 48 min
+# 2 presets × 2 policies = 4 runs, each ~12 min (train + checkpoint eval + benign eval) ≈ 48 min
 export POOLING_PRESETS="${POOLING_PRESETS:-m500:legacy:dmix:500:1500 m750:legacy:dmix:750:2250}"
 
 echo "Starting sweep_hparams_simple.sbatch..."

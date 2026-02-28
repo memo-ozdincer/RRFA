@@ -114,17 +114,21 @@ if [[ "$QUICK_TEST" == "true" ]]; then
     echo "QUICK TEST MODE - Reduced configurations"
     DEFAULT_STEPS=50
     DEFAULT_ALPHAS="10.0"
-    DEFAULT_LAYER_CONFIGS="10,20"
+    DEFAULT_LAYER_CONFIGS="4,8,14"
     DEFAULT_POLICIES="assistant_only"
     DEFAULT_LIMIT_EVAL=20
     DEFAULT_NUM_EXAMPLES=5
 else
-    # Focused grid around working config (legacy pooling, margins 500/1500)
+    # Focused grid: 1 alpha × 2 policies × 1 layer config × N presets
+    # Layer config targets shallow-to-middle layers (4,8,14) per Llama 3.1 8B research:
+    #   Layer 4:  shallow — knowledge injection, defensive behaviors
+    #   Layer 8:  mid-shallow — core of the critical 1-10 range
+    #   Layer 14: upper boundary of recommended 0-15 range
     # Override via env vars or sweep_hparams_simple.sbatch for larger sweeps
     DEFAULT_STEPS=100
-    DEFAULT_ALPHAS="7.5,10.0"
-    DEFAULT_LAYER_CONFIGS="10,20"
-    DEFAULT_POLICIES="assistant_only"
+    DEFAULT_ALPHAS="10.0"
+    DEFAULT_LAYER_CONFIGS="4,8,14"
+    DEFAULT_POLICIES="assistant_only,cb_full_sequence"
     DEFAULT_LIMIT_EVAL=50
     DEFAULT_NUM_EXAMPLES=10
 fi
