@@ -1210,14 +1210,21 @@ class CircuitBreakerTrainer:
         cur_margin_b = self.config.triplet_margin_benign
         cur_margin_h = self.config.triplet_margin_harmful
 
+        # Also compute cosine-only inter-class separation
+        def _dcos(a: torch.Tensor, b: torch.Tensor) -> float:
+            return (1.0 - F.cosine_similarity(a, b, dim=-1, eps=1e-8)).mean().item()
+
+        correct_cos_sep = _dcos(cvecs["b_new"], cvecs["h_new"])
+
         self.accelerator.print(f"\n  SUGGESTED MARGINS for pooling_mode=correct:")
         if legacy_sep > 1e-6:
             scale = correct_sep / legacy_sep
             sug_b = cur_margin_b * scale
             sug_h = cur_margin_h * scale
-            self.accelerator.print(f"    Inter-class separation:  legacy={legacy_sep:.2f}  correct={correct_sep:.2f}  ratio={scale:.4f}")
-            self.accelerator.print(f"    Current legacy margins:  benign={cur_margin_b}  harmful={cur_margin_h}")
-            self.accelerator.print(f"    Scaled correct margins:  benign~{sug_b:.1f}  harmful~{sug_h:.1f}")
+            self.accelerator.print(f"    Inter-class separation:  legacy_dmix={legacy_sep:.2f}  correct_dmix={correct_sep:.2f}  correct_cos={correct_cos_sep:.4f}")
+            self.accelerator.print(f"    Current margins:  benign={cur_margin_b}  harmful={cur_margin_h}")
+            self.accelerator.print(f"    Scaled dmix margins:  benign~{sug_b:.1f}  harmful~{sug_h:.1f}")
+            self.accelerator.print(f"    Recommended dcos margins:  benign~{2.5*correct_cos_sep:.2f}  harmful~{7*correct_cos_sep:.2f}  (2.5x/7x cos_sep)")
         else:
             self.accelerator.print(f"    WARNING: legacy inter-class separation ~0, cannot compute ratio")
             self.accelerator.print(f"    correct inter-class sep={correct_sep:.4f}")

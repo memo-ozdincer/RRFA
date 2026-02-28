@@ -85,19 +85,32 @@ LOSS_MODE="${LOSS_MODE:-triplet_full}"
 LOSS_WEIGHTING="${LOSS_WEIGHTING:-dual}"
 ENABLE_LLMAIL="${ENABLE_LLMAIL:-false}"
 
-# Triplet hyperparameters (working values - require separate frozen model)
+# Triplet hyperparameters
 TRIPLET_ALPHA_BENIGN="${TRIPLET_ALPHA_BENIGN:-0.5}"
 TRIPLET_BETA_HARMFUL="${TRIPLET_BETA_HARMFUL:-0.4}"
 TRIPLET_GAMMA_KL="${TRIPLET_GAMMA_KL:-0.9}"
-TRIPLET_MARGIN_BENIGN="${TRIPLET_MARGIN_BENIGN:-11.0}"
-TRIPLET_MARGIN_HARMFUL="${TRIPLET_MARGIN_HARMFUL:-33.0}"
-TRIPLET_BENIGN_POS_DISTANCE="${TRIPLET_BENIGN_POS_DISTANCE:-dmix}"
-TRIPLET_BENIGN_NEG_DISTANCE="${TRIPLET_BENIGN_NEG_DISTANCE:-dmix}"
-TRIPLET_HARMFUL_POS_DISTANCE="${TRIPLET_HARMFUL_POS_DISTANCE:-dmix}"
-TRIPLET_HARMFUL_NEG_DISTANCE="${TRIPLET_HARMFUL_NEG_DISTANCE:-dmix}"
+
+# Auto-configure distance and margins for correct pooling mode
+# Correct pooling uses cosine-only distance (bounded [0,2], no scale issues)
+# with smaller margins calibrated for dense representations
+if [[ "$POOLING_MODE" == "correct" ]]; then
+    _DEFAULT_DIST="dcos"
+    _DEFAULT_MARGIN_B="0.3"
+    _DEFAULT_MARGIN_H="0.8"
+else
+    _DEFAULT_DIST="dmix"
+    _DEFAULT_MARGIN_B="500.0"
+    _DEFAULT_MARGIN_H="1500.0"
+fi
+
+TRIPLET_MARGIN_BENIGN="${TRIPLET_MARGIN_BENIGN:-$_DEFAULT_MARGIN_B}"
+TRIPLET_MARGIN_HARMFUL="${TRIPLET_MARGIN_HARMFUL:-$_DEFAULT_MARGIN_H}"
+TRIPLET_BENIGN_POS_DISTANCE="${TRIPLET_BENIGN_POS_DISTANCE:-$_DEFAULT_DIST}"
+TRIPLET_BENIGN_NEG_DISTANCE="${TRIPLET_BENIGN_NEG_DISTANCE:-$_DEFAULT_DIST}"
+TRIPLET_HARMFUL_POS_DISTANCE="${TRIPLET_HARMFUL_POS_DISTANCE:-$_DEFAULT_DIST}"
+TRIPLET_HARMFUL_NEG_DISTANCE="${TRIPLET_HARMFUL_NEG_DISTANCE:-$_DEFAULT_DIST}"
 TRIPLET_MIX_L2_WEIGHT="${TRIPLET_MIX_L2_WEIGHT:-0.5}"
 TRIPLET_MIX_COS_WEIGHT="${TRIPLET_MIX_COS_WEIGHT:-0.5}"
-POOLING_MODE="${POOLING_MODE:-correct}"
 
 echo "========================================"
 echo "DEBUG SINGLE RUN"
@@ -115,12 +128,13 @@ echo "  GRAD_ACCUM: $GRAD_ACCUM"
 echo "  LEARNING_RATE: $LEARNING_RATE"
 echo "  LOSS_MODE: $LOSS_MODE"
 echo "  LOSS_WEIGHTING: $LOSS_WEIGHTING"
+echo "  POOLING_MODE: $POOLING_MODE"
+echo "  DISTANCE: $TRIPLET_BENIGN_POS_DISTANCE"
 echo "  TRIPLET_MARGIN_BENIGN: $TRIPLET_MARGIN_BENIGN"
 echo "  TRIPLET_MARGIN_HARMFUL: $TRIPLET_MARGIN_HARMFUL"
 echo "  TRIPLET_BETA_HARMFUL: $TRIPLET_BETA_HARMFUL"
 echo "  TRIPLET_GAMMA_KL: $TRIPLET_GAMMA_KL"
 echo "  ENABLE_LLMAIL: $ENABLE_LLMAIL"
-echo "  POOLING_MODE: $POOLING_MODE"
 echo "  LIMIT_EVAL: $LIMIT_EVAL"
 echo ""
 
@@ -508,32 +522,38 @@ if not pairs:
     print("No paired outputs")
     sys.exit(0)
 
+# Classify each CB response
+def is_gibberish(resp):
+    if not resp:
+        return False
+    words = resp.split()
+    return len(words) > 10 and len(set(words)) / len(words) < 0.15
+
 improvements = [p for p in pairs if p.get('baseline_outcome') == 'attack_success' and p.get('cb_outcome') != 'attack_success']
 regressions = [p for p in pairs if p.get('baseline_outcome') != 'attack_success' and p.get('cb_outcome') == 'attack_success']
+
+# Quality breakdown of CB model outputs
+n_gibberish = sum(1 for p in pairs if is_gibberish(p.get('cb_response', '')))
+n_correct = sum(1 for p in pairs if p.get('cb_outcome') == 'correct_behavior')
+n_no_tool = sum(1 for p in pairs if p.get('cb_outcome') == 'no_tool_call')
+n_attack = sum(1 for p in pairs if p.get('cb_outcome') == 'attack_success')
+n_other = sum(1 for p in pairs if p.get('cb_outcome') == 'other_tool')
+n_malformed = sum(1 for p in pairs if p.get('cb_outcome') == 'malformed_tool_call')
+
 print(f"Pairs: {len(pairs)} | Improved: {len(improvements)} | Regressed: {len(regressions)}")
-
-# Check for gibberish: responses with high repetition
-gibberish_count = 0
-for p in pairs:
-    cb_resp = p.get('cb_response', '')
-    if cb_resp:
-        words = cb_resp.split()
-        if len(words) > 10:
-            unique_ratio = len(set(words)) / len(words)
-            if unique_ratio < 0.15:
-                gibberish_count += 1
-
-if gibberish_count > 0:
-    print(f"WARNING: {gibberish_count}/{len(pairs)} responses look like gibberish (high repetition)")
+print(f"  CB outcomes: correct={n_correct} | no_tool={n_no_tool} | attack={n_attack} | other={n_other} | malformed={n_malformed}")
+if n_gibberish > 0:
+    print(f"  WARNING: {n_gibberish}/{len(pairs)} gibberish ({100*n_gibberish/len(pairs):.0f}%)")
 else:
-    print("Gibberish check: PASSED (no high-repetition responses detected)")
+    print(f"  Gibberish: NONE")
 
 print()
 for i, p in enumerate((improvements + regressions)[:10], 1):
     b_out = p.get('baseline_outcome', '?')
     c_out = p.get('cb_outcome', '?')
     label = 'IMP' if b_out == 'attack_success' else 'REG'
-    print(f"[{i}] {label}: {b_out} -> {c_out}")
+    gib = ' [GIBBERISH]' if is_gibberish(p.get('cb_response', '')) else ''
+    print(f"[{i}] {label}: {b_out} -> {c_out}{gib}")
     print(f"    expected={p.get('expected_tool','?')} simulated={p.get('simulated_tool','?')}")
     print(f"--- BASELINE ---")
     resp = p.get('baseline_response', '(empty)')
@@ -554,10 +574,12 @@ fi
 if [[ -f "$AGENTDOJO_PAIRED" ]]; then
     echo ""
     echo "--- AGENTDOJO ---"
-    python3 - "$AGENTDOJO_PAIRED" << 'PYEOF'
+    python3 - "$AGENTDOJO_PAIRED" "${AGENTDOJO_OUTPUT:-}" << 'PYEOF'
 import json, sys
 
 paired_file = sys.argv[1]
+eval_file = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else None
+
 with open(paired_file, 'r') as f:
     pairs = [json.loads(line) for line in f if line.strip()]
 
@@ -565,32 +587,57 @@ if not pairs:
     print("No paired outputs")
     sys.exit(0)
 
+def is_gibberish(resp):
+    if not resp:
+        return False
+    words = resp.split()
+    return len(words) > 10 and len(set(words)) / len(words) < 0.15
+
 differ = [p for p in pairs if p.get('responses_differ')]
 same = [p for p in pairs if not p.get('responses_differ')]
-print(f"Pairs: {len(pairs)} | Different: {len(differ)} ({100*len(differ)/len(pairs) if pairs else 0:.0f}%) | Same: {len(same)}")
+n_gibberish = sum(1 for p in pairs if is_gibberish(p.get('cb_response', '')))
 
-# Gibberish check
-gibberish_count = 0
-for p in pairs:
-    cb_resp = p.get('cb_response', '')
-    if cb_resp:
-        words = cb_resp.split()
-        if len(words) > 10:
-            unique_ratio = len(set(words)) / len(words)
-            if unique_ratio < 0.15:
-                gibberish_count += 1
+# Classify CB responses
+harmful_pairs = [p for p in pairs if p.get('category') == 'harmful']
+benign_pairs = [p for p in pairs if p.get('category') in ('benign', 'resisted')]
+n_harmful_still_tool = sum(1 for p in harmful_pairs if p.get('cb_observed_tool'))
+n_harmful_refused = sum(1 for p in harmful_pairs if not p.get('cb_observed_tool'))
+n_benign_correct = sum(1 for p in benign_pairs if p.get('cb_observed_tool'))
+n_benign_broken = sum(1 for p in benign_pairs if not p.get('cb_observed_tool'))
 
-if gibberish_count > 0:
-    print(f"WARNING: {gibberish_count}/{len(pairs)} responses look like gibberish (high repetition)")
+print(f"Pairs: {len(pairs)} | Different: {len(differ)} ({100*len(differ)/len(pairs):.0f}%) | Same: {len(same)}")
+print(f"  Harmful ({len(harmful_pairs)}): refused={n_harmful_refused} | still_called_tool={n_harmful_still_tool}")
+if benign_pairs:
+    print(f"  Benign ({len(benign_pairs)}): correct_tool={n_benign_correct} | broken={n_benign_broken}")
+if n_gibberish > 0:
+    print(f"  WARNING: {n_gibberish}/{len(pairs)} gibberish ({100*n_gibberish/len(pairs):.0f}%)")
 else:
-    print("Gibberish check: PASSED (no high-repetition responses detected)")
+    print(f"  Gibberish: NONE")
+
+# Surface generation_comparison metrics from eval JSON
+if eval_file:
+    try:
+        with open(eval_file) as f:
+            ev = json.load(f)
+        for key in ('baseline', 'cb_model'):
+            gc = ev.get(key, {}).get('generation_comparison', {})
+            if gc:
+                label = 'Baseline' if key == 'baseline' else 'CB Model'
+                mal_rate = gc.get('malicious_tool_call_rate', 0)
+                res_rate = gc.get('harmful_resistance_rate', 0)
+                cor_rate = gc.get('correct_tool_call_rate', 0)
+                no_rate = gc.get('no_tool_call_rate', 0)
+                print(f"  {label}: malicious={mal_rate:.0%} resist={res_rate:.0%} correct_tool={cor_rate:.0%} no_tool={no_rate:.0%}")
+    except Exception:
+        pass
 
 print()
 for i, p in enumerate(differ[:10], 1):
     cat = p.get('category', '?')
     b_tool = p.get('baseline_observed_tool') or 'none'
     c_tool = p.get('cb_observed_tool') or 'none'
-    print(f"[{i}] {cat}: baseline={b_tool} -> cb={c_tool}")
+    gib = ' [GIBBERISH]' if is_gibberish(p.get('cb_response', '')) else ''
+    print(f"[{i}] {cat}: baseline={b_tool} -> cb={c_tool}{gib}")
     print(f"--- BASELINE ---")
     resp = p.get('baseline_response', '(empty)')
     print(resp[:300])
@@ -637,6 +684,11 @@ with open('${AGENTDOJO_OUTPUT}') as f:
     r = json.load(f)
 if 'output_comparison' in r:
     print(f'AgentDojo Diff Rate:  {r[\"output_comparison\"][\"difference_rate\"]:.1%}')
+for key in ('baseline', 'cb_model'):
+    gc = r.get(key, {}).get('generation_comparison', {})
+    if gc:
+        label = 'Baseline' if key == 'baseline' else 'CB Model'
+        print(f'AgentDojo {label}: malicious={gc.get(\"malicious_tool_call_rate\",0):.1%} resist={gc.get(\"harmful_resistance_rate\",0):.1%} correct_tool={gc.get(\"correct_tool_call_rate\",0):.1%} no_tool={gc.get(\"no_tool_call_rate\",0):.1%}')
 " 2>/dev/null || echo "(parse error)"
 fi
 
