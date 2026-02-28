@@ -2,7 +2,6 @@
 #SBATCH --job-name=diagnose_lossmasks
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=16G
 #SBATCH --time=01:00:00
 #SBATCH --output=/scratch/memoozd/cb-scratch/logs/%x_%j.out
 #SBATCH --error=/scratch/memoozd/cb-scratch/logs/%x_%j.err
