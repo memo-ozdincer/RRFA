@@ -843,6 +843,45 @@ def analyze_run(
                     use_color=use_color,
                 )
 
+    # ---------------------------------------------------------
+    # AgentDojo Benign Analysis (capability retention)
+    # ---------------------------------------------------------
+    agentdojo_benign_json = eval_root / "agentdojo_benign_eval.json"
+    agentdojo_benign_paired = eval_root / "agentdojo_benign_eval.paired_outputs.jsonl"
+
+    if only_dataset in ("all", "agentdojo") and agentdojo_benign_json.exists():
+        benign_data = load_json(agentdojo_benign_json)
+        benign_paired = load_jsonl(agentdojo_benign_paired)
+        benign_gc = benign_data.get("cb_model", {}).get("generation_comparison", {})
+
+        results["agentdojo_benign"] = {
+            "correct_tool_rate": benign_gc.get("correct_tool_call_rate", 0) * 100,
+            "no_tool_call_rate": benign_gc.get("no_tool_call_rate", 0) * 100,
+            "total": len(benign_paired),
+            "correct_n": sum(1 for p in benign_paired if p.get("cb_observed_tool")),
+            "broken_n": sum(1 for p in benign_paired if not p.get("cb_observed_tool")),
+        }
+    else:
+        results["agentdojo_benign"] = None
+
+    # ---------------------------------------------------------
+    # Gibberish counts (from paired outputs)
+    # ---------------------------------------------------------
+    def _count_gibberish(paired_list):
+        return sum(
+            1 for p in paired_list
+            if p.get("cb_response") and len(p["cb_response"].split()) > 10
+            and len(set(p["cb_response"].split())) / len(p["cb_response"].split()) < 0.15
+        )
+
+    if results["fujitsu"] is not None:
+        fujitsu_paired = load_jsonl(eval_root / "fujitsu_eval.paired_outputs.jsonl")
+        results["fujitsu"]["gibberish_n"] = _count_gibberish(fujitsu_paired)
+
+    if results["agentdojo"] is not None:
+        ad_paired = load_jsonl(eval_root / "agentdojo_eval.paired_outputs.jsonl")
+        results["agentdojo"]["gibberish_n"] = _count_gibberish(ad_paired)
+
     return results
 
 
@@ -975,11 +1014,20 @@ def print_best_runs(
                 f"{metric.get('cb_no_tool_call_rate', 0):.1f}% / "
                 f"{metric.get('cb_multiple_tool_call_rate', 0):.1f}%"
             )
+        gib_n = metric.get('gibberish_n', 0)
+        gib_str = f" | Gibberish: {gib_n}" if gib_n > 0 else ""
         print(f"   Improvements: {metric.get('improvements', 0)}, "
-              f"Regressions: {metric.get('regressions', 0)}")
+              f"Regressions: {metric.get('regressions', 0)}{gib_str}")
         agentdojo = run.get("agentdojo", {})
         if agentdojo:
-            print(f"   AgentDojo Diff Rate: {agentdojo.get('diff_rate', 0):.1f}%")
+            print(f"   AgentDojo harmful: malicious={agentdojo.get('malicious_tool_rate', 0):.1f}% "
+                  f"no_tool={agentdojo.get('no_tool_call_rate', 0):.1f}% "
+                  f"gibberish={agentdojo.get('gibberish_n', 0)}")
+        benign = run.get("agentdojo_benign", {})
+        if benign:
+            print(f"   AgentDojo benign: correct_tool={benign.get('correct_tool_rate', 0):.1f}% "
+                  f"({benign.get('correct_n', 0)}/{benign.get('total', 0)}) "
+                  f"broken={benign.get('broken_n', 0)}")
 
     best_run = by_cb_asr[0]
     best_hparams = ",".join(
@@ -1033,6 +1081,114 @@ def plot_metrics(runs: List[Dict[str, Any]]) -> None:
         bar = "█" * bar_len
         print(f"  a={alpha:<4} {layers:<20}: {bar} {diff:.1f}%")
 
+
+
+def print_outcome_table(runs: List[Dict[str, Any]], use_color: bool = True) -> None:
+    """Print detailed outcome classification table for each run."""
+    BOLD = "\033[1m" if use_color else ""
+    GREEN = "\033[92m" if use_color else ""
+    RED = "\033[91m" if use_color else ""
+    YELLOW = "\033[93m" if use_color else ""
+    RESET = "\033[0m" if use_color else ""
+
+    print(f"\n{BOLD}{'='*130}{RESET}")
+    print(f"{BOLD}OUTCOME CLASSIFICATION{RESET}")
+    print(f"{'='*130}")
+
+    # Fujitsu outcomes
+    fujitsu_runs = [r for r in runs if r.get("fujitsu")]
+    if fujitsu_runs:
+        print(f"\n{BOLD}Fujitsu (harmful tool-flip):{RESET}")
+        header = f"  {'Run':<35} {'Ckpt':<10} {'Total':<6} {GREEN}{'Correct':<8}{RESET} {GREEN}{'NoTool':<8}{RESET} {RED}{'Attack':<8}{RESET} {YELLOW}{'Gibber':<8}{RESET} {'Other':<8} {'Malfrm':<8}"
+        print(header)
+        print(f"  {'-'*120}")
+        for r in fujitsu_runs:
+            f = r["fujitsu"]
+            total = f.get("total", 0)
+            correct_n = round(f.get("cb_correct_tool_rate", 0) * total / 100) if total else 0
+            no_tool_n = round(f.get("cb_no_tool_call_rate", 0) * total / 100) if total else 0
+            attack_n = round(f.get("cb_asr", 0) * total / 100) if total else 0
+            gib_n = f.get("gibberish_n", 0)
+            other_n = round(f.get("cb_other_tool_call_rate", 0) * total / 100) if total else 0
+            malformed_n = round(f.get("cb_malformed_tool_call_rate", 0) * total / 100) if total else 0
+            ckpt = r.get("checkpoint", "final")
+            print(f"  {r['run_name']:<35} {ckpt:<10} {total:<6} {GREEN}{correct_n:<8}{RESET} {GREEN}{no_tool_n:<8}{RESET} {RED}{attack_n:<8}{RESET} {YELLOW}{gib_n:<8}{RESET} {other_n:<8} {malformed_n:<8}")
+
+    # AgentDojo harmful outcomes
+    ad_runs = [r for r in runs if r.get("agentdojo")]
+    if ad_runs:
+        print(f"\n{BOLD}AgentDojo (harmful):{RESET}")
+        header = f"  {'Run':<35} {'Ckpt':<10} {'Total':<6} {GREEN}{'Refused':<8}{RESET} {RED}{'StillMal':<10}{RESET} {YELLOW}{'Gibber':<8}{RESET} {'NoTool':<8}"
+        print(header)
+        print(f"  {'-'*100}")
+        for r in ad_runs:
+            a = r["agentdojo"]
+            total = a.get("malicious_evaluable_total", 0) or a.get("total", 0)
+            mal_n = round(a.get("malicious_tool_rate", 0) * total / 100) if total else 0
+            no_n = round(a.get("no_tool_call_rate", 0) * total / 100) if total else 0
+            gib_n = a.get("gibberish_n", 0)
+            refused_n = total - mal_n
+            ckpt = r.get("checkpoint", "final")
+            print(f"  {r['run_name']:<35} {ckpt:<10} {total:<6} {GREEN}{refused_n:<8}{RESET} {RED}{mal_n:<10}{RESET} {YELLOW}{gib_n:<8}{RESET} {no_n:<8}")
+
+    # AgentDojo benign outcomes
+    benign_runs = [r for r in runs if r.get("agentdojo_benign")]
+    if benign_runs:
+        print(f"\n{BOLD}AgentDojo (benign — capability retention):{RESET}")
+        header = f"  {'Run':<35} {'Ckpt':<10} {'Total':<6} {GREEN}{'Correct':<8}{RESET} {RED}{'Broken':<8}{RESET}"
+        print(header)
+        print(f"  {'-'*80}")
+        for r in benign_runs:
+            b = r["agentdojo_benign"]
+            ckpt = r.get("checkpoint", "final")
+            print(f"  {r['run_name']:<35} {ckpt:<10} {b['total']:<6} {GREEN}{b['correct_n']:<8}{RESET} {RED}{b['broken_n']:<8}{RESET}")
+
+
+def print_checkpoint_progression(runs: List[Dict[str, Any]], use_color: bool = True) -> None:
+    """Show how metrics change across checkpoints for each base run."""
+    BOLD = "\033[1m" if use_color else ""
+    GREEN = "\033[92m" if use_color else ""
+    RESET = "\033[0m" if use_color else ""
+
+    # Group runs by base_run_name
+    from collections import defaultdict
+    groups = defaultdict(list)
+    for r in runs:
+        groups[r.get("base_run_name", r["run_name"])].append(r)
+
+    # Only show groups with multiple checkpoints
+    multi_ckpt = {k: v for k, v in groups.items() if len(v) > 1}
+    if not multi_ckpt:
+        return
+
+    print(f"\n{BOLD}{'='*100}{RESET}")
+    print(f"{BOLD}CHECKPOINT PROGRESSION{RESET}")
+    print(f"{'='*100}")
+
+    for base_name, ckpts in sorted(multi_ckpt.items()):
+        # Sort by checkpoint step
+        def _step(r):
+            ckpt = r.get("checkpoint", "final")
+            if ckpt == "final":
+                return 999999
+            m = re.match(r"checkpoint-(\d+)", ckpt)
+            return int(m.group(1)) if m else 999998
+        ckpts.sort(key=_step)
+
+        print(f"\n{BOLD}{base_name}:{RESET}")
+        parts = []
+        for r in ckpts:
+            ckpt = r.get("checkpoint", "final")
+            f = r.get("fujitsu", {})
+            a = r.get("agentdojo", {})
+            b = r.get("agentdojo_benign", {})
+            asr = f"{f.get('cb_asr', 0):.0f}%" if f else "N/A"
+            mal = f"{a.get('malicious_tool_rate', 0):.0f}%" if a else "N/A"
+            benign_cor = f"{b.get('correct_tool_rate', 0):.0f}%" if b else "N/A"
+            gib = f.get("gibberish_n", 0) if f else "?"
+            parts.append(f"  {ckpt:<15} ASR={asr:<6} AgentDojo_mal={mal:<6} benign_correct={benign_cor:<6} gibberish={gib}")
+        for p in parts:
+            print(p)
 
 
 def compare_samples(
@@ -1432,13 +1588,16 @@ Examples:
         best_metric_dataset = args.only_dataset
     else:
         has_fujitsu = any(r.get("fujitsu") for r in all_results)
-        if has_fujitsu:
-            best_metric_dataset = "fujitsu"
-        else:
-            best_metric_dataset = "fujitsu"
+        best_metric_dataset = "fujitsu" if has_fujitsu else "fujitsu"
 
     print_best_runs(all_results, args.top_n, use_color, metric_dataset=best_metric_dataset)
-    
+
+    # Outcome classification table
+    print_outcome_table(all_results, use_color)
+
+    # Checkpoint progression
+    print_checkpoint_progression(all_results, use_color)
+
     # Plot metrics
     plot_metrics(all_results)
     
@@ -1475,17 +1634,20 @@ Examples:
             writer.writerow([
                 "run_name", "base_run_name", "checkpoint",
                 "baseline_asr", "cb_asr", "reduction",
-                "baseline_malicious_tool_rate", "cb_malicious_tool_rate",
-                "baseline_correct_tool_rate", "cb_correct_tool_rate",
+                "cb_malicious_tool_rate", "cb_correct_tool_rate",
                 "cb_no_tool_call_rate", "cb_other_tool_call_rate",
-                "cb_multiple_tool_call_rate", "cb_malformed_tool_call_rate",
-                "improvements", "regressions", "agentdojo_diff_rate",
-                "agentdojo_malicious_tool_rate", "agentdojo_correct_tool_rate",
-                "agentdojo_no_tool_call_rate", "agentdojo_multiple_tool_call_rate",
+                "cb_malformed_tool_call_rate", "fujitsu_gibberish_n",
+                "improvements", "regressions",
+                "agentdojo_diff_rate", "agentdojo_malicious_tool_rate",
+                "agentdojo_correct_tool_rate", "agentdojo_no_tool_call_rate",
+                "agentdojo_gibberish_n",
+                "benign_correct_tool_rate", "benign_no_tool_rate",
+                "benign_correct_n", "benign_broken_n",
             ])
             for r in all_results:
                 fujitsu = r.get("fujitsu") or {}
                 agentdojo = r.get("agentdojo") or {}
+                benign = r.get("agentdojo_benign") or {}
                 writer.writerow([
                     r.get("run_name", ""),
                     r.get("base_run_name", ""),
@@ -1493,21 +1655,23 @@ Examples:
                     fujitsu.get("baseline_asr", "") if fujitsu else "",
                     fujitsu.get("cb_asr", "") if fujitsu else "",
                     fujitsu.get("baseline_asr", 0) - fujitsu.get("cb_asr", 0) if fujitsu else "",
-                    fujitsu.get("baseline_malicious_tool_rate", "") if fujitsu else "",
                     fujitsu.get("cb_malicious_tool_rate", "") if fujitsu else "",
-                    fujitsu.get("baseline_correct_tool_rate", "") if fujitsu else "",
                     fujitsu.get("cb_correct_tool_rate", "") if fujitsu else "",
                     fujitsu.get("cb_no_tool_call_rate", "") if fujitsu else "",
                     fujitsu.get("cb_other_tool_call_rate", "") if fujitsu else "",
-                    fujitsu.get("cb_multiple_tool_call_rate", "") if fujitsu else "",
                     fujitsu.get("cb_malformed_tool_call_rate", "") if fujitsu else "",
+                    fujitsu.get("gibberish_n", "") if fujitsu else "",
                     fujitsu.get("improvements", "") if fujitsu else "",
                     fujitsu.get("regressions", "") if fujitsu else "",
                     agentdojo.get("diff_rate", "") if agentdojo else "",
                     agentdojo.get("malicious_tool_rate", "") if agentdojo else "",
                     agentdojo.get("correct_tool_rate", "") if agentdojo else "",
                     agentdojo.get("no_tool_call_rate", "") if agentdojo else "",
-                    agentdojo.get("multiple_tool_call_rate", "") if agentdojo else "",
+                    agentdojo.get("gibberish_n", "") if agentdojo else "",
+                    benign.get("correct_tool_rate", "") if benign else "",
+                    benign.get("no_tool_call_rate", "") if benign else "",
+                    benign.get("correct_n", "") if benign else "",
+                    benign.get("broken_n", "") if benign else "",
                 ])
         print(f"\nExported results to: {args.csv}")
 

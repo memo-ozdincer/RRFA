@@ -68,7 +68,7 @@ export TRANSFORMERS_OFFLINE=1
 # =============================================================================
 # Single Run Configuration
 # =============================================================================
-POOLING_MODE=correct
+POOLING_MODE="${POOLING_MODE:-legacy}"
 ALPHA="${ALPHA:-10.0}"
 LAYERS="${LAYERS:-10,20}"
 POLICY="${POLICY:-assistant_only}"
@@ -84,7 +84,6 @@ LORA_ALPHA="${LORA_ALPHA:-32}"
 DTYPE="${DTYPE:-bfloat16}"
 LOSS_MODE="${LOSS_MODE:-triplet_full}"
 LOSS_WEIGHTING="${LOSS_WEIGHTING:-dual}"
-ENABLE_LLMAIL="${ENABLE_LLMAIL:-false}"
 
 # Triplet hyperparameters
 TRIPLET_ALPHA_BENIGN="${TRIPLET_ALPHA_BENIGN:-0.5}"
@@ -135,7 +134,6 @@ echo "  TRIPLET_MARGIN_BENIGN: $TRIPLET_MARGIN_BENIGN"
 echo "  TRIPLET_MARGIN_HARMFUL: $TRIPLET_MARGIN_HARMFUL"
 echo "  TRIPLET_BETA_HARMFUL: $TRIPLET_BETA_HARMFUL"
 echo "  TRIPLET_GAMMA_KL: $TRIPLET_GAMMA_KL"
-echo "  ENABLE_LLMAIL: $ENABLE_LLMAIL"
 echo "  LIMIT_EVAL: $LIMIT_EVAL"
 echo ""
 
@@ -169,8 +167,6 @@ DS_TRACES="$TRACES_DIR/fujitsu_b4_ds.jsonl"
 DR_TRACES="$TRACES_DIR/fujitsu_b4_dr.jsonl"
 AGENTDOJO_TRACES="$TRACES_DIR/agentdojo_complete.jsonl"
 AGENTHARM_TRACES="$TRACES_DIR/agentharm_mixed.jsonl"
-LLMAIL_DS_TRACES="$TRACES_DIR/llmail_inject_ds.jsonl"
-LLMAIL_DR_TRACES="$TRACES_DIR/llmail_inject_dr.jsonl"
 TOOL_SCHEMA="$REPO_DIR/configs/tool_schemas/b4_standard_v1.json"
 
 echo "Input traces:"
@@ -215,12 +211,6 @@ if [[ -f "$AGENTHARM_TRACES" ]]; then
     echo "  OK $(basename "$AGENTHARM_TRACES"): $(wc -l < "$AGENTHARM_TRACES") lines"
 fi
 
-HAS_LLMAIL=false
-if [[ "$ENABLE_LLMAIL" == "true" && -f "$LLMAIL_DS_TRACES" && -f "$LLMAIL_DR_TRACES" ]]; then
-    HAS_LLMAIL=true
-    echo "  OK $(basename "$LLMAIL_DS_TRACES"): $(wc -l < "$LLMAIL_DS_TRACES") lines"
-    echo "  OK $(basename "$LLMAIL_DR_TRACES"): $(wc -l < "$LLMAIL_DR_TRACES") lines"
-fi
 echo ""
 
 # =============================================================================
@@ -245,10 +235,6 @@ TRACE_FILES=("$DS_TRACES" "$DR_TRACES" "$AGENTDOJO_TRACES")
 if [[ "$HAS_AGENTHARM" == "true" ]]; then
     TRACE_FILES+=("$AGENTHARM_TRACES")
 fi
-if [[ "$HAS_LLMAIL" == "true" ]]; then
-    TRACE_FILES+=("$LLMAIL_DS_TRACES" "$LLMAIL_DR_TRACES")
-fi
-
 for trace_file in "${TRACE_FILES[@]}"; do
     basename=$(basename "$trace_file" .jsonl)
     render_out="$RUN_DIR/renders/${basename}.jsonl"
@@ -347,12 +333,6 @@ BENIGN_LOSSMASK_ARGS=(
     "$SPLIT_DIR/agentdojo_lossmasks_benign.jsonl"
 )
 
-if [[ "$HAS_LLMAIL" == "true" ]]; then
-    HARMFUL_RENDER_ARGS+=("$RUN_DIR/renders/llmail_inject_ds.jsonl")
-    HARMFUL_LOSSMASK_ARGS+=("$RUN_DIR/lossmasks/llmail_inject_ds.jsonl")
-    BENIGN_RENDER_ARGS+=("$RUN_DIR/renders/llmail_inject_dr.jsonl")
-    BENIGN_LOSSMASK_ARGS+=("$RUN_DIR/lossmasks/llmail_inject_dr.jsonl")
-fi
 if [[ "$HAS_AGENTHARM" == "true" ]]; then
     if [[ -f "$AGENTHARM_SPLIT_DIR/agentharm_renders_harmful.jsonl" ]]; then
         HARMFUL_RENDER_ARGS+=("$AGENTHARM_SPLIT_DIR/agentharm_renders_harmful.jsonl")
@@ -480,10 +460,67 @@ if [[ "$train_status" != "SUCCESS" ]]; then
 fi
 
 # =============================================================================
-# Step 4: Evaluation
+# Step 4a: Checkpoint Evaluation (intermediate checkpoints)
 # =============================================================================
 echo "========================================"
-echo "STEP 4: Evaluation"
+echo "STEP 4a: Checkpoint Evaluation"
+echo "========================================"
+
+for ckpt_path in "$RUN_DIR/model/checkpoint-"*; do
+    [[ -d "$ckpt_path" ]] || continue
+    ckpt_name=$(basename "$ckpt_path")
+    CKPT_EVAL_DIR="$RUN_DIR/eval/checkpoints/$ckpt_name"
+    mkdir -p "$CKPT_EVAL_DIR"
+    echo "Evaluating $ckpt_name..."
+
+    # Fujitsu checkpoint eval
+    python src/evaluation/eval.py \
+        --baseline "$TOKENIZER" \
+        --cb-adapter "$ckpt_path" \
+        --eval-data "$DS_TRACES" \
+        --tool-schema "$TOOL_SCHEMA" \
+        --output "$CKPT_EVAL_DIR/fujitsu_eval.json" \
+        --limit "$LIMIT_EVAL" \
+        --merge-adapter \
+        --dtype "$DTYPE" 2>&1 | tee -a "$CKPT_EVAL_DIR/fujitsu.log"
+
+    # AgentDojo harmful checkpoint eval
+    if [[ -f "$SPLIT_DIR/agentdojo_traces_harmful.jsonl" ]]; then
+        python src/evaluation/eval.py \
+            --baseline "$TOKENIZER" \
+            --cb-adapter "$ckpt_path" \
+            --eval-data "$SPLIT_DIR/agentdojo_traces_harmful.jsonl" \
+            --tool-schema "$TOOL_SCHEMA" \
+            --output "$CKPT_EVAL_DIR/agentdojo_eval.json" \
+            --use-sample-context \
+            --limit "$LIMIT_EVAL" \
+            --merge-adapter \
+            --dtype "$DTYPE" 2>&1 | tee -a "$CKPT_EVAL_DIR/agentdojo.log"
+    fi
+
+    # AgentDojo benign checkpoint eval
+    if [[ -f "$SPLIT_DIR/agentdojo_traces_benign.jsonl" ]]; then
+        python src/evaluation/eval.py \
+            --baseline "$TOKENIZER" \
+            --cb-adapter "$ckpt_path" \
+            --eval-data "$SPLIT_DIR/agentdojo_traces_benign.jsonl" \
+            --tool-schema "$TOOL_SCHEMA" \
+            --output "$CKPT_EVAL_DIR/agentdojo_benign_eval.json" \
+            --use-sample-context \
+            --limit "$LIMIT_EVAL" \
+            --merge-adapter \
+            --dtype "$DTYPE" 2>&1 | tee -a "$CKPT_EVAL_DIR/agentdojo_benign.log"
+    fi
+
+    echo "$ckpt_name eval complete."
+    echo ""
+done
+
+# =============================================================================
+# Step 4b: Final Evaluation
+# =============================================================================
+echo "========================================"
+echo "STEP 4b: Final Evaluation"
 echo "========================================"
 
 if [[ -d "$RUN_DIR/model/final" ]]; then
@@ -549,7 +586,7 @@ if [[ -f "$SPLIT_DIR/agentdojo_traces_benign.jsonl" ]]; then
 fi
 
 # =============================================================================
-# Step 5: Print Examples (the key debug output)
+# Step 5: Print Examples (the key debug output — final checkpoint)
 # =============================================================================
 echo ""
 echo "========================================"

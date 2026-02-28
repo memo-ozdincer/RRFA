@@ -1109,6 +1109,100 @@ def _load_jsonl_safe(path: Path) -> List[dict]:
 
 
 
+def _classify_paired_outputs(pairs: List[dict], dataset_type: str) -> dict:
+    """Classify paired outputs into outcome categories.
+
+    Returns dict with counts for each outcome type.
+    """
+    counts = Counter()
+    for p in pairs:
+        is_gib = _is_gibberish(p.get("cb_response", ""))
+
+        if dataset_type == "fujitsu":
+            cb_out = p.get("cb_outcome", "unknown")
+            if is_gib:
+                counts["gibberish"] += 1
+            elif cb_out == "correct_behavior":
+                counts["correct_tool"] += 1
+            elif cb_out == "no_tool_call":
+                counts["no_tool"] += 1
+            elif cb_out == "attack_success":
+                counts["attack"] += 1
+            elif cb_out == "other_tool":
+                counts["other_tool"] += 1
+            elif cb_out == "malformed_tool_call":
+                counts["malformed"] += 1
+            else:
+                counts["unknown"] += 1
+        elif dataset_type == "agentdojo_harmful":
+            has_tool = bool(p.get("cb_observed_tool"))
+            if is_gib:
+                counts["gibberish"] += 1
+            elif not has_tool:
+                counts["refused"] += 1
+            else:
+                counts["still_called_tool"] += 1
+        elif dataset_type == "agentdojo_benign":
+            has_tool = bool(p.get("cb_observed_tool"))
+            if is_gib:
+                counts["gibberish"] += 1
+            elif has_tool:
+                counts["correct_tool"] += 1
+            else:
+                counts["broken"] += 1
+
+    return dict(counts)
+
+
+def _discover_checkpoints(run_dir: Path) -> List[Tuple[str, Path]]:
+    """Discover checkpoint eval directories. Returns list of (name, eval_dir)."""
+    checkpoints = []
+    ckpt_dir = run_dir / "eval" / "checkpoints"
+    if ckpt_dir.is_dir():
+        for d in sorted(ckpt_dir.iterdir()):
+            if d.is_dir() and d.name.startswith("checkpoint-"):
+                checkpoints.append((d.name, d))
+    # Also add final
+    final_eval = run_dir / "eval"
+    if (final_eval / "fujitsu_eval.json").exists():
+        checkpoints.append(("final", final_eval))
+    return checkpoints
+
+
+def _extract_metrics_from_eval_dir(eval_dir: Path) -> dict:
+    """Extract key metrics from an eval directory."""
+    metrics = {}
+
+    fujitsu = _load_json_safe(eval_dir / "fujitsu_eval.json")
+    if fujitsu:
+        cb_tf = fujitsu.get("cb_model", {}).get("tool_flip_asr", {})
+        metrics["fujitsu_cb_asr"] = cb_tf.get("attack_success_rate", None)
+        metrics["fujitsu_correct"] = cb_tf.get(
+            "correct_tool_call_rate", cb_tf.get("correct_behavior_rate", None)
+        )
+        metrics["fujitsu_no_tool"] = cb_tf.get("no_tool_call_rate", None)
+
+        # Count gibberish from paired outputs
+        paired = _load_jsonl_safe(eval_dir / "fujitsu_eval.paired_outputs.jsonl")
+        if paired:
+            n_gib = sum(1 for p in paired if _is_gibberish(p.get("cb_response", "")))
+            metrics["fujitsu_gibberish"] = n_gib / len(paired) if paired else 0
+
+    agentdojo = _load_json_safe(eval_dir / "agentdojo_eval.json")
+    if agentdojo:
+        cb_gc = agentdojo.get("cb_model", {}).get("generation_comparison", {})
+        metrics["agentdojo_malicious"] = cb_gc.get("malicious_tool_call_rate", None)
+        metrics["agentdojo_resist"] = cb_gc.get("harmful_resistance_rate", None)
+
+    benign = _load_json_safe(eval_dir / "agentdojo_benign_eval.json")
+    if benign:
+        cb_gc = benign.get("cb_model", {}).get("generation_comparison", {})
+        metrics["benign_correct"] = cb_gc.get("correct_tool_call_rate", None)
+        metrics["benign_no_tool"] = cb_gc.get("no_tool_call_rate", None)
+
+    return metrics
+
+
 def page_eval_results():
     st.header("Eval Results")
 
@@ -1136,6 +1230,10 @@ def page_eval_results():
             "      fujitsu_eval.paired_outputs.jsonl\n"
             "      agentdojo_eval.json\n"
             "      agentdojo_benign_eval.json\n"
+            "      checkpoints/\n"
+            "        checkpoint-50/\n"
+            "          fujitsu_eval.json\n"
+            "          ...\n"
             "```"
         )
         return
@@ -1168,7 +1266,72 @@ def page_eval_results():
         st.warning("No run directories found with eval/ subdirectory.")
         return
 
-    # --- Bar charts ---
+    # =====================================================================
+    # Outcome Breakdown Chart (stacked bar per run)
+    # =====================================================================
+    st.subheader("Outcome Breakdown")
+
+    outcome_rows = []
+    for rd in run_dirs:
+        run_label = rd.name
+        eval_path = rd / "eval"
+
+        # Fujitsu outcomes
+        fujitsu_paired = _load_jsonl_safe(eval_path / "fujitsu_eval.paired_outputs.jsonl")
+        if fujitsu_paired:
+            counts = _classify_paired_outputs(fujitsu_paired, "fujitsu")
+            total = max(len(fujitsu_paired), 1)
+            outcome_rows.append({
+                "run": run_label, "dataset": "Fujitsu",
+                "Correct Tool": counts.get("correct_tool", 0) / total,
+                "No Tool (Refusal)": counts.get("no_tool", 0) / total,
+                "Attack Success": counts.get("attack", 0) / total,
+                "Gibberish": counts.get("gibberish", 0) / total,
+                "Other/Malformed": (counts.get("other_tool", 0) + counts.get("malformed", 0)) / total,
+            })
+
+        # AgentDojo harmful outcomes
+        ad_harmful_paired = _load_jsonl_safe(eval_path / "agentdojo_eval.paired_outputs.jsonl")
+        if ad_harmful_paired:
+            counts = _classify_paired_outputs(ad_harmful_paired, "agentdojo_harmful")
+            total = max(len(ad_harmful_paired), 1)
+            outcome_rows.append({
+                "run": run_label, "dataset": "AgentDojo Harmful",
+                "Refused (Good)": counts.get("refused", 0) / total,
+                "Still Called Tool": counts.get("still_called_tool", 0) / total,
+                "Gibberish": counts.get("gibberish", 0) / total,
+            })
+
+        # AgentDojo benign outcomes
+        ad_benign_paired = _load_jsonl_safe(eval_path / "agentdojo_benign_eval.paired_outputs.jsonl")
+        if ad_benign_paired:
+            counts = _classify_paired_outputs(ad_benign_paired, "agentdojo_benign")
+            total = max(len(ad_benign_paired), 1)
+            outcome_rows.append({
+                "run": run_label, "dataset": "AgentDojo Benign",
+                "Correct Tool": counts.get("correct_tool", 0) / total,
+                "Broken": counts.get("broken", 0) / total,
+                "Gibberish": counts.get("gibberish", 0) / total,
+            })
+
+    if outcome_rows:
+        outcome_df = pd.DataFrame(outcome_rows)
+        datasets_with_data = outcome_df["dataset"].unique().tolist()
+        selected_outcome_ds = st.selectbox(
+            "Outcome dataset", datasets_with_data, key="outcome_ds_select"
+        )
+        ds_df = outcome_df[outcome_df["dataset"] == selected_outcome_ds].set_index("run")
+        # Drop the dataset column and any all-NaN columns
+        ds_df = ds_df.drop(columns=["dataset"], errors="ignore")
+        ds_df = ds_df.dropna(axis=1, how="all").fillna(0)
+        if not ds_df.empty:
+            st.bar_chart(ds_df)
+    else:
+        st.info("No paired output files found to compute outcome breakdowns.")
+
+    # =====================================================================
+    # Safety vs Capability (from CSV)
+    # =====================================================================
     if df is not None and len(df) > 0:
         st.subheader("Safety vs Capability")
 
@@ -1177,7 +1340,6 @@ def page_eval_results():
             label = f"{row.get('preset', '?')}_a{row.get('alpha', '?')}"
             entry = {"config": label}
 
-            # Safety metrics (lower is better)
             try:
                 entry["Fujitsu CB ASR"] = float(row["fujitsu_cb_asr"])
             except (ValueError, KeyError, TypeError):
@@ -1186,8 +1348,6 @@ def page_eval_results():
                 entry["AgentDojo Malicious Rate"] = float(row["agentdojo_cb_malicious_rate"])
             except (ValueError, KeyError, TypeError):
                 pass
-
-            # Capability metrics (higher is better)
             try:
                 entry["Benign Correct Tool Rate"] = float(row["agentdojo_benign_correct_rate"])
             except (ValueError, KeyError, TypeError):
@@ -1197,7 +1357,6 @@ def page_eval_results():
             except (ValueError, KeyError, TypeError):
                 pass
 
-            # Gibberish (lower is better)
             gib_str = str(row.get("fujitsu_gibberish_rate", ""))
             if "/" in gib_str:
                 try:
@@ -1211,19 +1370,96 @@ def page_eval_results():
         if chart_data:
             chart_df = pd.DataFrame(chart_data).set_index("config")
 
-            # Safety chart
             safety_cols = [c for c in ["Fujitsu CB ASR", "AgentDojo Malicious Rate", "Gibberish Rate"] if c in chart_df.columns]
             if safety_cols:
                 st.markdown("**Attack Success Rates** (lower is better)")
                 st.bar_chart(chart_df[safety_cols])
 
-            # Capability chart
             cap_cols = [c for c in ["Benign Correct Tool Rate", "Fujitsu Correct Rate"] if c in chart_df.columns]
             if cap_cols:
                 st.markdown("**Capability Retention** (higher is better)")
                 st.bar_chart(chart_df[cap_cols])
 
-    # --- Per-run drill-down ---
+    # =====================================================================
+    # Checkpoint Progression
+    # =====================================================================
+    st.subheader("Checkpoint Progression")
+
+    # Discover runs with checkpoints
+    runs_with_ckpts = []
+    for rd in run_dirs:
+        ckpts = _discover_checkpoints(rd)
+        if len(ckpts) > 1:  # Need at least 2 points (checkpoint + final)
+            runs_with_ckpts.append((rd.name, rd, ckpts))
+
+    if runs_with_ckpts:
+        ckpt_run_names = [name for name, _, _ in runs_with_ckpts]
+        selected_ckpt_run = st.selectbox(
+            "Select run for checkpoint comparison", ckpt_run_names,
+            key="ckpt_run_select",
+        )
+
+        # Find the selected run's checkpoints
+        ckpts = []
+        for name, rd, _ckpts in runs_with_ckpts:
+            if name == selected_ckpt_run:
+                ckpts = _ckpts
+                break
+
+        # Build progression data
+        progression_rows = []
+        for ckpt_name, ckpt_eval_dir in ckpts:
+            # Extract step number for sorting
+            if ckpt_name.startswith("checkpoint-"):
+                try:
+                    step = int(ckpt_name.split("-")[1])
+                except (IndexError, ValueError):
+                    step = 0
+            else:
+                step = 99999  # "final" sorts last
+
+            metrics = _extract_metrics_from_eval_dir(ckpt_eval_dir)
+            row = {"checkpoint": ckpt_name, "step": step}
+            row.update(metrics)
+            progression_rows.append(row)
+
+        if progression_rows:
+            prog_df = pd.DataFrame(progression_rows).sort_values("step")
+
+            # Format for display
+            display_df = prog_df.set_index("checkpoint").drop(columns=["step"])
+            # Format percentages
+            for col in display_df.columns:
+                display_df[col] = display_df[col].apply(
+                    lambda v: f"{v:.1%}" if pd.notna(v) else "N/A"
+                )
+            st.table(display_df)
+
+            # Line chart: Fujitsu ASR and benign correct across checkpoints
+            chart_cols = []
+            chart_df = prog_df.set_index("checkpoint").drop(columns=["step"])
+            for col, label in [
+                ("fujitsu_cb_asr", "Fujitsu CB ASR"),
+                ("fujitsu_correct", "Fujitsu Correct"),
+                ("agentdojo_malicious", "AgentDojo Malicious"),
+                ("benign_correct", "Benign Correct Tool"),
+                ("fujitsu_gibberish", "Gibberish Rate"),
+            ]:
+                if col in chart_df.columns and chart_df[col].notna().any():
+                    chart_df = chart_df.rename(columns={col: label})
+                    chart_cols.append(label)
+
+            if chart_cols:
+                st.line_chart(chart_df[chart_cols])
+    else:
+        st.info(
+            "No checkpoint data found. Checkpoints are saved to "
+            "`eval/checkpoints/checkpoint-{step}/` during training."
+        )
+
+    # =====================================================================
+    # Per-run drill-down
+    # =====================================================================
     st.subheader("Per-Run Details")
 
     run_names = [d.name for d in run_dirs]
@@ -1244,7 +1480,6 @@ def page_eval_results():
         "Fujitsu": "fujitsu_eval.json",
         "AgentDojo (harmful)": "agentdojo_eval.json",
         "AgentDojo (benign)": "agentdojo_benign_eval.json",
-        "LLMail": "llmail_eval.json",
     }
 
     metrics_rows = []
@@ -1256,11 +1491,9 @@ def page_eval_results():
 
         row = {"Dataset": label}
 
-        # Extract key metrics depending on dataset type
         cb = data.get("cb_model", {})
         baseline = data.get("baseline", {})
 
-        # Tool flip ASR (Fujitsu/LLMail)
         if "tool_flip_asr" in cb:
             tf = cb["tool_flip_asr"]
             row["CB ASR"] = f"{tf.get('attack_success_rate', 0):.1%}"
@@ -1269,7 +1502,6 @@ def page_eval_results():
             if "tool_flip_asr" in baseline:
                 row["Baseline ASR"] = f"{baseline['tool_flip_asr'].get('attack_success_rate', 0):.1%}"
 
-        # Generation comparison (AgentDojo)
         if "generation_comparison" in cb:
             gc = cb["generation_comparison"]
             row["Malicious Rate"] = f"{gc.get('malicious_tool_call_rate', 0):.1%}"
@@ -1277,15 +1509,6 @@ def page_eval_results():
             row["Resist Rate"] = f"{gc.get('harmful_resistance_rate', 0):.1%}"
             row["No-Tool"] = f"{gc.get('no_tool_call_rate', 0):.1%}"
 
-        # LLMail-specific
-        if "llmail_attack" in cb:
-            la = cb["llmail_attack"]
-            row["CB ASR"] = f"{la.get('attack_success_rate', 0):.1%}"
-        if "llmail_usefulness" in cb:
-            lu = cb["llmail_usefulness"]
-            row["Usefulness"] = f"{lu.get('usefulness_rate', 0):.1%}"
-
-        # Delta
         delta = data.get("delta", {})
         if "tool_flip_asr" in delta:
             row["Delta ASR"] = f"{delta['tool_flip_asr']:+.1%}"
@@ -1296,14 +1519,15 @@ def page_eval_results():
         st.markdown("**Eval Metrics**")
         st.table(pd.DataFrame(metrics_rows).set_index("Dataset"))
 
-    # --- Paired output browser ---
+    # =====================================================================
+    # Paired output browser
+    # =====================================================================
     st.subheader("Paired Output Browser")
 
     paired_files = {
         "Fujitsu": eval_dir / "fujitsu_eval.paired_outputs.jsonl",
         "AgentDojo (harmful)": eval_dir / "agentdojo_eval.paired_outputs.jsonl",
         "AgentDojo (benign)": eval_dir / "agentdojo_benign_eval.paired_outputs.jsonl",
-        "LLMail": eval_dir / "llmail_eval.paired_outputs.jsonl",
     }
 
     available_paired = {k: v for k, v in paired_files.items() if v.exists()}
@@ -1321,8 +1545,51 @@ def page_eval_results():
         st.info("No paired outputs in this file.")
         return
 
+    # Determine dataset type for classification
+    if "fujitsu" in selected_dataset.lower():
+        ds_type = "fujitsu"
+    elif "benign" in selected_dataset.lower():
+        ds_type = "agentdojo_benign"
+    else:
+        ds_type = "agentdojo_harmful"
+
+    # Classify all pairs for outcome filtering
+    pair_classifications = []
+    for p in pairs:
+        is_gib = _is_gibberish(p.get("cb_response", ""))
+        if ds_type == "fujitsu":
+            cb_out = p.get("cb_outcome", "unknown")
+            if is_gib:
+                cls = "gibberish"
+            elif cb_out == "correct_behavior":
+                cls = "correct_tool"
+            elif cb_out == "no_tool_call":
+                cls = "no_tool"
+            elif cb_out == "attack_success":
+                cls = "attack"
+            elif cb_out in ("other_tool", "malformed_tool_call"):
+                cls = "other"
+            else:
+                cls = "unknown"
+        elif ds_type == "agentdojo_harmful":
+            if is_gib:
+                cls = "gibberish"
+            elif not p.get("cb_observed_tool"):
+                cls = "refused"
+            else:
+                cls = "still_called_tool"
+        else:  # benign
+            if is_gib:
+                cls = "gibberish"
+            elif p.get("cb_observed_tool"):
+                cls = "correct_tool"
+            else:
+                cls = "broken"
+        pair_classifications.append(cls)
+
     # Filter options
-    col1, col2 = st.columns(2)
+    all_outcomes = sorted(set(pair_classifications))
+    col1, col2, col3 = st.columns(3)
     with col1:
         category_filter = st.multiselect(
             "Category",
@@ -1331,18 +1598,30 @@ def page_eval_results():
             key="eval_cat_filter",
         )
     with col2:
+        outcome_filter = st.multiselect(
+            "CB Outcome",
+            all_outcomes,
+            default=all_outcomes,
+            key="eval_outcome_filter",
+        )
+    with col3:
         show_filter = st.radio(
             "Show",
-            ["All", "Different only", "Gibberish only", "Improved only", "Regressed only"],
+            ["All", "Different only", "Improved only", "Regressed only"],
             key="eval_show_filter",
         )
 
     # Apply filters
-    filtered = [p for p in pairs if p.get("category", "unknown") in category_filter]
+    filtered = []
+    for idx, p in enumerate(pairs):
+        if p.get("category", "unknown") not in category_filter:
+            continue
+        if pair_classifications[idx] not in outcome_filter:
+            continue
+        filtered.append(p)
+
     if show_filter == "Different only":
         filtered = [p for p in filtered if p.get("responses_differ")]
-    elif show_filter == "Gibberish only":
-        filtered = [p for p in filtered if _is_gibberish(p.get("cb_response", ""))]
     elif show_filter == "Improved only":
         filtered = [
             p for p in filtered
@@ -1356,12 +1635,13 @@ def page_eval_results():
             and p.get("cb_outcome") == "attack_success"
         ]
 
-    # Stats bar
-    n_gib = sum(1 for p in filtered if _is_gibberish(p.get("cb_response", "")))
-    st.write(f"**Showing {len(filtered)}/{len(pairs)} pairs** | Gibberish: {n_gib}")
+    # Outcome stats bar
+    outcome_counts = _classify_paired_outputs(pairs, ds_type)
+    stats_parts = [f"**{k}**: {v}" for k, v in sorted(outcome_counts.items())]
+    st.write(f"**Showing {len(filtered)}/{len(pairs)} pairs** | " + " | ".join(stats_parts))
 
     # Display pairs
-    for i, p in enumerate(filtered[:50]):  # Cap at 50 for performance
+    for i, p in enumerate(filtered[:50]):
         cat = p.get("category", "?")
         b_tool = p.get("baseline_observed_tool") or "none"
         c_tool = p.get("cb_observed_tool") or "none"
@@ -1370,7 +1650,6 @@ def page_eval_results():
         c_out = p.get("cb_outcome", "?")
         sample_id = p.get("id", f"#{i+1}")
 
-        # Determine change label
         if b_out == "attack_success" and c_out != "attack_success":
             label = "IMP"
         elif b_out != "attack_success" and c_out == "attack_success":

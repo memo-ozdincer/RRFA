@@ -55,7 +55,7 @@ if [[ ! -f "$SWEEP_SCRIPT" ]]; then
 fi
 
 export TOTAL_STEPS="${TOTAL_STEPS:-100}"
-export ALPHAS="${ALPHAS:-5.0,10.0}"
+export ALPHAS="${ALPHAS:-7.5,10.0}"
 export LAYER_CONFIGS="${LAYER_CONFIGS:-10,20}"
 export POLICIES="${POLICIES:-assistant_only}"
 export LIMIT_EVAL="${LIMIT_EVAL:-50}"
@@ -64,13 +64,11 @@ export NUM_EXAMPLES="${NUM_EXAMPLES:-10}"
 export SHOW_EXAMPLES="${SHOW_EXAMPLES:-true}"
 export BATCH_SIZE="${BATCH_SIZE:-1}"
 export VIS_CHECKPOINT_STEPS="${VIS_CHECKPOINT_STEPS:-50,100}"
-export ENABLE_LLMAIL="${ENABLE_LLMAIL:-false}"
 
 # Pooling presets: "name:pooling_mode:distance:margin_b:margin_h"
-# Strategic sweep covering legacy baseline + correct mode candidates
-# Each preset ~4 min train + 1 min eval = 5 min
-# 5 presets × 2 alphas × 1 layer × 1 policy = 10 runs ≈ 50 min
-export POOLING_PRESETS="${POOLING_PRESETS:-legacy:legacy:dmix:500:1500 cdmix5:correct:dmix:5:15 cdmix3:correct:dmix:3:9 ccos12:correct:dcos:1.2:1.6 ccos15:correct:dcos:1.5:1.8}"
+# Legacy grid around working config (margins 500/1500, alpha 10)
+# 2 presets × 2 alphas = 4 runs, each ~12 min (train + checkpoint eval + benign eval) ≈ 48 min
+export POOLING_PRESETS="${POOLING_PRESETS:-m500:legacy:dmix:500:1500 m750:legacy:dmix:750:2250}"
 
 echo "Starting sweep_hparams_simple.sbatch..."
 echo "  ALPHAS: ${ALPHAS}"
@@ -78,8 +76,7 @@ echo "  LAYER_CONFIGS: ${LAYER_CONFIGS}"
 echo "  POLICIES: ${POLICIES}"
 echo "  POOLING_PRESETS: ${POOLING_PRESETS}"
 echo "  TOTAL_STEPS: ${TOTAL_STEPS}"
-echo "  Datasets: Fujitsu, AgentDojo (auto-detected)"
-echo "  ENABLE_LLMAIL: ${ENABLE_LLMAIL}"
+echo "  Datasets: Fujitsu, AgentDojo"
 echo "  Logging: Compatible with scripts/visualize_sweep_results.py"
 
 # =============================================================================
