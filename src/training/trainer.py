@@ -1132,6 +1132,76 @@ class CircuitBreakerTrainer:
             self.model_extractor = None
             self.frozen_extractor = None
 
+    def _log_pooling_diagnostic(
+        self,
+        harmful_model_reps: Dict[int, torch.Tensor],
+        harmful_frozen_reps: Dict[int, torch.Tensor],
+        benign_model_reps: Dict[int, torch.Tensor],
+        benign_frozen_reps: Dict[int, torch.Tensor],
+        harmful_mask: torch.Tensor,
+        benign_mask: torch.Tensor,
+        current_mode: str,
+    ) -> None:
+        """Log pooling diagnostic at step 0, comparing legacy vs correct modes."""
+        modes = ["legacy", "correct"]
+        results: Dict[str, Dict[str, torch.Tensor]] = {}
+
+        with torch.no_grad():
+            for mode in modes:
+                h_new = pooled_representations(
+                    harmful_model_reps, self.config.cb_target_layers, harmful_mask, pooling_mode=mode,
+                )
+                h_old = pooled_representations(
+                    harmful_frozen_reps, self.config.cb_target_layers, harmful_mask, pooling_mode=mode,
+                )
+                b_new = pooled_representations(
+                    benign_model_reps, self.config.cb_target_layers, benign_mask, pooling_mode=mode,
+                )
+                b_old = pooled_representations(
+                    benign_frozen_reps, self.config.cb_target_layers, benign_mask, pooling_mode=mode,
+                )
+                results[mode] = {"h_new": h_new, "h_old": h_old, "b_new": b_new, "b_old": b_old}
+
+        self.accelerator.print("\n" + "=" * 70)
+        self.accelerator.print("POOLING DIAGNOSTIC (step 0)")
+        self.accelerator.print(f"  Current pooling_mode: {current_mode}")
+        self.accelerator.print(f"  Harmful mask active tokens: {harmful_mask.sum().item():.0f} / {harmful_mask.numel()}")
+        self.accelerator.print(f"  Benign mask active tokens:  {benign_mask.sum().item():.0f} / {benign_mask.numel()}")
+        self.accelerator.print("=" * 70)
+
+        for mode in modes:
+            vecs = results[mode]
+            marker = " ← ACTIVE" if mode == current_mode else ""
+            self.accelerator.print(f"\n  [{mode.upper()}]{marker}")
+
+            for name, vec in vecs.items():
+                norm = vec.norm(p=2, dim=-1).mean().item()
+                sparsity = (vec.abs() < 1e-8).float().mean().item()
+                self.accelerator.print(f"    {name:6s}  L2 norm={norm:10.2f}  sparsity={sparsity:.1%}")
+
+            # Pairwise distances (dmix: 0.5*L2 + 0.5*cos_dist)
+            pairs = [
+                ("d(b_old, b_new)", vecs["b_old"], vecs["b_new"], "benign pos"),
+                ("d(b_new, h_mean)", vecs["b_new"], vecs["h_new"], "benign neg"),
+                ("d(h_new, h_mean)", vecs["h_new"], vecs["h_new"], "harmful pos"),
+                ("d(h_new, h_old)", vecs["h_new"], vecs["h_old"], "harmful neg"),
+            ]
+            self.accelerator.print(f"    Distances (dmix = 0.5*L2 + 0.5*cos_dist):")
+            for label, left, right, role in pairs:
+                d_l2 = torch.norm(left - right, p=2, dim=-1).mean().item()
+                d_cos = (1.0 - F.cosine_similarity(left, right, dim=-1, eps=1e-8)).mean().item()
+                d_mix = 0.5 * d_l2 + 0.5 * d_cos
+                self.accelerator.print(f"      {label:25s}  L2={d_l2:10.2f}  cos={d_cos:.4f}  mix={d_mix:10.2f}  ({role})")
+
+        # Suggest margins for correct mode
+        cvecs = results["correct"]
+        d_benign_pos = torch.norm(cvecs["b_old"] - cvecs["b_new"], p=2, dim=-1).mean().item()
+        d_harmful_neg = torch.norm(cvecs["h_new"] - cvecs["h_old"], p=2, dim=-1).mean().item()
+        self.accelerator.print(f"\n  SUGGESTED MARGINS for pooling_mode=correct:")
+        self.accelerator.print(f"    margin_benign  ~ {0.1 * d_benign_pos:.1f}  (10% of benign d_pos={d_benign_pos:.1f})")
+        self.accelerator.print(f"    margin_harmful ~ {0.1 * d_harmful_neg:.1f}  (10% of harmful d_neg={d_harmful_neg:.1f})")
+        self.accelerator.print("=" * 70 + "\n")
+
     def _compute_gradient_stats(self) -> Dict[str, float]:
         """Compute gradient statistics for debugging.
 
@@ -1397,26 +1467,44 @@ class CircuitBreakerTrainer:
             if teacher_logits_benign is None:
                 raise RuntimeError("triplet_full requires frozen-model logits")
 
+            _pool_mode = getattr(self.config, "pooling_mode", "legacy")
+
             harmful_new = pooled_representations(
                 reps_by_layer=harmful_model_reps,
                 target_layers=self.config.cb_target_layers,
                 token_mask=harmful_loss_mask if harmful_loss_mask is not None else harmful_attention_mask,
+                pooling_mode=_pool_mode,
             )
             harmful_old = pooled_representations(
                 reps_by_layer=harmful_frozen_reps,
                 target_layers=self.config.cb_target_layers,
                 token_mask=harmful_loss_mask if harmful_loss_mask is not None else harmful_attention_mask,
+                pooling_mode=_pool_mode,
             )
             benign_new = pooled_representations(
                 reps_by_layer=benign_model_reps,
                 target_layers=self.config.cb_target_layers,
                 token_mask=benign_loss_mask if benign_loss_mask is not None else benign_attention_mask,
+                pooling_mode=_pool_mode,
             )
             benign_old = pooled_representations(
                 reps_by_layer=benign_frozen_reps,
                 target_layers=self.config.cb_target_layers,
                 token_mask=benign_loss_mask if benign_loss_mask is not None else benign_attention_mask,
+                pooling_mode=_pool_mode,
             )
+
+            # === Step-0 Diagnostic: compare legacy vs correct pooling ===
+            if self.global_step == 0 and self.accelerator.is_main_process:
+                self._log_pooling_diagnostic(
+                    harmful_model_reps=harmful_model_reps,
+                    harmful_frozen_reps=harmful_frozen_reps,
+                    benign_model_reps=benign_model_reps,
+                    benign_frozen_reps=benign_frozen_reps,
+                    harmful_mask=harmful_loss_mask if harmful_loss_mask is not None else harmful_attention_mask,
+                    benign_mask=benign_loss_mask if benign_loss_mask is not None else benign_attention_mask,
+                    current_mode=_pool_mode,
+                )
 
             total_loss, triplet_metrics = triplet_full_loss(
                 harmful_new=harmful_new,

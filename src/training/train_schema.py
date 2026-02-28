@@ -328,6 +328,8 @@ def _parse_args() -> argparse.Namespace:
     )
     cb_group.add_argument("--triplet-mix-l2-weight", type=float, help="dmix L2 coefficient")
     cb_group.add_argument("--triplet-mix-cos-weight", type=float, help="dmix cosine coefficient")
+    cb_group.add_argument("--pooling-mode", type=str, choices=["legacy", "correct"],
+                          help="Pooling mode: legacy (H-dim broadcast) or correct (token masking)")
 
     lora_group = parser.add_argument_group("LoRA")
     lora_group.add_argument("--lora-r", type=int, help="LoRA rank")
@@ -408,6 +410,7 @@ def _build_config(args: argparse.Namespace) -> CircuitBreakerConfig:
         "triplet_harmful_negative_distance": "triplet_harmful_negative_distance",
         "triplet_mix_l2_weight": "triplet_mix_l2_weight",
         "triplet_mix_cos_weight": "triplet_mix_cos_weight",
+        "pooling_mode": "pooling_mode",
         "wandb_project": "wandb_project",
         "wandb_run_name": "wandb_run_name",
         "logging_steps": "logging_steps",

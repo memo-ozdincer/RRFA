@@ -87,6 +87,11 @@ class CircuitBreakerConfig:
     triplet_mix_l2_weight: float = 0.5
     triplet_mix_cos_weight: float = 0.5
 
+    # Pooling mode for representation aggregation before triplet loss:
+    # - "legacy": Buggy broadcasting (mask along H dim when T==H). Margins 500/1500 tuned for this.
+    # - "correct": Proper token masking via unsqueeze(-1). Needs re-tuned margins (~10-100 range).
+    pooling_mode: str = "legacy"
+
     # Loss weighting strategy:
     # - "single_alpha": L = alpha * L_rr + L_ret (original, retain weight fixed at 1.0)
     # - "dual": L = cs(t) * L_rr + cr(t) * L_ret (paper-style, both coefficients vary)

@@ -195,6 +195,14 @@ def parse_args():
         help="Cosine coefficient for dmix distance",
     )
 
+    parser.add_argument(
+        "--pooling-mode",
+        type=str,
+        default=None,
+        choices=["legacy", "correct"],
+        help="Pooling mode for representation aggregation (legacy=buggy H-dim broadcast, correct=proper token masking)",
+    )
+
     # Knowledge Distillation (KL divergence)
     parser.add_argument(
         "--beta-kl",
@@ -390,6 +398,8 @@ def main():
         overrides['triplet_mix_l2_weight'] = args.triplet_mix_l2_weight
     if args.triplet_mix_cos_weight is not None:
         overrides['triplet_mix_cos_weight'] = args.triplet_mix_cos_weight
+    if args.pooling_mode is not None:
+        overrides['pooling_mode'] = args.pooling_mode
 
     # Get config with preset and overrides
     config = get_config(args.preset, **overrides)

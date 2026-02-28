@@ -62,20 +62,28 @@ def _masked_mean(
 def _masked_mean_per_sample(
     values: torch.Tensor,
     mask: Optional[torch.Tensor],
+    pooling_mode: str = "legacy",
 ) -> torch.Tensor:
     if mask is None:
         return values.mean(dim=1)
     mask_f = mask.float()
-    # The old broadcast (mask along H dim when T==H) is what the triplet
-    # margins were tuned against. Replicate that behavior explicitly:
-    # Pad or truncate mask to match last dim so it broadcasts along H.
+
     if values.dim() == 3 and mask_f.dim() == 2:
-        H = values.size(-1)
-        T_mask = mask_f.size(-1)
-        if T_mask < H:
-            mask_f = F.pad(mask_f, (0, H - T_mask), value=0.0)
-        elif T_mask > H:
-            mask_f = mask_f[:, :H]
+        if pooling_mode == "correct":
+            # Proper token masking: [B, T] -> [B, T, 1], broadcast along H
+            mask_f_expanded = mask_f.unsqueeze(-1)
+            denom = mask_f.sum(dim=1, keepdim=True).clamp_min(1e-8)
+            return (values * mask_f_expanded).sum(dim=1) / denom
+        else:
+            # Legacy: when T==H, mask broadcasts as [B, 1, H] — masks hidden
+            # dims instead of tokens. Margins 500/1500 tuned for this behavior.
+            H = values.size(-1)
+            T_mask = mask_f.size(-1)
+            if T_mask < H:
+                mask_f = F.pad(mask_f, (0, H - T_mask), value=0.0)
+            elif T_mask > H:
+                mask_f = mask_f[:, :H]
+
     denom = mask_f.sum(dim=1).clamp_min(1e-8)
     return (values * mask_f).sum(dim=1) / denom
 
@@ -233,12 +241,15 @@ def pooled_representations(
     reps_by_layer: Dict[int, torch.Tensor],
     target_layers: Sequence[int],
     token_mask: Optional[torch.Tensor],
+    pooling_mode: str = "legacy",
 ) -> torch.Tensor:
     pooled_layers = []
     for layer_idx in target_layers:
         if layer_idx not in reps_by_layer:
             continue
-        pooled_layers.append(_masked_mean_per_sample(reps_by_layer[layer_idx], token_mask))
+        pooled_layers.append(
+            _masked_mean_per_sample(reps_by_layer[layer_idx], token_mask, pooling_mode=pooling_mode)
+        )
 
     if not pooled_layers:
         if reps_by_layer:

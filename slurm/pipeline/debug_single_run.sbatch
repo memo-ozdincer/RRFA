@@ -97,6 +97,7 @@ TRIPLET_HARMFUL_POS_DISTANCE="${TRIPLET_HARMFUL_POS_DISTANCE:-dmix}"
 TRIPLET_HARMFUL_NEG_DISTANCE="${TRIPLET_HARMFUL_NEG_DISTANCE:-dmix}"
 TRIPLET_MIX_L2_WEIGHT="${TRIPLET_MIX_L2_WEIGHT:-0.5}"
 TRIPLET_MIX_COS_WEIGHT="${TRIPLET_MIX_COS_WEIGHT:-0.5}"
+POOLING_MODE="${POOLING_MODE:-legacy}"
 
 echo "========================================"
 echo "DEBUG SINGLE RUN"
@@ -119,6 +120,7 @@ echo "  TRIPLET_MARGIN_HARMFUL: $TRIPLET_MARGIN_HARMFUL"
 echo "  TRIPLET_BETA_HARMFUL: $TRIPLET_BETA_HARMFUL"
 echo "  TRIPLET_GAMMA_KL: $TRIPLET_GAMMA_KL"
 echo "  ENABLE_LLMAIL: $ENABLE_LLMAIL"
+echo "  POOLING_MODE: $POOLING_MODE"
 echo "  LIMIT_EVAL: $LIMIT_EVAL"
 echo ""
 
@@ -393,6 +395,7 @@ TRAIN_ARGS=(
     --triplet-harmful-negative-distance "$TRIPLET_HARMFUL_NEG_DISTANCE"
     --triplet-mix-l2-weight "$TRIPLET_MIX_L2_WEIGHT"
     --triplet-mix-cos-weight "$TRIPLET_MIX_COS_WEIGHT"
+    --pooling-mode "$POOLING_MODE"
     --lora-r "$LORA_R"
     --lora-alpha "$LORA_ALPHA"
     --lora-dropout 0.05
@@ -494,7 +497,7 @@ FUJITSU_PAIRED="${FUJITSU_OUTPUT%.json}.paired_outputs.jsonl"
 if [[ -f "$FUJITSU_PAIRED" ]]; then
     echo ""
     echo "--- FUJITSU ---"
-    python3 << 'PYEOF'
+    python3 - "$FUJITSU_PAIRED" << 'PYEOF'
 import json, sys
 
 paired_file = sys.argv[1]
@@ -540,7 +543,6 @@ for i, p in enumerate((improvements + regressions)[:10], 1):
     print(resp[:300])
     print()
 PYEOF
-    "$FUJITSU_PAIRED"
 fi
 
 # AgentDojo examples
@@ -552,7 +554,7 @@ fi
 if [[ -f "$AGENTDOJO_PAIRED" ]]; then
     echo ""
     echo "--- AGENTDOJO ---"
-    python3 << 'PYEOF'
+    python3 - "$AGENTDOJO_PAIRED" << 'PYEOF'
 import json, sys
 
 paired_file = sys.argv[1]
@@ -597,7 +599,6 @@ for i, p in enumerate(differ[:10], 1):
     print(resp[:300])
     print()
 PYEOF
-    "$AGENTDOJO_PAIRED"
 fi
 
 # =============================================================================

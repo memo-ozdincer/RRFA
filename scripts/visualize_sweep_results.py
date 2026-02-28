@@ -1271,7 +1271,17 @@ Examples:
     if not args.sweep_dir.exists():
         print(f"Error: Sweep directory not found: {args.sweep_dir}")
         sys.exit(1)
-    
+
+    # If user passed a file (e.g. a .jsonl), use its parent directory
+    if args.sweep_dir.is_file():
+        print(f"Note: '{args.sweep_dir.name}' is a file, using parent directory as sweep_dir")
+        args.sweep_dir = args.sweep_dir.parent
+        # Walk up to find the run directory (look for eval/ sibling)
+        while args.sweep_dir.name == "eval" or not (args.sweep_dir / "eval").is_dir():
+            if args.sweep_dir.parent == args.sweep_dir:
+                break
+            args.sweep_dir = args.sweep_dir.parent
+
     print(f"Analyzing sweep: {args.sweep_dir}")
     
     # Load tool schema
