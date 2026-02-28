@@ -88,6 +88,7 @@ class TraceSource:
     dataset: Literal[
         "fujitsu_b4",
         "agentdojo", "tau2", "agentharm", "webarena", "weblinx", "attackqa",
+        "llmail_inject",
         "synthetic"
     ]
     tier: Literal["raw", "curated", "derived"] = "curated"

@@ -456,20 +456,36 @@ def page_trace_explorer():
     if t.get("signal_hints"):
         st.write("**Signal Hints:**", t["signal_hints"])
 
-    # Dataset-specific metadata (AgentHarm, etc.)
+    # Dataset-specific metadata
     raw_meta = t.get("raw_metadata", {}).get("source_fields", {})
     if raw_meta:
         extra = {}
+        # AgentHarm fields
         if raw_meta.get("target_functions"):
             extra["target_functions"] = raw_meta["target_functions"]
         if raw_meta.get("category"):
-            extra["agentharm_category"] = raw_meta["category"]
+            extra["harm_category"] = raw_meta["category"]
         if raw_meta.get("hint_included") is not None:
             extra["hint_included"] = raw_meta["hint_included"]
         if raw_meta.get("grading_function"):
             extra["grading_function"] = raw_meta["grading_function"]
         if raw_meta.get("name"):
             extra["behavior_name"] = raw_meta["name"]
+        # LLMail fields
+        if raw_meta.get("level") is not None:
+            extra["level"] = raw_meta["level"]
+        if raw_meta.get("defense"):
+            extra["defense"] = raw_meta["defense"]
+        if raw_meta.get("model"):
+            extra["model"] = raw_meta["model"]
+        if raw_meta.get("email_retrieved") is not None:
+            extra["email_retrieved"] = raw_meta["email_retrieved"]
+        if raw_meta.get("defense_undetected") is not None:
+            extra["defense_undetected"] = raw_meta["defense_undetected"]
+        if raw_meta.get("exfil_sent") is not None:
+            extra["exfil_sent"] = raw_meta["exfil_sent"]
+        if raw_meta.get("scenario_task"):
+            extra["scenario_task"] = raw_meta["scenario_task"]
         if extra:
             st.write("**Source Metadata:**", extra)
 
@@ -531,14 +547,19 @@ def page_render_lossmask():
     tier_badge = "B1 skeleton" if is_skeleton else "B2 complete"
     st.write(f"**Trace:** `{t.get('id', '?')[:50]}` | **Dataset:** {trace_dataset(t)} | **Category:** {trace_category(t)} | **Tier:** {tier_badge}")
 
-    # Show AgentHarm-specific metadata
+    # Show dataset-specific metadata
     raw_meta = t.get("raw_metadata", {}).get("source_fields", {})
     if raw_meta.get("target_functions"):
         st.write(f"**Target functions:** `{raw_meta['target_functions']}`")
     if raw_meta.get("category"):
-        st.write(f"**AgentHarm category:** {raw_meta['category']}")
+        st.write(f"**Harm category:** {raw_meta['category']}")
     if raw_meta.get("hint_included") is not None:
         st.write(f"**Hint included:** {raw_meta['hint_included']}")
+    if raw_meta.get("level") is not None:
+        st.write(f"**Level:** {raw_meta['level']} | **Defense:** {raw_meta.get('defense','?')} | **Model:** {raw_meta.get('model','?')}")
+    if t.get("tool_attack"):
+        ta = t["tool_attack"]
+        st.write(f"**Tool attack:** expected=`{ta.get('expected_tool')}` observed=`{ta.get('observed_tool')}` vector=`{ta.get('attack_vector')}`")
 
     if is_skeleton:
         st.info("This is a **skeleton trace** (B1) - no assistant messages. Only `full_sequence` and `cb_full_sequence` policies produce meaningful masks. Other policies will show empty (all-gray) masks.")
