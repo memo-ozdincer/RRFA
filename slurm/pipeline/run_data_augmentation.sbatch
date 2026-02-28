@@ -2,7 +2,6 @@
 #SBATCH --job-name=data_augment
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=16G
 #SBATCH --time=00:30:00
 #SBATCH --output=/scratch/memoozd/cb-scratch/logs/%x_%j.out
 #SBATCH --error=/scratch/memoozd/cb-scratch/logs/%x_%j.err
