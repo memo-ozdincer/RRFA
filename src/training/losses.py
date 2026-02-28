@@ -66,6 +66,16 @@ def _masked_mean_per_sample(
     if mask is None:
         return values.mean(dim=1)
     mask_f = mask.float()
+    # The old broadcast (mask along H dim when T==H) is what the triplet
+    # margins were tuned against. Replicate that behavior explicitly:
+    # Pad or truncate mask to match last dim so it broadcasts along H.
+    if values.dim() == 3 and mask_f.dim() == 2:
+        H = values.size(-1)
+        T_mask = mask_f.size(-1)
+        if T_mask < H:
+            mask_f = F.pad(mask_f, (0, H - T_mask), value=0.0)
+        elif T_mask > H:
+            mask_f = mask_f[:, :H]
     denom = mask_f.sum(dim=1).clamp_min(1e-8)
     return (values * mask_f).sum(dim=1) / denom
 
