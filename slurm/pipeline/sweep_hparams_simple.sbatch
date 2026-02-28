@@ -66,6 +66,8 @@ export BATCH_SIZE="${BATCH_SIZE:-1}"
 export VIS_CHECKPOINT_STEPS="${VIS_CHECKPOINT_STEPS:-80,100,110,150}"
 export ENABLE_LLMAIL="${ENABLE_LLMAIL:-false}"
 export POOLING_MODE="${POOLING_MODE:-legacy}"
+export TRIPLET_MARGIN_BENIGN="${TRIPLET_MARGIN_BENIGN:-500.0}"
+export TRIPLET_MARGIN_HARMFUL="${TRIPLET_MARGIN_HARMFUL:-1500.0}"
 
 echo "Starting sweep_hparams_simple.sbatch..."
 echo "  ALPHAS: ${ALPHAS}"
@@ -74,6 +76,8 @@ echo "  POLICIES: ${POLICIES}"
 echo "  Datasets: Fujitsu, AgentDojo (auto-detected)"
 echo "  ENABLE_LLMAIL: ${ENABLE_LLMAIL}"
 echo "  POOLING_MODE: ${POOLING_MODE}"
+echo "  TRIPLET_MARGIN_BENIGN: ${TRIPLET_MARGIN_BENIGN}"
+echo "  TRIPLET_MARGIN_HARMFUL: ${TRIPLET_MARGIN_HARMFUL}"
 echo "  Logging: Compatible with scripts/visualize_sweep_results.py"
 
 # =============================================================================
