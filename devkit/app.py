@@ -1077,6 +1077,334 @@ def page_stats_validation():
 
 
 # ===========================================================================
+# PAGE: Eval Results
+# ===========================================================================
+
+def _is_gibberish(text: str, threshold: float = 0.15) -> bool:
+    """Detect repetitive gibberish text."""
+    if not text:
+        return False
+    words = text.split()
+    if len(words) <= 10:
+        return False
+    return len(set(words)) / len(words) < threshold
+
+
+def _load_json_safe(path: Path) -> Optional[dict]:
+    """Load a JSON file, returning None on failure."""
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _load_jsonl_safe(path: Path) -> List[dict]:
+    """Load a JSONL file, returning empty list on failure."""
+    try:
+        with open(path) as f:
+            return [json.loads(line) for line in f if line.strip()]
+    except Exception:
+        return []
+
+
+
+def page_eval_results():
+    st.header("Eval Results")
+
+    # --- Sweep directory selection ---
+    st.sidebar.markdown("---")
+    sweep_path_input = st.sidebar.text_input(
+        "Sweep directory path",
+        placeholder="/scratch/memoozd/cb-scratch/sweeps/hparam_sweep_...",
+        help="Absolute path to a sweep or debug_runs directory",
+    )
+
+    sweep_dir = Path(sweep_path_input) if sweep_path_input else None
+
+    if not sweep_dir or not sweep_dir.is_dir():
+        st.info(
+            "Enter a sweep directory path in the sidebar to load results.\n\n"
+            "Expected structure:\n"
+            "```\n"
+            "sweep_dir/\n"
+            "  summary.csv\n"
+            "  preset_a10.0_l10_20_policy/\n"
+            "    run_config.json\n"
+            "    eval/\n"
+            "      fujitsu_eval.json\n"
+            "      fujitsu_eval.paired_outputs.jsonl\n"
+            "      agentdojo_eval.json\n"
+            "      agentdojo_benign_eval.json\n"
+            "```"
+        )
+        return
+
+    st.write(f"**Sweep directory:** `{sweep_dir}`")
+
+    # --- Load summary CSV ---
+    summary_csv = sweep_dir / "summary.csv"
+    df = None
+    if summary_csv.exists():
+        try:
+            df = pd.read_csv(summary_csv)
+            st.subheader("Summary Table")
+            st.dataframe(df, use_container_width=True)
+        except Exception as e:
+            st.warning(f"Failed to load summary.csv: {e}")
+
+    # --- Discover run directories ---
+    run_dirs = sorted(
+        [d for d in sweep_dir.iterdir() if d.is_dir() and (d / "eval").is_dir()],
+        key=lambda d: d.name,
+    )
+
+    if not run_dirs:
+        # Maybe this IS a single run dir (debug_runs case)
+        if (sweep_dir / "eval").is_dir():
+            run_dirs = [sweep_dir]
+
+    if not run_dirs:
+        st.warning("No run directories found with eval/ subdirectory.")
+        return
+
+    # --- Bar charts ---
+    if df is not None and len(df) > 0:
+        st.subheader("Safety vs Capability")
+
+        chart_data = []
+        for _, row in df.iterrows():
+            label = f"{row.get('preset', '?')}_a{row.get('alpha', '?')}"
+            entry = {"config": label}
+
+            # Safety metrics (lower is better)
+            try:
+                entry["Fujitsu CB ASR"] = float(row["fujitsu_cb_asr"])
+            except (ValueError, KeyError, TypeError):
+                pass
+            try:
+                entry["AgentDojo Malicious Rate"] = float(row["agentdojo_cb_malicious_rate"])
+            except (ValueError, KeyError, TypeError):
+                pass
+
+            # Capability metrics (higher is better)
+            try:
+                entry["Benign Correct Tool Rate"] = float(row["agentdojo_benign_correct_rate"])
+            except (ValueError, KeyError, TypeError):
+                pass
+            try:
+                entry["Fujitsu Correct Rate"] = float(row["fujitsu_cb_correct_rate"])
+            except (ValueError, KeyError, TypeError):
+                pass
+
+            # Gibberish (lower is better)
+            gib_str = str(row.get("fujitsu_gibberish_rate", ""))
+            if "/" in gib_str:
+                try:
+                    gn, gt = gib_str.split("/")
+                    entry["Gibberish Rate"] = int(gn) / max(int(gt), 1)
+                except (ValueError, TypeError):
+                    pass
+
+            chart_data.append(entry)
+
+        if chart_data:
+            chart_df = pd.DataFrame(chart_data).set_index("config")
+
+            # Safety chart
+            safety_cols = [c for c in ["Fujitsu CB ASR", "AgentDojo Malicious Rate", "Gibberish Rate"] if c in chart_df.columns]
+            if safety_cols:
+                st.markdown("**Attack Success Rates** (lower is better)")
+                st.bar_chart(chart_df[safety_cols])
+
+            # Capability chart
+            cap_cols = [c for c in ["Benign Correct Tool Rate", "Fujitsu Correct Rate"] if c in chart_df.columns]
+            if cap_cols:
+                st.markdown("**Capability Retention** (higher is better)")
+                st.bar_chart(chart_df[cap_cols])
+
+    # --- Per-run drill-down ---
+    st.subheader("Per-Run Details")
+
+    run_names = [d.name for d in run_dirs]
+    selected_run = st.selectbox("Select run", run_names, key="eval_run_select")
+    selected_run_dir = sweep_dir / selected_run if selected_run != sweep_dir.name else sweep_dir
+
+    # Load run config
+    run_config = _load_json_safe(selected_run_dir / "run_config.json")
+    if run_config:
+        with st.expander("Run Configuration", expanded=False):
+            st.json(run_config)
+    else:
+        st.caption("No run_config.json found (using directory name for identification)")
+
+    # Load eval results
+    eval_dir = selected_run_dir / "eval"
+    eval_files = {
+        "Fujitsu": "fujitsu_eval.json",
+        "AgentDojo (harmful)": "agentdojo_eval.json",
+        "AgentDojo (benign)": "agentdojo_benign_eval.json",
+        "LLMail": "llmail_eval.json",
+    }
+
+    metrics_rows = []
+    for label, fname in eval_files.items():
+        fpath = eval_dir / fname
+        data = _load_json_safe(fpath)
+        if not data:
+            continue
+
+        row = {"Dataset": label}
+
+        # Extract key metrics depending on dataset type
+        cb = data.get("cb_model", {})
+        baseline = data.get("baseline", {})
+
+        # Tool flip ASR (Fujitsu/LLMail)
+        if "tool_flip_asr" in cb:
+            tf = cb["tool_flip_asr"]
+            row["CB ASR"] = f"{tf.get('attack_success_rate', 0):.1%}"
+            row["CB No-Tool"] = f"{tf.get('no_tool_call_rate', 0):.1%}"
+            row["CB Correct"] = f"{tf.get('correct_tool_call_rate', tf.get('correct_behavior_rate', 0)):.1%}"
+            if "tool_flip_asr" in baseline:
+                row["Baseline ASR"] = f"{baseline['tool_flip_asr'].get('attack_success_rate', 0):.1%}"
+
+        # Generation comparison (AgentDojo)
+        if "generation_comparison" in cb:
+            gc = cb["generation_comparison"]
+            row["Malicious Rate"] = f"{gc.get('malicious_tool_call_rate', 0):.1%}"
+            row["Correct Tool"] = f"{gc.get('correct_tool_call_rate', 0):.1%}"
+            row["Resist Rate"] = f"{gc.get('harmful_resistance_rate', 0):.1%}"
+            row["No-Tool"] = f"{gc.get('no_tool_call_rate', 0):.1%}"
+
+        # LLMail-specific
+        if "llmail_attack" in cb:
+            la = cb["llmail_attack"]
+            row["CB ASR"] = f"{la.get('attack_success_rate', 0):.1%}"
+        if "llmail_usefulness" in cb:
+            lu = cb["llmail_usefulness"]
+            row["Usefulness"] = f"{lu.get('usefulness_rate', 0):.1%}"
+
+        # Delta
+        delta = data.get("delta", {})
+        if "tool_flip_asr" in delta:
+            row["Delta ASR"] = f"{delta['tool_flip_asr']:+.1%}"
+
+        metrics_rows.append(row)
+
+    if metrics_rows:
+        st.markdown("**Eval Metrics**")
+        st.table(pd.DataFrame(metrics_rows).set_index("Dataset"))
+
+    # --- Paired output browser ---
+    st.subheader("Paired Output Browser")
+
+    paired_files = {
+        "Fujitsu": eval_dir / "fujitsu_eval.paired_outputs.jsonl",
+        "AgentDojo (harmful)": eval_dir / "agentdojo_eval.paired_outputs.jsonl",
+        "AgentDojo (benign)": eval_dir / "agentdojo_benign_eval.paired_outputs.jsonl",
+        "LLMail": eval_dir / "llmail_eval.paired_outputs.jsonl",
+    }
+
+    available_paired = {k: v for k, v in paired_files.items() if v.exists()}
+
+    if not available_paired:
+        st.info("No paired output files found in this run.")
+        return
+
+    selected_dataset = st.selectbox(
+        "Dataset", list(available_paired.keys()), key="eval_paired_dataset"
+    )
+    pairs = _load_jsonl_safe(available_paired[selected_dataset])
+
+    if not pairs:
+        st.info("No paired outputs in this file.")
+        return
+
+    # Filter options
+    col1, col2 = st.columns(2)
+    with col1:
+        category_filter = st.multiselect(
+            "Category",
+            sorted({p.get("category", "unknown") for p in pairs}),
+            default=sorted({p.get("category", "unknown") for p in pairs}),
+            key="eval_cat_filter",
+        )
+    with col2:
+        show_filter = st.radio(
+            "Show",
+            ["All", "Different only", "Gibberish only", "Improved only", "Regressed only"],
+            key="eval_show_filter",
+        )
+
+    # Apply filters
+    filtered = [p for p in pairs if p.get("category", "unknown") in category_filter]
+    if show_filter == "Different only":
+        filtered = [p for p in filtered if p.get("responses_differ")]
+    elif show_filter == "Gibberish only":
+        filtered = [p for p in filtered if _is_gibberish(p.get("cb_response", ""))]
+    elif show_filter == "Improved only":
+        filtered = [
+            p for p in filtered
+            if p.get("baseline_outcome") == "attack_success"
+            and p.get("cb_outcome") != "attack_success"
+        ]
+    elif show_filter == "Regressed only":
+        filtered = [
+            p for p in filtered
+            if p.get("baseline_outcome") != "attack_success"
+            and p.get("cb_outcome") == "attack_success"
+        ]
+
+    # Stats bar
+    n_gib = sum(1 for p in filtered if _is_gibberish(p.get("cb_response", "")))
+    st.write(f"**Showing {len(filtered)}/{len(pairs)} pairs** | Gibberish: {n_gib}")
+
+    # Display pairs
+    for i, p in enumerate(filtered[:50]):  # Cap at 50 for performance
+        cat = p.get("category", "?")
+        b_tool = p.get("baseline_observed_tool") or "none"
+        c_tool = p.get("cb_observed_tool") or "none"
+        gib_tag = " [GIBBERISH]" if _is_gibberish(p.get("cb_response", "")) else ""
+        b_out = p.get("baseline_outcome", "?")
+        c_out = p.get("cb_outcome", "?")
+        sample_id = p.get("id", f"#{i+1}")
+
+        # Determine change label
+        if b_out == "attack_success" and c_out != "attack_success":
+            label = "IMP"
+        elif b_out != "attack_success" and c_out == "attack_success":
+            label = "REG"
+        elif p.get("responses_differ"):
+            label = "DIFF"
+        else:
+            label = "SAME"
+
+        with st.expander(f"[{label}] {cat} | {b_tool} -> {c_tool}{gib_tag} | {sample_id}"):
+            left, right = st.columns(2)
+            with left:
+                st.markdown("**Baseline**")
+                st.text_area(
+                    "Baseline response",
+                    p.get("baseline_response", "(empty)"),
+                    height=200,
+                    key=f"bl_{selected_dataset}_{i}",
+                    disabled=True,
+                    label_visibility="collapsed",
+                )
+            with right:
+                st.markdown(f"**CB Model**{gib_tag}")
+                st.text_area(
+                    "CB response",
+                    p.get("cb_response", "(empty)"),
+                    height=200,
+                    key=f"cb_{selected_dataset}_{i}",
+                    disabled=True,
+                    label_visibility="collapsed",
+                )
+
+
+# ===========================================================================
 # Main App
 # ===========================================================================
 
@@ -1090,7 +1418,7 @@ st.set_page_config(
 st.sidebar.title("RRFA Dev Kit")
 page = st.sidebar.radio(
     "Navigate",
-    ["Dashboard", "Trace Explorer", "Render & Lossmask", "Policy Comparator", "Dataset Importer", "Stats & Validation"],
+    ["Dashboard", "Trace Explorer", "Render & Lossmask", "Policy Comparator", "Dataset Importer", "Stats & Validation", "Eval Results"],
 )
 
 if page == "Dashboard":
@@ -1105,3 +1433,5 @@ elif page == "Dataset Importer":
     page_dataset_importer()
 elif page == "Stats & Validation":
     page_stats_validation()
+elif page == "Eval Results":
+    page_eval_results()

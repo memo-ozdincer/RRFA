@@ -54,43 +54,32 @@ if [[ ! -f "$SWEEP_SCRIPT" ]]; then
     exit 1
 fi
 
-export TOTAL_STEPS="${TOTAL_STEPS:-200}"
-export ALPHAS="${ALPHAS:-5.0,10.0,15.0}"
+export TOTAL_STEPS="${TOTAL_STEPS:-100}"
+export ALPHAS="${ALPHAS:-5.0,10.0}"
 export LAYER_CONFIGS="${LAYER_CONFIGS:-10,20}"
-export POLICIES="${POLICIES:-cb_full_sequence,assistant_only}"
-export LIMIT_EVAL="${LIMIT_EVAL:-100}"
+export POLICIES="${POLICIES:-assistant_only}"
+export LIMIT_EVAL="${LIMIT_EVAL:-50}"
 export LIMIT_GEN="${LIMIT_GEN:-5000}"
-export NUM_EXAMPLES="${NUM_EXAMPLES:-50}"
+export NUM_EXAMPLES="${NUM_EXAMPLES:-10}"
 export SHOW_EXAMPLES="${SHOW_EXAMPLES:-true}"
 export BATCH_SIZE="${BATCH_SIZE:-1}"
-export VIS_CHECKPOINT_STEPS="${VIS_CHECKPOINT_STEPS:-80,100,110,150}"
+export VIS_CHECKPOINT_STEPS="${VIS_CHECKPOINT_STEPS:-50,100}"
 export ENABLE_LLMAIL="${ENABLE_LLMAIL:-false}"
-export POOLING_MODE="${POOLING_MODE:-legacy}"
 
-# Auto-configure distance and margins for correct pooling mode
-if [[ "$POOLING_MODE" == "correct" ]]; then
-    export TRIPLET_MARGIN_BENIGN="${TRIPLET_MARGIN_BENIGN:-0.3}"
-    export TRIPLET_MARGIN_HARMFUL="${TRIPLET_MARGIN_HARMFUL:-0.8}"
-    export TRIPLET_BENIGN_POS_DISTANCE="${TRIPLET_BENIGN_POS_DISTANCE:-dcos}"
-    export TRIPLET_BENIGN_NEG_DISTANCE="${TRIPLET_BENIGN_NEG_DISTANCE:-dcos}"
-    export TRIPLET_HARMFUL_POS_DISTANCE="${TRIPLET_HARMFUL_POS_DISTANCE:-dcos}"
-    export TRIPLET_HARMFUL_NEG_DISTANCE="${TRIPLET_HARMFUL_NEG_DISTANCE:-dcos}"
-else
-    export TRIPLET_MARGIN_BENIGN="${TRIPLET_MARGIN_BENIGN:-500.0}"
-    export TRIPLET_MARGIN_HARMFUL="${TRIPLET_MARGIN_HARMFUL:-1500.0}"
-fi
+# Pooling presets: "name:pooling_mode:distance:margin_b:margin_h"
+# Strategic sweep covering legacy baseline + correct mode candidates
+# Each preset ~4 min train + 1 min eval = 5 min
+# 5 presets × 2 alphas × 1 layer × 1 policy = 10 runs ≈ 50 min
+export POOLING_PRESETS="${POOLING_PRESETS:-legacy:legacy:dmix:500:1500 cdmix5:correct:dmix:5:15 cdmix3:correct:dmix:3:9 ccos12:correct:dcos:1.2:1.6 ccos15:correct:dcos:1.5:1.8}"
 
 echo "Starting sweep_hparams_simple.sbatch..."
 echo "  ALPHAS: ${ALPHAS}"
 echo "  LAYER_CONFIGS: ${LAYER_CONFIGS}"
 echo "  POLICIES: ${POLICIES}"
+echo "  POOLING_PRESETS: ${POOLING_PRESETS}"
+echo "  TOTAL_STEPS: ${TOTAL_STEPS}"
 echo "  Datasets: Fujitsu, AgentDojo (auto-detected)"
 echo "  ENABLE_LLMAIL: ${ENABLE_LLMAIL}"
-echo "  POOLING_MODE: ${POOLING_MODE}"
-echo "  TRIPLET_MARGIN_BENIGN: ${TRIPLET_MARGIN_BENIGN}"
-echo "  TRIPLET_MARGIN_HARMFUL: ${TRIPLET_MARGIN_HARMFUL}"
-echo "  TRIPLET_MARGIN_BENIGN: ${TRIPLET_MARGIN_BENIGN}"
-echo "  TRIPLET_MARGIN_HARMFUL: ${TRIPLET_MARGIN_HARMFUL}"
 echo "  Logging: Compatible with scripts/visualize_sweep_results.py"
 
 # =============================================================================

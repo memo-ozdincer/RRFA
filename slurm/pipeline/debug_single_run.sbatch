@@ -368,6 +368,37 @@ echo "Harmful renders: ${#HARMFUL_RENDER_ARGS[@]} files"
 echo "Benign renders:  ${#BENIGN_RENDER_ARGS[@]} files"
 echo ""
 
+# Save run configuration for reproducibility and devkit integration
+cat > "$RUN_DIR/run_config.json" <<RUNCFG
+{
+  "preset": "debug",
+  "pooling_mode": "$POOLING_MODE",
+  "distance": "$TRIPLET_BENIGN_POS_DISTANCE",
+  "margin_benign": $TRIPLET_MARGIN_BENIGN,
+  "margin_harmful": $TRIPLET_MARGIN_HARMFUL,
+  "alpha": $ALPHA,
+  "layers": "$LAYERS",
+  "policy": "$POLICY",
+  "total_steps": $TOTAL_STEPS,
+  "batch_size": $BATCH_SIZE,
+  "grad_accum": $GRAD_ACCUM,
+  "learning_rate": "$LEARNING_RATE",
+  "loss_mode": "$LOSS_MODE",
+  "loss_weighting": "$LOSS_WEIGHTING",
+  "triplet_alpha_benign": $TRIPLET_ALPHA_BENIGN,
+  "triplet_beta_harmful": $TRIPLET_BETA_HARMFUL,
+  "triplet_gamma_kl": $TRIPLET_GAMMA_KL,
+  "lora_r": $LORA_R,
+  "lora_alpha": $LORA_ALPHA,
+  "model": "$TOKENIZER",
+  "run_name": "$RUN_NAME",
+  "run_dir": "$RUN_DIR",
+  "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "job_id": "${SLURM_JOB_ID:-local}"
+}
+RUNCFG
+echo "Saved run_config.json"
+
 # Print sample counts per file
 echo "Training data sizes:"
 for f in "${HARMFUL_RENDER_ARGS[@]}"; do
@@ -497,6 +528,24 @@ if [[ -f "$SPLIT_DIR/agentdojo_traces_harmful.jsonl" ]]; then
         --limit "$LIMIT_EVAL" \
         --merge-adapter \
         --dtype "$DTYPE" 2>&1 | tee -a "$RUN_DIR/eval/agentdojo.log"
+fi
+
+# --- AgentDojo benign eval (capability retention) ---
+if [[ -f "$SPLIT_DIR/agentdojo_traces_benign.jsonl" ]]; then
+    echo ""
+    echo "Evaluating on AgentDojo benign ($LIMIT_EVAL samples)..."
+    AGENTDOJO_BENIGN_OUTPUT="$RUN_DIR/eval/agentdojo_benign_eval.json"
+
+    python src/evaluation/eval.py \
+        --baseline "$TOKENIZER" \
+        --cb-adapter "$ADAPTER_PATH" \
+        --eval-data "$SPLIT_DIR/agentdojo_traces_benign.jsonl" \
+        --tool-schema "$TOOL_SCHEMA" \
+        --output "$AGENTDOJO_BENIGN_OUTPUT" \
+        --use-sample-context \
+        --limit "$LIMIT_EVAL" \
+        --merge-adapter \
+        --dtype "$DTYPE" 2>&1 | tee -a "$RUN_DIR/eval/agentdojo_benign.log"
 fi
 
 # =============================================================================
@@ -649,6 +698,69 @@ for i, p in enumerate(differ[:10], 1):
 PYEOF
 fi
 
+# AgentDojo benign examples (capability retention)
+AGENTDOJO_BENIGN_PAIRED="${AGENTDOJO_BENIGN_OUTPUT:-}.paired_outputs.jsonl"
+if [[ -n "${AGENTDOJO_BENIGN_OUTPUT:-}" ]]; then
+    AGENTDOJO_BENIGN_PAIRED="${AGENTDOJO_BENIGN_OUTPUT%.json}.paired_outputs.jsonl"
+fi
+if [[ -f "$AGENTDOJO_BENIGN_PAIRED" ]]; then
+    echo ""
+    echo "--- AGENTDOJO BENIGN (capability retention) ---"
+    python3 - "$AGENTDOJO_BENIGN_PAIRED" "${AGENTDOJO_BENIGN_OUTPUT:-}" << 'PYEOF'
+import json, sys
+
+paired_file = sys.argv[1]
+eval_file = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else None
+
+with open(paired_file, 'r') as f:
+    pairs = [json.loads(line) for line in f if line.strip()]
+
+if not pairs:
+    print("No paired outputs")
+    sys.exit(0)
+
+def is_gibberish(resp):
+    if not resp: return False
+    words = resp.split()
+    return len(words) > 10 and len(set(words)) / len(words) < 0.15
+
+n_correct = sum(1 for p in pairs if p.get('cb_observed_tool'))
+n_broken = sum(1 for p in pairs if not p.get('cb_observed_tool'))
+n_gibberish = sum(1 for p in pairs if is_gibberish(p.get('cb_response', '')))
+
+print(f"Benign pairs: {len(pairs)} | correct_tool={n_correct} | broken={n_broken} | gibberish={n_gibberish}")
+
+# Show generation_comparison metrics from benign eval
+if eval_file:
+    try:
+        with open(eval_file) as f:
+            ev = json.load(f)
+        for key in ('baseline', 'cb_model'):
+            gc = ev.get(key, {}).get('generation_comparison', {})
+            if gc:
+                label = 'Baseline' if key == 'baseline' else 'CB Model'
+                cor_rate = gc.get('correct_tool_call_rate', 0)
+                no_rate = gc.get('no_tool_call_rate', 0)
+                print(f"  {label}: correct_tool={cor_rate:.0%} no_tool={no_rate:.0%}")
+    except Exception:
+        pass
+
+# Show examples where CB broke a benign tool call
+broken = [p for p in pairs if p.get('baseline_observed_tool') and not p.get('cb_observed_tool')]
+print()
+for i, p in enumerate(broken[:5], 1):
+    b_tool = p.get('baseline_observed_tool') or 'none'
+    c_tool = p.get('cb_observed_tool') or 'none'
+    gib = ' [GIBBERISH]' if is_gibberish(p.get('cb_response', '')) else ''
+    print(f"[{i}] BROKEN: baseline={b_tool} -> cb={c_tool}{gib}")
+    print(f"--- BASELINE ---")
+    print((p.get('baseline_response') or '(empty)')[:300])
+    print(f"--- CB MODEL ---")
+    print((p.get('cb_response') or '(empty)')[:300])
+    print()
+PYEOF
+fi
+
 # =============================================================================
 # Summary
 # =============================================================================
@@ -690,6 +802,21 @@ for key in ('baseline', 'cb_model'):
     if gc:
         label = 'Baseline' if key == 'baseline' else 'CB Model'
         print(f'AgentDojo {label}: malicious={gc.get(\"malicious_tool_call_rate\",0):.1%} resist={gc.get(\"harmful_resistance_rate\",0):.1%} correct_tool={gc.get(\"correct_tool_call_rate\",0):.1%} no_tool={gc.get(\"no_tool_call_rate\",0):.1%}')
+" 2>/dev/null || echo "(parse error)"
+fi
+
+if [[ -f "${AGENTDOJO_BENIGN_OUTPUT:-/dev/null}" ]]; then
+    python3 -c "
+import json
+with open('${AGENTDOJO_BENIGN_OUTPUT}') as f:
+    r = json.load(f)
+for key in ('baseline', 'cb_model'):
+    gc = r.get(key, {}).get('generation_comparison', {})
+    if gc:
+        label = 'Baseline' if key == 'baseline' else 'CB Model'
+        cor = gc.get('correct_tool_call_rate', 0)
+        no = gc.get('no_tool_call_rate', 0)
+        print(f'AgentDojo Benign {label}: correct_tool={cor:.1%} no_tool={no:.1%}')
 " 2>/dev/null || echo "(parse error)"
 fi
 
