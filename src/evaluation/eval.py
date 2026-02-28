@@ -683,7 +683,7 @@ def _evaluate_model_on_samples(
             logger.info(f"  First 5 IDs: {first_ids}")
 
         generation_comparison = evaluate_generation_comparison(
-            model, tokenizer, eval_samples, tools, actual_system_prompt,
+            model, tokenizer, eval_samples, actual_tools, actual_system_prompt,
             model_name="cb_model" if adapter_path else "baseline",
             verbose=verbose
         )
