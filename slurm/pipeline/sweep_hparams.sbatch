@@ -3,7 +3,7 @@
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=24
-#SBATCH --time=19:00:00
+#SBATCH --time=09:00:00
 #SBATCH --output=/scratch/memoozd/cb-scratch/logs/%x_%j.out
 #SBATCH --error=/scratch/memoozd/cb-scratch/logs/%x_%j.err
 #SBATCH --account=def-zhijing
