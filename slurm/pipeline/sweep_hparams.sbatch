@@ -114,7 +114,7 @@ if [[ "$QUICK_TEST" == "true" ]]; then
     echo "QUICK TEST MODE - Reduced configurations"
     DEFAULT_STEPS=50
     DEFAULT_ALPHAS="10.0"
-    DEFAULT_LAYER_CONFIGS="4,8,14"
+    DEFAULT_LAYER_CONFIGS="4,8,14"  # alt: "10,20" or "4,8,14|10,20"
     DEFAULT_POLICIES="assistant_only"
     DEFAULT_LIMIT_EVAL=20
     DEFAULT_NUM_EXAMPLES=5
@@ -124,7 +124,8 @@ else
     #   Layer 4:  shallow — knowledge injection, defensive behaviors
     #   Layer 8:  mid-shallow — core of the critical 1-10 range
     #   Layer 14: upper boundary of recommended 0-15 range
-    # Override via env vars or sweep_hparams_simple.sbatch for larger sweeps
+    # To also sweep paper-style layers 10,20: LAYER_CONFIGS="4,8,14|10,20"
+    # config.py presets: "llama-3.1-8b-instruct" (4,8,14) | "llama-3.1-8b-instruct-l1020" (10,20)
     DEFAULT_STEPS=100
     DEFAULT_ALPHAS="10.0"
     DEFAULT_LAYER_CONFIGS="4,8,14"

@@ -163,9 +163,11 @@ class CircuitBreakerConfig:
 
 @dataclass
 class CircuitBreakerConfigLlama3_8B(CircuitBreakerConfig):
-    """Preset configuration for Llama-3-8B-Instruct (paper baseline)."""
+    """Preset configuration for Llama-3-8B-Instruct (paper baseline).
+    Default layers: 4, 8, 14 (shallow-to-mid range for 32-layer model).
+    Alternative: use CircuitBreakerConfigLlama3_8B_L1020 for layers 10, 20."""
     base_model: str = "meta-llama/Meta-Llama-3-8B-Instruct"
-    cb_target_layers: List[int] = field(default_factory=lambda: [10, 20])
+    cb_target_layers: List[int] = field(default_factory=lambda: [4, 8, 14])
     lora: LoRAConfig = field(default_factory=lambda: LoRAConfig(
         target_layers=list(range(0, 21))
     ))
@@ -173,20 +175,28 @@ class CircuitBreakerConfigLlama3_8B(CircuitBreakerConfig):
     total_steps: int = 150
     learning_rate: float = 5e-5
     beta_kl: float = 0.5
+
+
+@dataclass
+class CircuitBreakerConfigLlama3_8B_L1020(CircuitBreakerConfigLlama3_8B):
+    """Llama-3-8B-Instruct with layers 10, 20 (paper-style semantic layers)."""
+    cb_target_layers: List[int] = field(default_factory=lambda: [10, 20])
 
 
 @dataclass
 class CircuitBreakerConfigLlama3_1_8B_Instruct(CircuitBreakerConfig):
-    """Preset configuration for meta-llama/Llama-3.1-8B-Instruct."""
-    base_model: str = "meta-llama/Llama-3.1-8B-Instruct"
+    """Preset configuration for meta-llama/Llama-3.1-8B-Instruct.
+    Default layers: 4, 8, 14 (shallow-to-mid range for 32-layer model).
+    Alternative: use CircuitBreakerConfigLlama3_1_8B_Instruct_L1020 for layers 10, 20.
 
-    # Llama 3.1 8B has 32 layers (0-31).
-    # CB target layers = where triplet loss extracts representations.
-    # Layers 10, 20 are proven working (semantic decision layers).
-    # NOTE: Shallow layers (4, 8) disrupt tool-call formatting — CB training
-    # modifies representation geometry, which at shallow layers breaks the
-    # model's ability to emit structured <|python_tag|>{"name":...} output.
-    cb_target_layers: List[int] = field(default_factory=lambda: [10, 20])
+    Llama 3.1 8B has 32 layers (0-31).
+    CB target layers = where triplet loss extracts representations.
+    NOTE: Shallow layers (4, 8) may disrupt tool-call formatting — CB training
+    modifies representation geometry, which at shallow layers can break the
+    model's ability to emit structured <|python_tag|>{"name":...} output.
+    Layers 10, 20 are proven working (semantic decision layers)."""
+    base_model: str = "meta-llama/Llama-3.1-8B-Instruct"
+    cb_target_layers: List[int] = field(default_factory=lambda: [4, 8, 14])
 
     lora: LoRAConfig = field(default_factory=lambda: LoRAConfig(
         target_layers=list(range(0, 21))
@@ -199,10 +209,18 @@ class CircuitBreakerConfigLlama3_1_8B_Instruct(CircuitBreakerConfig):
 
 
 @dataclass
-class CircuitBreakerConfigMistral_7B(CircuitBreakerConfig):
-    """Preset configuration for Mistral-7B-Instruct."""
-    base_model: str = "mistralai/Mistral-7B-Instruct-v0.3"
+class CircuitBreakerConfigLlama3_1_8B_Instruct_L1020(CircuitBreakerConfigLlama3_1_8B_Instruct):
+    """Llama-3.1-8B-Instruct with layers 10, 20 (paper-style semantic layers)."""
     cb_target_layers: List[int] = field(default_factory=lambda: [10, 20])
+
+
+@dataclass
+class CircuitBreakerConfigMistral_7B(CircuitBreakerConfig):
+    """Preset configuration for Mistral-7B-Instruct.
+    Default layers: 4, 8, 14 (shallow-to-mid range for 32-layer model).
+    Alternative: use CircuitBreakerConfigMistral_7B_L1020 for layers 10, 20."""
+    base_model: str = "mistralai/Mistral-7B-Instruct-v0.3"
+    cb_target_layers: List[int] = field(default_factory=lambda: [4, 8, 14])
     lora: LoRAConfig = field(default_factory=lambda: LoRAConfig(
         target_layers=list(range(0, 21))
     ))
@@ -210,6 +228,12 @@ class CircuitBreakerConfigMistral_7B(CircuitBreakerConfig):
     total_steps: int = 150
     learning_rate: float = 5e-5
     beta_kl: float = 0.5
+
+
+@dataclass
+class CircuitBreakerConfigMistral_7B_L1020(CircuitBreakerConfigMistral_7B):
+    """Mistral-7B-Instruct with layers 10, 20 (paper-style semantic layers)."""
+    cb_target_layers: List[int] = field(default_factory=lambda: [10, 20])
 
 
 @dataclass  
@@ -256,9 +280,15 @@ class CircuitBreakerConfigLlama4Scout(CircuitBreakerConfig):
 
 CONFIG_PRESETS = {
     "llama-4-scout": CircuitBreakerConfigLlama4Scout,
+    # Llama-3-8B: layers 4,8,14 (default) or 10,20
     "llama-3-8b": CircuitBreakerConfigLlama3_8B,
+    "llama-3-8b-l1020": CircuitBreakerConfigLlama3_8B_L1020,
+    # Llama-3.1-8B-Instruct: layers 4,8,14 (default) or 10,20
     "llama-3.1-8b-instruct": CircuitBreakerConfigLlama3_1_8B_Instruct,
+    "llama-3.1-8b-instruct-l1020": CircuitBreakerConfigLlama3_1_8B_Instruct_L1020,
+    # Mistral-7B: layers 4,8,14 (default) or 10,20
     "mistral-7b": CircuitBreakerConfigMistral_7B,
+    "mistral-7b-l1020": CircuitBreakerConfigMistral_7B_L1020,
     "default": CircuitBreakerConfig,
 }
 
@@ -268,7 +298,9 @@ def get_config(preset: str = "llama-4-scout", **overrides) -> CircuitBreakerConf
     Get a configuration preset with optional overrides.
     
     Args:
-        preset: One of "llama-4-scout", "llama-3-8b", "mistral-7b", "default"
+        preset: One of "llama-4-scout", "llama-3-8b", "llama-3-8b-l1020",
+                "llama-3.1-8b-instruct", "llama-3.1-8b-instruct-l1020",
+                "mistral-7b", "mistral-7b-l1020", "default"
         **overrides: Any config fields to override
     
     Returns:

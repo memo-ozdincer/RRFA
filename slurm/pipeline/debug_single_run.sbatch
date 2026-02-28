@@ -70,8 +70,8 @@ export TRANSFORMERS_OFFLINE=1
 # =============================================================================
 POOLING_MODE="${POOLING_MODE:-legacy}"
 ALPHA="${ALPHA:-10.0}"
-LAYERS="${LAYERS:-4,8,14}"
-POLICY="${POLICY:-assistant_only}"
+LAYERS="${LAYERS:-10,20}"  # alt: LAYERS=10,20 (use with PRESET=llama-3.1-8b-instruct-l1020)
+POLICY="${POLICY:-cb_full_sequence}"  # alt: assistant_only
 TOTAL_STEPS="${TOTAL_STEPS:-100}"
 LIMIT_EVAL="${LIMIT_EVAL:-50}"
 BATCH_SIZE="${BATCH_SIZE:-1}"

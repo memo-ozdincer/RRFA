@@ -56,8 +56,13 @@ fi
 
 export TOTAL_STEPS="${TOTAL_STEPS:-100}"
 export ALPHAS="${ALPHAS:-10.0}"
-# Layers target shallow-to-middle of Llama 3.1 8B (32 layers):
-#   4 (shallow/knowledge), 8 (mid-shallow/core), 14 (upper recommended boundary)
+# Layer configs — pipe-separated list of comma-separated layer sets to sweep.
+# Default: layers 4,8,14 (shallow-to-mid of 32-layer Llama 3.1 8B).
+# To also sweep layers 10,20 (paper-style semantic layers):
+#   LAYER_CONFIGS="4,8,14|10,20" sbatch ...
+# To sweep only layers 10,20:
+#   LAYER_CONFIGS="10,20" sbatch ...
+# Matching config.py presets: "llama-3.1-8b-instruct" (4,8,14) / "llama-3.1-8b-instruct-l1020" (10,20)
 export LAYER_CONFIGS="${LAYER_CONFIGS:-4,8,14}"
 export POLICIES="${POLICIES:-assistant_only,cb_full_sequence}"
 export LIMIT_EVAL="${LIMIT_EVAL:-50}"

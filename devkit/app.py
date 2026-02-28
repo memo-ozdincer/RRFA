@@ -448,11 +448,35 @@ def page_trace_explorer():
             default=["skeleton", "complete"],
         )
 
+    # Extra filters for augmented data
+    provenances = sorted(set(
+        ((t.get("raw_metadata") or {}).get("source_fields") or {}).get("augmentation_provenance", "original")
+        for t in traces
+    ))
+    model_ids = sorted(set(
+        (t.get("source") or {}).get("model_id", "unknown")
+        for t in traces
+    ))
+
+    extra_col1, extra_col2 = st.columns(2)
+    if len(provenances) > 1:
+        with extra_col1:
+            filter_provenance = st.multiselect("Provenance", provenances, default=provenances)
+    else:
+        filter_provenance = provenances
+    if len(model_ids) > 1:
+        with extra_col2:
+            filter_model = st.multiselect("Model", model_ids, default=model_ids)
+    else:
+        filter_model = model_ids
+
     filtered = [
         t for t in traces
         if trace_dataset(t) in filter_dataset
         and trace_category(t) in filter_category
         and trace_completeness(t) in filter_completeness
+        and ((t.get("raw_metadata") or {}).get("source_fields") or {}).get("augmentation_provenance", "original") in filter_provenance
+        and (t.get("source") or {}).get("model_id", "unknown") in filter_model
     ]
 
     st.write(f"**Showing {len(filtered)}/{len(traces)} traces**")
@@ -483,11 +507,14 @@ def page_trace_explorer():
 
     # Trace metadata
     st.subheader("Metadata")
-    meta_cols = st.columns(4)
+    meta_cols = st.columns(5)
     meta_cols[0].write(f"**ID:** `{t.get('id', '?')[:40]}...`")
     meta_cols[1].write(f"**Dataset:** {trace_dataset(t)}")
     meta_cols[2].write(f"**Category:** {trace_category(t)}")
     meta_cols[3].write(f"**Tier:** {t.get('tier', '?')} / {trace_completeness(t)}")
+    prov = ((t.get("raw_metadata") or {}).get("source_fields") or {}).get("augmentation_provenance", "")
+    if prov and prov != "original":
+        meta_cols[4].write(f"**Provenance:** `{prov}`")
 
     # Labels
     if t.get("labels"):
@@ -1348,6 +1375,385 @@ def page_stats_validation():
 
 
 # ===========================================================================
+# PAGE: Data Augmentation & Analysis
+# ===========================================================================
+
+def _get_provenance(t: Dict) -> str:
+    """Get augmentation provenance for a trace."""
+    sf = (t.get("raw_metadata") or {}).get("source_fields") or {}
+    return sf.get("augmentation_provenance", "original")
+
+
+def _get_taxonomy_tags(t: Dict) -> List[str]:
+    """Get OWASP taxonomy tags for a trace."""
+    sf = (t.get("raw_metadata") or {}).get("source_fields") or {}
+    return sf.get("taxonomy_tags", [])
+
+
+def page_augmentation_analysis():
+    st.header("Data Augmentation & Analysis")
+
+    trace_files = discover_jsonl(TRACES_DIR)
+    if not trace_files:
+        st.warning("No trace files found.")
+        return
+
+    # Let user pick augmented file (auto-select if present)
+    aug_files = [f for f in trace_files if "augment" in f.name.lower()]
+    default_files = aug_files if aug_files else trace_files
+    selected_file = st.selectbox(
+        "Trace file (select augmented file for full analysis)",
+        trace_files,
+        index=trace_files.index(default_files[0]) if default_files else 0,
+        format_func=lambda p: p.name,
+        key="aug_trace_file",
+    )
+    traces = load_traces(str(selected_file))
+
+    if not traces:
+        st.warning("No traces in file.")
+        return
+
+    # Also try to load original traces for comparison
+    orig_file = TRACES_DIR / "agentdojo_traces.jsonl"
+    orig_traces = load_traces(str(orig_file)) if orig_file.exists() else []
+
+    # ── Section A: Data Volume Comparison ─────────────────────────────
+    st.subheader("Data Volume: Before vs After")
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Original Traces", len(orig_traces) if orig_traces else "N/A")
+    col2.metric("Augmented Traces", len(traces))
+    if orig_traces:
+        col3.metric("Multiplier", f"{len(traces) / max(len(orig_traces), 1):.1f}x")
+    else:
+        col3.metric("Multiplier", "-")
+
+    # Provenance breakdown
+    prov_counts = Counter(_get_provenance(t) for t in traces)
+    col4.metric("Augmentation Sources", len(prov_counts))
+
+    # Stacked bar: category x provenance
+    cat_prov = defaultdict(lambda: defaultdict(int))
+    for t in traces:
+        cat = trace_category(t)
+        prov = _get_provenance(t)
+        cat_prov[prov][cat] += 1
+
+    if cat_prov:
+        prov_df = pd.DataFrame(cat_prov).fillna(0).astype(int)
+        st.markdown("**Traces by Category x Provenance**")
+        st.bar_chart(prov_df)
+
+    # Key diff callout
+    if orig_traces:
+        st.info(
+            f"**Key Insight:** {len(orig_traces)} -> {len(traces)} traces "
+            f"({len(traces)/max(len(orig_traces),1):.0f}x increase). "
+            f"Multi-model ingestion: {prov_counts.get('original', 0)} original, "
+            f"Removal: +{prov_counts.get('removal', 0)} benign, "
+            f"Transplant: +{prov_counts.get('transplant', 0)} harmful."
+        )
+
+    # ── Section B: Multi-Model Coverage Matrix ────────────────────────
+    st.subheader("Multi-Model Coverage Matrix")
+
+    models = sorted(set((t.get("source") or {}).get("model_id", "unknown") for t in traces))
+    suites = sorted(set((t.get("source") or {}).get("subset", "unknown") for t in traces))
+
+    if len(models) > 1:
+        # Build heatmap data: model x suite x category
+        matrix = defaultdict(lambda: defaultdict(int))
+        for t in traces:
+            model = (t.get("source") or {}).get("model_id", "unknown")
+            suite = (t.get("source") or {}).get("subset", "unknown")
+            # Shorten model name for display
+            short_model = model.split("/")[-1] if "/" in model else model
+            if len(short_model) > 30:
+                short_model = short_model[:27] + "..."
+            matrix[short_model][suite] += 1
+
+        matrix_df = pd.DataFrame(matrix).fillna(0).astype(int).T
+        matrix_df = matrix_df.reindex(columns=sorted(matrix_df.columns))
+        st.dataframe(matrix_df, use_container_width=True)
+        st.caption(f"{len(models)} models x {len(suites)} suites — same 97 tasks tested across diverse model families")
+
+        # Category breakdown per model
+        model_cats = defaultdict(lambda: Counter())
+        for t in traces:
+            if _get_provenance(t) != "original":
+                continue
+            model = (t.get("source") or {}).get("model_id", "unknown")
+            short_model = model.split("/")[-1] if "/" in model else model
+            if len(short_model) > 30:
+                short_model = short_model[:27] + "..."
+            cat = trace_category(t)
+            model_cats[short_model][cat] += 1
+
+        if model_cats:
+            st.markdown("**Category Distribution per Model** (original traces only)")
+            mcat_df = pd.DataFrame(model_cats).fillna(0).astype(int).T
+            for col in ["harmful", "benign", "resisted"]:
+                if col not in mcat_df.columns:
+                    mcat_df[col] = 0
+            mcat_df = mcat_df[["harmful", "benign", "resisted"]]
+            st.bar_chart(mcat_df)
+    else:
+        st.info("Single-model data — multi-model analysis requires augmented file with all models.")
+
+    # ── Section C: OWASP Taxonomy Coverage ────────────────────────────
+    st.subheader("OWASP Taxonomy Coverage")
+
+    owasp_labels = {
+        "LLM01": "Prompt Injection",
+        "LLM02": "Sensitive Info Disclosure",
+        "LLM03": "Supply Chain Vulnerabilities",
+        "LLM04": "Data & Model Poisoning",
+        "LLM05": "Improper Output Handling",
+        "LLM06": "Excessive Agency",
+        "LLM07": "System Prompt Leakage",
+        "LLM08": "Vector & Embedding Weaknesses",
+        "LLM09": "Misinformation",
+        "LLM10": "Unbounded Consumption",
+    }
+
+    tax_counts = Counter()
+    tax_by_prov = defaultdict(lambda: Counter())
+    for t in traces:
+        tags = _get_taxonomy_tags(t)
+        prov = _get_provenance(t)
+        for tag in tags:
+            tax_counts[tag] += 1
+            tax_by_prov[tag][prov] += 1
+
+    if tax_counts:
+        # Build full OWASP table (show zeros for gaps)
+        tax_rows = []
+        for code, desc in owasp_labels.items():
+            count = tax_counts.get(code, 0)
+            tax_rows.append({
+                "Category": f"{code}: {desc}",
+                "Count": count,
+                "Coverage": "Yes" if count > 0 else "Gap",
+            })
+        tax_df = pd.DataFrame(tax_rows)
+        st.dataframe(tax_df, hide_index=True, use_container_width=True)
+
+        # Bar chart of covered categories
+        covered = {f"{k}: {owasp_labels.get(k, k)}": v for k, v in tax_counts.most_common()}
+        st.bar_chart(pd.DataFrame({"Traces": covered}))
+
+        # Gaps callout
+        gaps = [f"{code} ({desc})" for code, desc in owasp_labels.items() if code not in tax_counts]
+        if gaps:
+            st.warning(f"**Coverage gaps:** {', '.join(gaps)} — no training data for these categories yet.")
+    else:
+        st.info("No OWASP taxonomy tags found. Run augmentation with `--operations taxonomy`.")
+
+    # ── Section D: Injection Diversity ────────────────────────────────
+    st.subheader("Injection Diversity Analysis")
+
+    import re as _re
+    inj_pattern = _re.compile(r"<INFORMATION>.*?</INFORMATION>", _re.DOTALL)
+
+    injection_texts = []
+    injection_lengths = []
+    injection_positions = []
+    injection_provs = []
+
+    for t in traces:
+        for i, msg in enumerate(t.get("messages", [])):
+            if msg.get("role") != "tool":
+                continue
+            content = msg.get("content") or ""
+            for match in inj_pattern.finditer(content):
+                injection_texts.append(match.group(0))
+                injection_lengths.append(len(match.group(0)))
+                msg_len = max(len(content), 1)
+                injection_positions.append(match.start() / msg_len)
+                injection_provs.append(_get_provenance(t))
+
+    if injection_lengths:
+        ic1, ic2, ic3 = st.columns(3)
+        ic1.metric("Total Injections Found", len(injection_lengths))
+        ic2.metric("Unique Injection Texts", len(set(injection_texts)))
+        ic3.metric("Avg Length", f"{sum(injection_lengths)/len(injection_lengths):.0f} chars")
+
+        # Length distribution
+        st.markdown("**Injection Length Distribution**")
+        len_df = pd.DataFrame({
+            "Length (chars)": injection_lengths,
+            "Provenance": injection_provs,
+        })
+        bins = pd.cut(len_df["Length (chars)"], bins=15)
+        st.bar_chart(bins.value_counts().sort_index().rename("Count"))
+
+        # Position distribution
+        st.markdown("**Injection Position in Tool Message** (0=start, 1=end)")
+        pos_df = pd.DataFrame({
+            "Relative Position": injection_positions,
+            "Provenance": injection_provs,
+        })
+        pos_bins = pd.cut(pos_df["Relative Position"], bins=10)
+        st.bar_chart(pos_bins.value_counts().sort_index().rename("Count"))
+    else:
+        st.info("No injection patterns detected.")
+
+    # ── Section E: Paired Trace Viewer ────────────────────────────────
+    st.subheader("Paired Trace Viewer (Original vs Augmented)")
+
+    derived_traces = [t for t in traces if _get_provenance(t) in ("removal", "transplant")]
+
+    if derived_traces:
+        # Build parent lookup
+        parent_lookup = {t.get("id"): t for t in traces}
+
+        prov_filter = st.selectbox(
+            "Filter by operation",
+            ["all", "removal", "transplant"],
+            key="paired_prov_filter",
+        )
+        if prov_filter != "all":
+            derived_traces = [t for t in derived_traces if _get_provenance(t) == prov_filter]
+
+        if derived_traces:
+            pair_idx = st.number_input(
+                "Pair index", 0, len(derived_traces) - 1, 0, key="pair_idx"
+            )
+            derived = derived_traces[pair_idx]
+            parent_ids = (derived.get("links") or {}).get("parent_trace_ids", [])
+            parent = parent_lookup.get(parent_ids[0]) if parent_ids else None
+
+            prov = _get_provenance(derived)
+            st.markdown(f"**Operation:** `{prov}` | **Derived ID:** `{derived.get('id', '?')[:40]}...`")
+
+            left_col, right_col = st.columns(2)
+
+            with left_col:
+                st.markdown("**Original Trace**")
+                if parent:
+                    st.markdown(f"`{parent.get('id', '?')[:40]}...` | Category: `{trace_category(parent)}`")
+                    inj_span = (parent.get("signal_hints") or {}).get("injection_char_span")
+                    for i, msg in enumerate(parent.get("messages", [])):
+                        st.markdown(render_message_html(msg, i, inj_span), unsafe_allow_html=True)
+                else:
+                    st.warning("Parent trace not found in current file.")
+
+            with right_col:
+                st.markdown(f"**{'Cleaned' if prov == 'removal' else 'Injected'} Trace**")
+                st.markdown(f"`{derived.get('id', '?')[:40]}...` | Category: `{trace_category(derived)}`")
+                inj_span = (derived.get("signal_hints") or {}).get("injection_char_span")
+                for i, msg in enumerate(derived.get("messages", [])):
+                    st.markdown(render_message_html(msg, i, inj_span), unsafe_allow_html=True)
+
+            # Show diff summary
+            if parent:
+                parent_msgs = len(parent.get("messages", []))
+                derived_msgs = len(derived.get("messages", []))
+                if prov == "removal":
+                    st.success(
+                        f"Injection removed from tool message. "
+                        f"Messages: {parent_msgs} -> {derived_msgs} (truncated after cleaned tool msg). "
+                        f"Category: {trace_category(parent)} -> {trace_category(derived)}"
+                    )
+                else:
+                    st.warning(
+                        f"Injection transplanted into tool message. "
+                        f"Messages: {parent_msgs} -> {derived_msgs} (truncated after injected tool msg). "
+                        f"Category: {trace_category(parent)} -> {trace_category(derived)}"
+                    )
+    else:
+        st.info("No derived traces found. Run augmentation with `removal` or `transplant` operations.")
+
+    # ── Section F: Quality Checks ─────────────────────────────────────
+    st.subheader("Augmentation Quality Checks")
+
+    if st.button("Run quality audit", key="aug_quality_btn"):
+        issues = []
+        checks_passed = 0
+        total_checks = 0
+
+        # Check 1: Schema roundtrip
+        total_checks += 1
+        import random as _random
+        sample = _random.sample(traces, min(200, len(traces)))
+        roundtrip_ok = 0
+        for t in sample:
+            try:
+                obj = Trace.from_dict(t)
+                _ = obj.to_dict()
+                roundtrip_ok += 1
+            except Exception:
+                pass
+        if roundtrip_ok == len(sample):
+            checks_passed += 1
+        else:
+            issues.append(f"- Schema roundtrip: {roundtrip_ok}/{len(sample)} passed")
+
+        # Check 2: Label consistency (benign should not have attack_succeeded=True)
+        total_checks += 1
+        bad_labels = sum(
+            1 for t in traces
+            if trace_category(t) == "benign"
+            and (t.get("labels") or {}).get("attack_succeeded") is True
+        )
+        if bad_labels == 0:
+            checks_passed += 1
+        else:
+            issues.append(f"- {bad_labels} benign traces have attack_succeeded=True")
+
+        # Check 3: Derived traces should have parent_trace_ids
+        total_checks += 1
+        derived_no_parent = sum(
+            1 for t in traces
+            if _get_provenance(t) in ("removal", "transplant")
+            and not (t.get("links") or {}).get("parent_trace_ids")
+        )
+        if derived_no_parent == 0:
+            checks_passed += 1
+        else:
+            issues.append(f"- {derived_no_parent} derived traces missing parent_trace_ids")
+
+        # Check 4: Removal traces should not have injection spans
+        total_checks += 1
+        removal_with_inj = sum(
+            1 for t in traces
+            if _get_provenance(t) == "removal"
+            and (t.get("signal_hints") or {}).get("injection_char_span") is not None
+        )
+        if removal_with_inj == 0:
+            checks_passed += 1
+        else:
+            issues.append(f"- {removal_with_inj} removal traces still have injection_char_span")
+
+        # Check 5: Category balance
+        total_checks += 1
+        harmful = sum(1 for t in traces if trace_category(t) == "harmful")
+        benign = sum(1 for t in traces if trace_category(t) == "benign")
+        if harmful > 0 and benign > 0:
+            ratio = harmful / benign
+            if 0.3 <= ratio <= 3.0:
+                checks_passed += 1
+            else:
+                issues.append(f"- Harmful/Benign ratio = {ratio:.2f} (harmful={harmful}, benign={benign})")
+        else:
+            checks_passed += 1
+
+        if not issues:
+            st.success(f"All {checks_passed}/{total_checks} quality checks passed.")
+        else:
+            st.warning(f"{checks_passed}/{total_checks} checks passed. Issues:")
+            for issue in issues:
+                st.write(issue)
+
+        # Summary metrics
+        st.markdown("**Balance Report:**")
+        balance_data = Counter(trace_category(t) for t in traces)
+        bal_df = pd.DataFrame({"Count": dict(balance_data)})
+        st.dataframe(bal_df.T, use_container_width=True)
+
+
+# ===========================================================================
 # PAGE: Eval Results
 # ===========================================================================
 
@@ -1968,7 +2374,7 @@ st.set_page_config(
 st.sidebar.title("RRFA Dev Kit")
 page = st.sidebar.radio(
     "Navigate",
-    ["Dashboard", "Trace Explorer", "Render & Lossmask", "Policy Comparator", "Dataset Importer", "Stats & Validation", "Eval Results"],
+    ["Dashboard", "Trace Explorer", "Render & Lossmask", "Policy Comparator", "Dataset Importer", "Stats & Validation", "Augmentation Analysis", "Eval Results"],
 )
 
 if page == "Dashboard":
@@ -1983,5 +2389,7 @@ elif page == "Dataset Importer":
     page_dataset_importer()
 elif page == "Stats & Validation":
     page_stats_validation()
+elif page == "Augmentation Analysis":
+    page_augmentation_analysis()
 elif page == "Eval Results":
     page_eval_results()
