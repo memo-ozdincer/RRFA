@@ -68,6 +68,7 @@ export TRANSFORMERS_OFFLINE=1
 # =============================================================================
 # Single Run Configuration
 # =============================================================================
+POOLING_MODE=correct
 ALPHA="${ALPHA:-10.0}"
 LAYERS="${LAYERS:-10,20}"
 POLICY="${POLICY:-assistant_only}"
