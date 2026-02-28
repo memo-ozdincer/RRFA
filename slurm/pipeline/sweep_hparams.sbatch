@@ -147,6 +147,7 @@ LORA_R="${LORA_R:-16}"
 LORA_ALPHA="${LORA_ALPHA:-32}"
 MAX_SEQ_LENGTH="${MAX_SEQ_LENGTH:-4096}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
+ENABLE_LLMAIL="${ENABLE_LLMAIL:-true}"
 LLMAIL_LIMIT="${LLMAIL_LIMIT:-}"  # empty = no limit; e.g. 3000
 DTYPE="${DTYPE:-bfloat16}"
 LLMAIL_TOOL_SCHEMA="${LLMAIL_TOOL_SCHEMA:-$REPO_DIR/configs/tool_schemas/llmail_inject_challenge_v2.json}"
@@ -180,6 +181,7 @@ echo "  LIMIT_EVAL: $LIMIT_EVAL"
 echo "  NUM_EXAMPLES: $NUM_EXAMPLES"
 echo "  SHOW_EXAMPLES: $SHOW_EXAMPLES"
 echo "  QUICK_TEST: $QUICK_TEST"
+echo "  ENABLE_LLMAIL: $ENABLE_LLMAIL"
 echo "  LLMAIL_RETRIEVED_ONLY: $LLMAIL_RETRIEVED_ONLY"
 echo "  STOP_AFTER_ETL_B: $STOP_AFTER_ETL_B"
 echo "  STOP_AFTER_SPLIT: $STOP_AFTER_SPLIT"
@@ -216,7 +218,9 @@ else
 fi
 
 HAS_LLMAIL=false
-if [[ -f "$LLMAIL_DS_TRACES" && -f "$LLMAIL_DR_TRACES" ]]; then
+if [[ "$ENABLE_LLMAIL" != "true" ]]; then
+    echo "  LLMail-Inject: disabled (ENABLE_LLMAIL=$ENABLE_LLMAIL)"
+elif [[ -f "$LLMAIL_DS_TRACES" && -f "$LLMAIL_DR_TRACES" ]]; then
     HAS_LLMAIL=true
     echo "  ✓ $(basename "$LLMAIL_DS_TRACES"): $(wc -l < "$LLMAIL_DS_TRACES") lines"
     echo "  ✓ $(basename "$LLMAIL_DR_TRACES"): $(wc -l < "$LLMAIL_DR_TRACES") lines"

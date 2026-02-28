@@ -671,7 +671,6 @@ def analyze_run(
     run_dir: Path,
     traces_dir: Optional[Path] = None,
     tool_schema: Optional[Dict[str, Any]] = None,
-    llmail_reference: Optional[Dict[str, Any]] = None,
     only_dataset: str = "all",
     show_samples: int = 0,
     start_sample: int = 0,
@@ -696,7 +695,6 @@ def analyze_run(
         "hparams": hparams,
         "lossmask": lossmask,
         "fujitsu": None,
-        "llmail": None,
         "agentdojo": None,
     }
     
@@ -709,7 +707,6 @@ def analyze_run(
     # Try to load traces for context (from multiple possible locations)
     dataset_traces: Dict[str, List[Dict[str, Any]]] = {
         "fujitsu": [],
-        "llmail": [],
         "agentdojo": [],
     }
     if traces_dir:
@@ -718,11 +715,6 @@ def analyze_run(
         if fujitsu_traces_path.exists():
             dataset_traces["fujitsu"] = load_jsonl(fujitsu_traces_path)
 
-        # Load LLMail traces
-        llmail_traces_path = traces_dir / "llmail_inject_ds.jsonl"
-        if llmail_traces_path.exists():
-            dataset_traces["llmail"] = load_jsonl(llmail_traces_path)
-        
         # Load AgentDojo traces from split directory
         # Sweep layout: run_dir/agentdojo_split/
         # Unified layout: OUTPUT_BASE/split/agentdojo/ (traces_dir sibling)
@@ -799,105 +791,6 @@ def analyze_run(
                     sample,
                     sample.get("_trace"),
                     tool_schema,
-                    llmail_reference=llmail_reference,
-                    show_full=show_full,
-                    use_color=use_color,
-                )
-    
-    # ---------------------------------------------------------
-    # LLMail-Inject Analysis
-    # ---------------------------------------------------------
-    llmail_eval_json = eval_root / "llmail_eval.json"
-    llmail_paired = eval_root / "llmail_eval.paired_outputs.jsonl"
-    
-    if only_dataset in ("all", "llmail") and llmail_eval_json.exists():
-        eval_data = load_json(llmail_eval_json)
-        paired = load_jsonl(llmail_paired)
-        observed_tool_dist = summarize_observed_tool_distribution(paired)
-
-        # Use new llmail_attack metrics (preferred) with fallback to tool_flip_asr
-        baseline_la = eval_data.get("baseline", {}).get("llmail_attack", {})
-        cb_la = eval_data.get("cb_model", {}).get("llmail_attack", {})
-        cb_lu = eval_data.get("cb_model", {}).get("llmail_usefulness", {})
-        delta = eval_data.get("delta", {})
-        llmail_retrieved_only = eval_data.get("llmail_retrieved_only")
-        llmail_filtered_out = eval_data.get("llmail_filtered_out_not_retrieved")
-
-        if baseline_la:
-            # New metrics from eval improvements
-            cb_cap = eval_data.get("cb_model", {}).get("llmail_capability", {})
-            diag = eval_data.get("diagnostics", {})
-            stage1 = eval_data.get("stage1_gates", {})
-
-            results["llmail"] = {
-                "baseline_asr": baseline_la.get("attack_success_rate", 0) * 100,
-                "cb_asr": cb_la.get("attack_success_rate", 0) * 100,
-                "delta": delta.get("llmail_attack_asr", 0) * 100,
-                "refusal_rate": cb_la.get("refusal_rate", 0) * 100,
-                "usefulness": cb_lu.get("usefulness_rate", 0) * 100,
-                "capability_retention": cb_cap.get("capability_retention", None),
-                "no_tool_rate": cb_cap.get("no_tool_rate", None),
-                "json_parse_failure_rate": cb_cap.get("json_parse_failure_rate", None),
-                "target_accuracy_rate": cb_la.get("target_accuracy_rate", None),
-                "partial_neutralization_rate": cb_la.get("partial_neutralization_rate", None),
-                "tools_broken": diag.get("tools_broken"),
-                "llmail_tools_broken": diag.get("llmail_tools_broken"),
-                "stage1_gates": stage1,
-                "stage1_passed": eval_data.get("stage1_passed"),
-                "total": len(paired),
-                "retrieved_only": llmail_retrieved_only,
-                "filtered_not_retrieved": llmail_filtered_out,
-                "tool_distribution": observed_tool_dist,
-                "improvements": sum(1 for p in paired if p.get("baseline_outcome") == "attack_success" and p.get("cb_outcome") != "attack_success"),
-                "regressions": sum(1 for p in paired if p.get("baseline_outcome") != "attack_success" and p.get("cb_outcome") == "attack_success"),
-            }
-        else:
-            # Fallback to old tool_flip_asr (for sweeps run before this update)
-            baseline = eval_data.get("baseline", {}).get("tool_flip_asr", {})
-            cb = eval_data.get("cb_model", {}).get("tool_flip_asr", {})
-            results["llmail"] = {
-                "baseline_asr": baseline.get("attack_success_rate", 0) * 100,
-                "cb_asr": cb.get("attack_success_rate", 0) * 100,
-                "delta": delta.get("tool_flip_asr", 0) * 100,
-                "total": len(paired),
-                "retrieved_only": llmail_retrieved_only,
-                "filtered_not_retrieved": llmail_filtered_out,
-                "tool_distribution": observed_tool_dist,
-                "improvements": sum(1 for p in paired if p.get("baseline_outcome") == "attack_success" and p.get("cb_outcome") != "attack_success"),
-                "regressions": sum(1 for p in paired if p.get("baseline_outcome") != "attack_success" and p.get("cb_outcome") == "attack_success"),
-            }
-
-        # Show sample details if requested
-        if show_samples > 0 and paired:
-            print(f"\n{'#'*80}")
-            print(f"# LLMAIL-INJECT SAMPLES: {resolved_run_name}")
-            print(f"{'#'*80}")
-
-            paired_with_context = attach_trace_context(paired, dataset_traces["llmail"])
-
-            if filter_success:
-                filtered_samples = [
-                    p for p in paired_with_context
-                    if p.get("baseline_outcome") == "attack_success" and p.get("cb_outcome") != "attack_success"
-                ]
-            elif filter_failure:
-                filtered_samples = [
-                    p for p in paired_with_context
-                    if p.get("cb_outcome") == "attack_success"
-                ]
-            else:
-                filtered_samples = paired_with_context
-
-            # Apply pagination
-            end = start_sample + show_samples
-            samples_to_show = filtered_samples[start_sample:end]
-
-            for sample in samples_to_show:
-                print_sample_detail(
-                    sample,
-                    sample.get("_trace"),
-                    tool_schema,
-                    llmail_reference=llmail_reference,
                     show_full=show_full,
                     use_color=use_color,
                 )
@@ -946,7 +839,6 @@ def analyze_run(
                     sample,
                     sample.get("_trace"),
                     tool_schema,
-                    llmail_reference=llmail_reference,
                     show_full=show_full,
                     use_color=use_color,
                 )
@@ -985,11 +877,10 @@ def print_summary_table(runs: List[Dict[str, Any]], use_color: bool = True) -> N
     header = (
         f"{'Run Name':<35} {'Ckpt':<10} {'Hparams':<18} {'Lossmask':<28} "
         f"{'CB Mal':<8} {'CB Corr':<8} {'CB No':<8} {'CB Multi':<9} "
-        f"{'Base ASR':<10} {'CB ASR':<8} {'Reduct':<10} {'AgentDojo':<10} "
-        f"{'LLMail':<10} {'LL Cap':<8} {'LL TgtAcc':<10}"
+        f"{'Base ASR':<10} {'CB ASR':<8} {'Reduct':<10} {'AgentDojo':<10}"
     )
     print(f"{BOLD}{header}{RESET}")
-    print(f"{'-'*230}")
+    print(f"{'-'*200}")
 
     for run in runs:
         run_name = run.get("run_name", "?")
@@ -1037,32 +928,10 @@ def print_summary_table(runs: List[Dict[str, Any]], use_color: bool = True) -> N
         else:
             agent_str = "N/A"
 
-        llmail = run.get("llmail", {})
-        if llmail:
-            llmail_base = llmail.get("baseline_asr", 0)
-            llmail_cb = llmail.get("cb_asr", 0)
-            llmail_red = llmail_base - llmail_cb
-            llmail_str = f"{llmail_cb:.1f}%"
-            if llmail_red > 50:
-                llmail_str = f"{GREEN}{llmail_str}{RESET}"
-
-            cap = llmail.get("capability_retention")
-            cap_str = f"{cap*100:.0f}%" if isinstance(cap, (int, float)) else "N/A"
-            if isinstance(cap, (int, float)) and cap < 0.30:
-                cap_str = f"{RED}{cap_str}{RESET}"
-
-            ta = llmail.get("target_accuracy_rate")
-            ta_str = f"{ta*100:.0f}%" if isinstance(ta, (int, float)) else "N/A"
-        else:
-            llmail_str = "N/A"
-            cap_str = "N/A"
-            ta_str = "N/A"
-
         print(
             f"{run_name:<35} {checkpoint:<10} {hparams_str:<18} {lossmask:<28} "
             f"{mal_str:<8} {corr_str:<8} {no_str:<8} {multi_str:<9} "
-            f"{base_str:<10} {cb_str:<8} {red_str:<10} {agent_str:<10} "
-            f"{llmail_str:<10} {cap_str:<8} {ta_str:<10}"
+            f"{base_str:<10} {cb_str:<8} {red_str:<10} {agent_str:<10}"
         )
 
 
@@ -1108,45 +977,6 @@ def print_best_runs(
             )
         print(f"   Improvements: {metric.get('improvements', 0)}, "
               f"Regressions: {metric.get('regressions', 0)}")
-        if metric_dataset == "llmail":
-            if metric.get("usefulness") is not None:
-                print(f"   LLMail Usefulness: {metric.get('usefulness', 0):.1f}%")
-            if metric.get("refusal_rate") is not None:
-                print(f"   LLMail Refusal Rate: {metric.get('refusal_rate', 0):.1f}%")
-            if metric.get("capability_retention") is not None:
-                cap = metric["capability_retention"]
-                cap_str = f"{cap*100:.1f}%" if isinstance(cap, (int, float)) else str(cap)
-                print(f"   LLMail Capability Retention: {cap_str}")
-            if metric.get("target_accuracy_rate") is not None:
-                ta = metric["target_accuracy_rate"]
-                ta_str = f"{ta*100:.1f}%" if isinstance(ta, (int, float)) else str(ta)
-                print(f"   LLMail Target Accuracy: {ta_str}")
-            if metric.get("partial_neutralization_rate") is not None and metric.get("partial_neutralization_rate", 0) > 0:
-                pn = metric["partial_neutralization_rate"]
-                pn_str = f"{pn*100:.1f}%" if isinstance(pn, (int, float)) else str(pn)
-                print(f"   LLMail Partial Neutralization: {pn_str}")
-            if metric.get("json_parse_failure_rate") is not None and metric.get("json_parse_failure_rate", 0) > 0:
-                jpf = metric["json_parse_failure_rate"]
-                jpf_str = f"{jpf*100:.1f}%" if isinstance(jpf, (int, float)) else str(jpf)
-                print(f"   LLMail JSON Parse Failures: {jpf_str}")
-            if metric.get("tools_broken"):
-                print(f"   ** TOOLS BROKEN **")
-            if metric.get("llmail_tools_broken"):
-                print(f"   ** LLMAIL TOOLS BROKEN **")
-            if metric.get("stage1_passed") is not None:
-                status = "PASSED" if metric["stage1_passed"] else "FAILED"
-                print(f"   Stage-1 Gates: {status}")
-                gates = metric.get("stage1_gates", {})
-                for gate, passed in gates.items():
-                    g_status = "PASS" if passed else "FAIL"
-                    print(f"     {g_status} {gate}")
-            if metric.get("retrieved_only") is not None:
-                print(f"   Retrieved-only filter: {metric.get('retrieved_only')} "
-                      f"(filtered_not_retrieved={metric.get('filtered_not_retrieved', 'N/A')})")
-            tool_dist = metric.get("tool_distribution", {})
-            if tool_dist:
-                print(f"   Tool Dist (baseline): {tool_dist.get('baseline', {})}")
-                print(f"   Tool Dist (cb): {tool_dist.get('cb', {})}")
         agentdojo = run.get("agentdojo", {})
         if agentdojo:
             print(f"   AgentDojo Diff Rate: {agentdojo.get('diff_rate', 0):.1f}%")
@@ -1203,38 +1033,6 @@ def plot_metrics(runs: List[Dict[str, Any]]) -> None:
         bar = "█" * bar_len
         print(f"  a={alpha:<4} {layers:<20}: {bar} {diff:.1f}%")
 
-    # 3. LLMail CB ASR vs Alpha
-    print("\n3. LLMail CB ASR (lower is better) vs Alpha:")
-    for run in sorted_runs:
-        llmail = run.get("llmail", {})
-        if not llmail: continue
-
-        asr = llmail.get("cb_asr")
-        if asr is None: continue
-        alpha = run.get("hparams", {}).get("a") or "?"
-        layers = run.get("lossmask") or "?"
-
-        bar_len = int((asr / 100.0) * 40)
-        bar = "█" * bar_len
-        print(f"  a={alpha:<4} {layers:<20}: {bar} {asr:.1f}%")
-
-    # 4. LLMail Capability Retention (higher is better)
-    has_cap = any(run.get("llmail", {}).get("capability_retention") is not None for run in sorted_runs)
-    if has_cap:
-        print("\n4. LLMail Capability Retention (higher is better):")
-        for run in sorted_runs:
-            llmail = run.get("llmail", {})
-            cap = llmail.get("capability_retention")
-            if cap is None: continue
-
-            alpha = run.get("hparams", {}).get("a") or "?"
-            layers = run.get("lossmask") or "?"
-            cap_pct = cap * 100 if isinstance(cap, (int, float)) else 0
-
-            bar_len = int((cap_pct / 100.0) * 40)
-            bar = "█" * bar_len
-            marker = " ← BROKEN" if cap_pct < 30 else ""
-            print(f"  a={alpha:<4} {layers:<20}: {bar} {cap_pct:.1f}%{marker}")
 
 
 def compare_samples(
@@ -1266,8 +1064,6 @@ def compare_samples(
             path = eval_dir / "fujitsu_eval.paired_outputs.jsonl"
         elif dataset == "agentdojo":
             path = eval_dir / "agentdojo_eval.paired_outputs.jsonl"
-        elif dataset == "llmail":
-            path = eval_dir / "llmail_eval.paired_outputs.jsonl"
         else:
             continue
             
@@ -1370,12 +1166,6 @@ Examples:
         help="Path to tool schema JSON (default: configs/tool_schemas/b4_standard_v1.json)"
     )
     parser.add_argument(
-        "--llmail-data-dir",
-        type=Path,
-        default=Path("data/llmail_inject"),
-        help="Directory with LLMail metadata files (scenarios.json, levels_descriptions.json)"
-    )
-    parser.add_argument(
         "--show-samples",
         type=int,
         default=0,
@@ -1441,14 +1231,14 @@ Examples:
         "--compare-dataset",
         type=str,
         default="fujitsu",
-        choices=["fujitsu", "agentdojo", "llmail"],
+        choices=["fujitsu", "agentdojo"],
         help="Dataset to use for comparison"
     )
     parser.add_argument(
         "--only-dataset",
         type=str,
         default="all",
-        choices=["all", "fujitsu", "agentdojo", "llmail"],
+        choices=["all", "fujitsu", "agentdojo"],
         help="Restrict analysis/visualization to a single dataset"
     )
     parser.add_argument(
@@ -1490,10 +1280,6 @@ Examples:
         tool_schema = load_tool_schema(args.tool_schema)
         print(f"Loaded tool schema: {args.tool_schema}")
 
-    llmail_reference = load_llmail_reference_data(args.llmail_data_dir)
-    if llmail_reference:
-        print(f"Loaded LLMail reference data: {args.llmail_data_dir}")
-    
     # Try to find traces directory
     traces_dir = args.traces_dir
     if traces_dir is None:
@@ -1615,7 +1401,6 @@ Examples:
             target["run_dir"],
             traces_dir=traces_dir,
             tool_schema=tool_schema,
-            llmail_reference=llmail_reference,
             only_dataset=args.only_dataset,
             show_samples=show_samples,
             start_sample=args.start_from_sample,
@@ -1632,19 +1417,13 @@ Examples:
     # Print summary
     print_summary_table(all_results, use_color)
 
-    # Auto-detect best metric dataset: prefer fujitsu, fall back to llmail
-    if args.only_dataset == "llmail":
-        best_metric_dataset = "llmail"
-    elif args.only_dataset != "all":
+    # Auto-detect best metric dataset: prefer fujitsu
+    if args.only_dataset != "all":
         best_metric_dataset = args.only_dataset
     else:
-        # Check which datasets have data
         has_fujitsu = any(r.get("fujitsu") for r in all_results)
-        has_llmail = any(r.get("llmail") for r in all_results)
         if has_fujitsu:
             best_metric_dataset = "fujitsu"
-        elif has_llmail:
-            best_metric_dataset = "llmail"
         else:
             best_metric_dataset = "fujitsu"
 
@@ -1667,7 +1446,6 @@ Examples:
                     target["run_dir"],
                     traces_dir=traces_dir,
                     tool_schema=tool_schema,
-                    llmail_reference=llmail_reference,
                     only_dataset=args.only_dataset,
                     show_samples=args.show_samples,
                     start_sample=args.start_from_sample,
@@ -1694,13 +1472,10 @@ Examples:
                 "improvements", "regressions", "agentdojo_diff_rate",
                 "agentdojo_malicious_tool_rate", "agentdojo_correct_tool_rate",
                 "agentdojo_no_tool_call_rate", "agentdojo_multiple_tool_call_rate",
-                "llmail_cb_asr", "llmail_capability", "llmail_target_acc",
-                "llmail_json_parse_fail", "tools_broken", "stage1_passed",
             ])
             for r in all_results:
                 fujitsu = r.get("fujitsu") or {}
                 agentdojo = r.get("agentdojo") or {}
-                llmail = r.get("llmail") or {}
                 writer.writerow([
                     r.get("run_name", ""),
                     r.get("base_run_name", ""),
@@ -1723,12 +1498,6 @@ Examples:
                     agentdojo.get("correct_tool_rate", "") if agentdojo else "",
                     agentdojo.get("no_tool_call_rate", "") if agentdojo else "",
                     agentdojo.get("multiple_tool_call_rate", "") if agentdojo else "",
-                    llmail.get("cb_asr", "") if llmail else "",
-                    llmail.get("capability_retention", "") if llmail else "",
-                    llmail.get("target_accuracy_rate", "") if llmail else "",
-                    llmail.get("json_parse_failure_rate", "") if llmail else "",
-                    llmail.get("tools_broken", "") if llmail else "",
-                    llmail.get("stage1_passed", "") if llmail else "",
                 ])
         print(f"\nExported results to: {args.csv}")
 
