@@ -111,20 +111,22 @@ echo ""
 QUICK_TEST="${QUICK_TEST:-false}"
 
 if [[ "$QUICK_TEST" == "true" ]]; then
-    echo "🔧 QUICK TEST MODE - Reduced configurations"
+    echo "QUICK TEST MODE - Reduced configurations"
     DEFAULT_STEPS=50
-    DEFAULT_ALPHAS="5.0,10.0"
+    DEFAULT_ALPHAS="10.0"
     DEFAULT_LAYER_CONFIGS="10,20"
     DEFAULT_POLICIES="assistant_only"
     DEFAULT_LIMIT_EVAL=20
     DEFAULT_NUM_EXAMPLES=5
 else
-    DEFAULT_STEPS=200
-    DEFAULT_ALPHAS="5.0,10.0,15.0"
-    DEFAULT_LAYER_CONFIGS="10,20|8,16,24|12,18|6,12,18,24"
-    DEFAULT_POLICIES="assistant_only,assistant_and_tool,cb_full_sequence,tool_calls_only,completion_only"
+    # Focused grid around working config (legacy pooling, margins 500/1500)
+    # Override via env vars or sweep_hparams_simple.sbatch for larger sweeps
+    DEFAULT_STEPS=100
+    DEFAULT_ALPHAS="7.5,10.0"
+    DEFAULT_LAYER_CONFIGS="10,20"
+    DEFAULT_POLICIES="assistant_only"
     DEFAULT_LIMIT_EVAL=50
-    DEFAULT_NUM_EXAMPLES=50
+    DEFAULT_NUM_EXAMPLES=10
 fi
 
 TOTAL_STEPS="${TOTAL_STEPS:-$DEFAULT_STEPS}"
