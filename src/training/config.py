@@ -92,6 +92,12 @@ class CircuitBreakerConfig:
     # - "correct": Proper token masking via unsqueeze(-1). Needs re-tuned margins (~10-100 range).
     pooling_mode: str = "legacy"
 
+    # Pooling mask policy: controls which mask is used for representation pooling.
+    # - "auto": use pooling_mask from data if present, else fall back to loss_mask (Phase 1)
+    # - "loss_mask": always use loss_mask for pooling (legacy behavior)
+    # - "asymmetric": harmful uses pooling_mask, benign uses loss_mask (Phase 2)
+    pooling_mask_policy: str = "auto"
+
     # Loss weighting strategy:
     # - "single_alpha": L = alpha * L_rr + L_ret (original, retain weight fixed at 1.0)
     # - "dual": L = cs(t) * L_rr + cr(t) * L_ret (paper-style, both coefficients vary)

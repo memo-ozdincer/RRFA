@@ -38,14 +38,18 @@ class LossMask:
     policy_version: Optional[str] = None
     policy_params: Optional[Dict[str, Any]] = None
     labels: Optional[List[int]] = None  # Target labels (-100 for masked)
+    pooling_mask: Optional[List[float]] = None  # Separate mask for representation pooling
     sample_weight: float = 1.0
     stats: Optional[LossMaskStats] = None
+    pooling_stats: Optional[LossMaskStats] = None
 
     def __post_init__(self):
         if self.created_at is None:
             self.created_at = datetime.utcnow().isoformat() + "Z"
         if self.stats is None:
             self._compute_stats()
+        if self.pooling_mask is not None and self.pooling_stats is None:
+            self._compute_pooling_stats()
 
     def _compute_stats(self):
         """Compute mask statistics."""
@@ -53,6 +57,20 @@ class LossMask:
         unmasked = sum(1 for m in self.loss_mask if m > 0)
         masked = total - unmasked
         self.stats = LossMaskStats(
+            total_tokens=total,
+            masked_tokens=masked,
+            unmasked_tokens=unmasked,
+            mask_ratio=unmasked / total if total > 0 else 0.0,
+        )
+
+    def _compute_pooling_stats(self):
+        """Compute pooling mask statistics."""
+        if self.pooling_mask is None:
+            return
+        total = len(self.pooling_mask)
+        unmasked = sum(1 for m in self.pooling_mask if m > 0)
+        masked = total - unmasked
+        self.pooling_stats = LossMaskStats(
             total_tokens=total,
             masked_tokens=masked,
             unmasked_tokens=unmasked,
@@ -95,6 +113,10 @@ class LossMask:
         if data.get("stats"):
             stats = LossMaskStats(**data["stats"])
 
+        pooling_stats = None
+        if data.get("pooling_stats"):
+            pooling_stats = LossMaskStats(**data["pooling_stats"])
+
         return cls(
             lossmask_id=data["lossmask_id"],
             render_id=data["render_id"],
@@ -105,8 +127,10 @@ class LossMask:
             policy_version=data.get("policy_version"),
             policy_params=data.get("policy_params"),
             labels=data.get("labels"),
+            pooling_mask=data.get("pooling_mask"),
             sample_weight=data.get("sample_weight", 1.0),
             stats=stats,
+            pooling_stats=pooling_stats,
         )
 
     @classmethod
@@ -118,6 +142,7 @@ class LossMask:
         policy_version: Optional[str] = None,
         policy_params: Optional[Dict[str, Any]] = None,
         sample_weight: float = 1.0,
+        pooling_mask_fn=None,  # Optional callable for separate pooling mask
     ) -> "LossMask":
         """Create a loss mask from a rendered view using a masking function."""
         loss_mask = mask_fn(render)
@@ -135,6 +160,10 @@ class LossMask:
             else:
                 labels.append(-100)  # No target for last token
 
+        pooling_mask = None
+        if pooling_mask_fn is not None:
+            pooling_mask = pooling_mask_fn(render)
+
         lossmask_id = cls.generate_id(policy_id, render.render_id)
 
         return cls(
@@ -146,5 +175,6 @@ class LossMask:
             policy_version=policy_version,
             policy_params=policy_params,
             labels=labels,
+            pooling_mask=pooling_mask,
             sample_weight=sample_weight,
         )

@@ -1138,6 +1138,8 @@ def main() -> None:
     parser.add_argument("--include-rendered-text", action="store_true", help="Include rendered_text in output")
     parser.add_argument("--lmp-registry", type=Path, default=None, help="Path to LMP registry JSON")
     parser.add_argument("--policy-override", type=str, default=None, help="Override policy ID")
+    parser.add_argument("--pooling-policy-override", type=str, default=None,
+                        help="Override policy for pooling_mask (separate from loss_mask policy)")
     parser.add_argument("--mwcs-registry", type=Path, default=None, help="Path to MWCS registry JSON")
     parser.add_argument("--mwcs-schedule", type=str, default=None, help="MWCS schedule ID")
     parser.add_argument("--mwcs-step", type=int, default=None, help="Training step for curriculum")
@@ -1279,13 +1281,30 @@ def main() -> None:
         policy_id, policy = _resolve_policy(trace, lmp_registry, policy_override)
         mask_values = _apply_lmp_policy(render, policy)
 
+        # Build pooling_mask_fn if a separate pooling policy is requested
+        pooling_mask_fn = None
+        if args.pooling_policy_override:
+            pooling_policy_id, pooling_policy = _resolve_policy(
+                trace, lmp_registry, args.pooling_policy_override
+            )
+            pooling_mask_values = _apply_lmp_policy(render, pooling_policy)
+            # Lambda capture fix: bind value eagerly to avoid late-binding
+            pooling_mask_fn = lambda _, v=pooling_mask_values: v
+
+            if sum(1 for x in pooling_mask_values if x > 0) == 0:
+                logger.warning(
+                    "Zero-coverage pooling_mask for trace %s (policy=%s)",
+                    trace.id, args.pooling_policy_override,
+                )
+
         lossmask = LossMask.from_render(
             render,
             policy_id=policy_id,
-            mask_fn=lambda _: mask_values,
+            mask_fn=lambda _, v=mask_values: v,
             policy_version=lmp_registry.version,
             policy_params=policy.params,
             sample_weight=sample_weight,
+            pooling_mask_fn=pooling_mask_fn,
         )
 
         renders.append(render.to_dict())

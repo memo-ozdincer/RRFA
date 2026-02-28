@@ -45,6 +45,7 @@ def load_renders_and_masks(render_path: Path, lossmask_path: Path) -> List[Dict[
     renders = {row["render_id"]: row for row in _iter_jsonl(render_path)}
 
     samples: List[Dict[str, Any]] = []
+    zero_mask_count = 0
     for mask_row in _iter_jsonl(lossmask_path):
         render_id = mask_row.get("render_id")
         render = renders.get(render_id)
@@ -52,17 +53,29 @@ def load_renders_and_masks(render_path: Path, lossmask_path: Path) -> List[Dict[
             logger.warning("No render found for lossmask %s", render_id)
             continue
 
+        # Filter zero-mask samples (all-zero loss_mask contributes nothing)
+        loss_mask = mask_row["loss_mask"]
+        if not any(m > 0 for m in loss_mask):
+            zero_mask_count += 1
+            continue
+
         input_ids = render["input_ids"]
         samples.append(
             {
                 "input_ids": input_ids,
                 "attention_mask": render.get("attention_mask", [1] * len(input_ids)),
-                "loss_mask": mask_row["loss_mask"],
+                "loss_mask": loss_mask,
+                "pooling_mask": mask_row.get("pooling_mask"),  # None for old data
                 "sample_weight": mask_row.get("sample_weight", 1.0),
                 "trace_id": mask_row.get("trace_id"),
                 "render_id": render_id,
                 "policy_id": mask_row.get("policy_id"),
             }
+        )
+
+    if zero_mask_count > 0:
+        logger.warning(
+            "Filtered %d zero-mask samples from %s", zero_mask_count, lossmask_path
         )
 
     return samples
@@ -162,12 +175,21 @@ class SchemaDataset(Dataset):
         attention_mask = _pad(attention_mask, 0)
         loss_mask = _pad(loss_mask, 0.0)
 
-        return {
+        result = {
             "input_ids": torch.tensor(input_ids, dtype=torch.long),
             "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
             "loss_mask": torch.tensor(loss_mask, dtype=torch.float),
             "sample_weight": torch.tensor(sample.get("sample_weight", 1.0), dtype=torch.float),
         }
+
+        # Pooling mask: truncate/pad same as loss_mask
+        pooling_mask_raw = sample.get("pooling_mask")
+        if pooling_mask_raw is not None:
+            pooling_mask = pooling_mask_raw[: self.max_length]
+            pooling_mask = _pad(pooling_mask, 0.0)
+            result["pooling_mask"] = torch.tensor(pooling_mask, dtype=torch.float)
+
+        return result
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         harmful = self._prepare_sample(self.harmful_samples[idx % len(self.harmful_samples)])
@@ -178,10 +200,13 @@ class SchemaDataset(Dataset):
             "harmful_attention_mask": harmful["attention_mask"],
             "harmful_loss_mask": harmful["loss_mask"],
             "harmful_sample_weight": harmful["sample_weight"],
+            # Pooling mask: fall back to loss_mask when absent (old data compat)
+            "harmful_pooling_mask": harmful.get("pooling_mask", harmful["loss_mask"]),
             "benign_input_ids": benign["input_ids"],
             "benign_attention_mask": benign["attention_mask"],
             "benign_loss_mask": benign["loss_mask"],
             "benign_sample_weight": benign["sample_weight"],
+            "benign_pooling_mask": benign.get("pooling_mask", benign["loss_mask"]),
         }
 
 
@@ -330,6 +355,9 @@ def _parse_args() -> argparse.Namespace:
     cb_group.add_argument("--triplet-mix-cos-weight", type=float, help="dmix cosine coefficient")
     cb_group.add_argument("--pooling-mode", type=str, choices=["legacy", "correct"],
                           help="Pooling mode: legacy (H-dim broadcast) or correct (token masking)")
+    cb_group.add_argument("--pooling-mask-policy", type=str,
+                          choices=["auto", "loss_mask", "asymmetric"],
+                          help="Which mask to use for representation pooling")
 
     lora_group = parser.add_argument_group("LoRA")
     lora_group.add_argument("--lora-r", type=int, help="LoRA rank")
@@ -411,6 +439,7 @@ def _build_config(args: argparse.Namespace) -> CircuitBreakerConfig:
         "triplet_mix_l2_weight": "triplet_mix_l2_weight",
         "triplet_mix_cos_weight": "triplet_mix_cos_weight",
         "pooling_mode": "pooling_mode",
+        "pooling_mask_policy": "pooling_mask_policy",
         "wandb_project": "wandb_project",
         "wandb_run_name": "wandb_run_name",
         "logging_steps": "logging_steps",

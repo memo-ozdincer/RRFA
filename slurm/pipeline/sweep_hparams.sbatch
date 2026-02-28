@@ -164,6 +164,8 @@ TRIPLET_MIX_COS_WEIGHT="${TRIPLET_MIX_COS_WEIGHT:-0.5}"
 # Multiple presets separated by spaces. Swept as innermost dimension.
 # Use POOLING_PRESETS env var to customize, or these defaults:
 POOLING_PRESETS="${POOLING_PRESETS:-legacy:legacy:dmix:500:1500}"
+POOLING_POLICY="${POOLING_POLICY:-}"
+POOLING_MASK_POLICY="${POOLING_MASK_POLICY:-auto}"
 STOP_AFTER_ETL_B="${STOP_AFTER_ETL_B:-false}"
 STOP_AFTER_SPLIT="${STOP_AFTER_SPLIT:-false}"
 
@@ -181,6 +183,8 @@ echo "  NUM_EXAMPLES: $NUM_EXAMPLES"
 echo "  SHOW_EXAMPLES: $SHOW_EXAMPLES"
 echo "  QUICK_TEST: $QUICK_TEST"
 echo "  POOLING_PRESETS: $POOLING_PRESETS"
+echo "  POOLING_POLICY: ${POOLING_POLICY:-<none>}"
+echo "  POOLING_MASK_POLICY: $POOLING_MASK_POLICY"
 echo "  STOP_AFTER_ETL_B: $STOP_AFTER_ETL_B"
 echo "  STOP_AFTER_SPLIT: $STOP_AFTER_SPLIT"
 echo ""
@@ -376,6 +380,10 @@ for policy in "${POLICY_ARRAY[@]}"; do
                 fi
 
                 echo "  Processing: $basename"
+                ETL_B_POOLING_ARGS=()
+                if [[ -n "$POOLING_POLICY" ]]; then
+                    ETL_B_POOLING_ARGS+=(--pooling-policy-override "$POOLING_POLICY")
+                fi
                 python src/schemas/tools/ETL_B.py \
                     --traces "$trace_file" \
                     --render-out "$render_out" \
@@ -383,6 +391,7 @@ for policy in "${POLICY_ARRAY[@]}"; do
                     --tokenizer "$TOKENIZER" \
                     --max-length 4096 \
                     --policy-override "$policy" \
+                    "${ETL_B_POOLING_ARGS[@]}" \
                     "${ETL_B_LIMIT_ARGS[@]}" \
                     "${ETL_B_EXTRA_ARGS[@]}" 2>&1 | tee -a "$RUN_DIR/etl_b.log"
             done
@@ -482,6 +491,8 @@ print(total)
   "learning_rate": "$LEARNING_RATE",
   "loss_mode": "$LOSS_MODE",
   "loss_weighting": "$LOSS_WEIGHTING",
+  "pooling_policy": "${POOLING_POLICY:-}",
+  "pooling_mask_policy": "$POOLING_MASK_POLICY",
   "triplet_alpha_benign": $TRIPLET_ALPHA_BENIGN,
   "triplet_beta_harmful": $TRIPLET_BETA_HARMFUL,
   "triplet_gamma_kl": $TRIPLET_GAMMA_KL,
@@ -554,6 +565,7 @@ RUNCFG
                 --triplet-mix-l2-weight "$TRIPLET_MIX_L2_WEIGHT"
                 --triplet-mix-cos-weight "$TRIPLET_MIX_COS_WEIGHT"
                 --pooling-mode "$_PMODE"
+                --pooling-mask-policy "$POOLING_MASK_POLICY"
                 --lora-r "$LORA_R"
                 --lora-alpha "$LORA_ALPHA"
                 --lora-dropout 0.05

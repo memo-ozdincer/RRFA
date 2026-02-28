@@ -76,12 +76,16 @@ export VIS_CHECKPOINT_STEPS="${VIS_CHECKPOINT_STEPS:-50,100}"
 # Legacy grid around working config (margins 500/1500, alpha 10)
 # 2 presets × 2 policies = 4 runs, each ~12 min (train + checkpoint eval + benign eval) ≈ 48 min
 export POOLING_PRESETS="${POOLING_PRESETS:-m500:legacy:dmix:500:1500 m750:legacy:dmix:750:2250}"
+export POOLING_POLICY="${POOLING_POLICY:-cb_full_sequence}"
+export POOLING_MASK_POLICY="${POOLING_MASK_POLICY:-auto}"
 
 echo "Starting sweep_hparams_simple.sbatch..."
 echo "  ALPHAS: ${ALPHAS}"
 echo "  LAYER_CONFIGS: ${LAYER_CONFIGS}"
 echo "  POLICIES: ${POLICIES}"
 echo "  POOLING_PRESETS: ${POOLING_PRESETS}"
+echo "  POOLING_POLICY: ${POOLING_POLICY}"
+echo "  POOLING_MASK_POLICY: ${POOLING_MASK_POLICY}"
 echo "  TOTAL_STEPS: ${TOTAL_STEPS}"
 echo "  Datasets: Fujitsu, AgentDojo"
 echo "  Logging: Compatible with scripts/visualize_sweep_results.py"

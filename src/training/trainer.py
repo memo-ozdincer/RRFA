@@ -1327,16 +1327,34 @@ class CircuitBreakerTrainer:
         harmful_attention_mask = batch['harmful_attention_mask']
         harmful_loss_mask = batch.get('harmful_loss_mask', None)
         harmful_sample_weight = batch.get('harmful_sample_weight', None)
+        harmful_pooling_mask = batch.get('harmful_pooling_mask', None)
 
         benign_input_ids = batch['benign_input_ids']
         benign_attention_mask = batch['benign_attention_mask']
         benign_loss_mask = batch.get('benign_loss_mask', None)
         benign_sample_weight = batch.get('benign_sample_weight', None)
+        benign_pooling_mask = batch.get('benign_pooling_mask', None)
 
         if harmful_loss_mask is not None and harmful_sample_weight is not None:
             harmful_loss_mask = harmful_loss_mask * harmful_sample_weight.unsqueeze(-1)
         if benign_loss_mask is not None and benign_sample_weight is not None:
             benign_loss_mask = benign_loss_mask * benign_sample_weight.unsqueeze(-1)
+        if harmful_pooling_mask is not None and harmful_sample_weight is not None:
+            harmful_pooling_mask = harmful_pooling_mask * harmful_sample_weight.unsqueeze(-1)
+        if benign_pooling_mask is not None and benign_sample_weight is not None:
+            benign_pooling_mask = benign_pooling_mask * benign_sample_weight.unsqueeze(-1)
+
+        # Resolve effective pooling masks based on policy
+        _pool_policy = getattr(self.config, "pooling_mask_policy", "auto")
+        if _pool_policy == "loss_mask":
+            harmful_pool_mask = harmful_loss_mask
+            benign_pool_mask = benign_loss_mask
+        elif _pool_policy == "asymmetric":
+            harmful_pool_mask = harmful_pooling_mask if harmful_pooling_mask is not None else harmful_loss_mask
+            benign_pool_mask = benign_loss_mask
+        else:  # "auto"
+            harmful_pool_mask = harmful_pooling_mask if harmful_pooling_mask is not None else harmful_loss_mask
+            benign_pool_mask = benign_pooling_mask if benign_pooling_mask is not None else benign_loss_mask
 
         # Get batch sizes for later splitting
         harmful_batch_size = harmful_input_ids.shape[0]
@@ -1500,37 +1518,61 @@ class CircuitBreakerTrainer:
             harmful_new = pooled_representations(
                 reps_by_layer=harmful_model_reps,
                 target_layers=self.config.cb_target_layers,
-                token_mask=harmful_loss_mask if harmful_loss_mask is not None else harmful_attention_mask,
+                token_mask=harmful_pool_mask if harmful_pool_mask is not None else harmful_attention_mask,
                 pooling_mode=_pool_mode,
             )
             harmful_old = pooled_representations(
                 reps_by_layer=harmful_frozen_reps,
                 target_layers=self.config.cb_target_layers,
-                token_mask=harmful_loss_mask if harmful_loss_mask is not None else harmful_attention_mask,
+                token_mask=harmful_pool_mask if harmful_pool_mask is not None else harmful_attention_mask,
                 pooling_mode=_pool_mode,
             )
             benign_new = pooled_representations(
                 reps_by_layer=benign_model_reps,
                 target_layers=self.config.cb_target_layers,
-                token_mask=benign_loss_mask if benign_loss_mask is not None else benign_attention_mask,
+                token_mask=benign_pool_mask if benign_pool_mask is not None else benign_attention_mask,
                 pooling_mode=_pool_mode,
             )
             benign_old = pooled_representations(
                 reps_by_layer=benign_frozen_reps,
                 target_layers=self.config.cb_target_layers,
-                token_mask=benign_loss_mask if benign_loss_mask is not None else benign_attention_mask,
+                token_mask=benign_pool_mask if benign_pool_mask is not None else benign_attention_mask,
                 pooling_mode=_pool_mode,
             )
 
             # === Step-0 Diagnostic: compare legacy vs correct pooling ===
             if self.global_step == 0 and self.accelerator.is_main_process:
+                _h_pool_diag = harmful_pool_mask if harmful_pool_mask is not None else harmful_attention_mask
+                _b_pool_diag = benign_pool_mask if benign_pool_mask is not None else benign_attention_mask
+                _h_label_diag = harmful_loss_mask if harmful_loss_mask is not None else harmful_attention_mask
+                _b_label_diag = benign_loss_mask if benign_loss_mask is not None else benign_attention_mask
+
+                # Log decoupled mask status
+                _masks_decoupled = (harmful_pooling_mask is not None
+                                    and not torch.equal(harmful_pooling_mask, harmful_loss_mask)
+                                    if harmful_pooling_mask is not None and harmful_loss_mask is not None
+                                    else False)
+                self.accelerator.print(
+                    f"\n  Decoupled masks: {'ACTIVE' if _masks_decoupled else 'INACTIVE'} "
+                    f"(pooling_mask_policy={_pool_policy})"
+                )
+                if _masks_decoupled:
+                    self.accelerator.print(
+                        f"  Harmful pool mask active: {_h_pool_diag.sum().item():.0f} vs "
+                        f"label mask active: {_h_label_diag.sum().item():.0f}"
+                    )
+                    self.accelerator.print(
+                        f"  Benign pool mask active:  {_b_pool_diag.sum().item():.0f} vs "
+                        f"label mask active: {_b_label_diag.sum().item():.0f}"
+                    )
+
                 self._log_pooling_diagnostic(
                     harmful_model_reps=harmful_model_reps,
                     harmful_frozen_reps=harmful_frozen_reps,
                     benign_model_reps=benign_model_reps,
                     benign_frozen_reps=benign_frozen_reps,
-                    harmful_mask=harmful_loss_mask if harmful_loss_mask is not None else harmful_attention_mask,
-                    benign_mask=benign_loss_mask if benign_loss_mask is not None else benign_attention_mask,
+                    harmful_mask=_h_pool_diag,
+                    benign_mask=_b_pool_diag,
                     current_mode=_pool_mode,
                 )
 
@@ -1573,7 +1615,7 @@ class CircuitBreakerTrainer:
                 harmful_frozen_reps,
                 self.config.cb_target_layers,
                 harmful_attention_mask,
-                loss_mask=harmful_loss_mask,
+                loss_mask=harmful_pool_mask,
                 return_metrics=True,
             )
             loss_retain = retain_loss(
@@ -1581,7 +1623,7 @@ class CircuitBreakerTrainer:
                 benign_frozen_reps,
                 self.config.cb_target_layers,
                 benign_attention_mask,
-                loss_mask=benign_loss_mask,
+                loss_mask=benign_pool_mask,
             )
             if beta_kl > 0:
                 if teacher_logits_benign is None:
@@ -1610,7 +1652,7 @@ class CircuitBreakerTrainer:
             loss_reroute = random_reroute_loss(
                 model_reps=harmful_model_reps,
                 target_layers=self.config.cb_target_layers,
-                loss_mask=harmful_loss_mask,
+                loss_mask=harmful_pool_mask,
             )
             loss_retain = retain_ce_loss(
                 logits=student_logits_benign,
