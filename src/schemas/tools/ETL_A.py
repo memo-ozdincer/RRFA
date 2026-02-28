@@ -175,6 +175,17 @@ FUJITSU_FILE_MAP = {
 }
 
 
+# AgentHarm files (official public release layout)
+AGENTHARM_FILE_MAP = {
+    "harmful_test": "harmful_behaviors_test_public.json",
+    "harmful_val": "harmful_behaviors_validation.json",
+    "benign_test": "benign_behaviors_test_public.json",
+    "benign_val": "benign_behaviors_validation.json",
+    "chat_test": "chat_public_test.json",
+    "chat_val": "chat_validation.json",
+}
+
+
 # =============================================================================
 # LLMail-Inject Dataset Support
 # =============================================================================
@@ -725,6 +736,160 @@ def convert_agentdojo_record(
 
 
 # =============================================================================
+# AgentHarm
+# =============================================================================
+
+def _infer_agentharm_subset(path: Path) -> str:
+    filename = path.name.lower()
+    if "benign" in filename:
+        return "benign"
+    if "chat" in filename:
+        # Chat split contains harmful intent prompts without paired benign variants.
+        return "chat"
+    return "harmful"
+
+
+def _iter_agentharm_behaviors(path: Path) -> Iterator[Tuple[int, Dict[str, Any], Optional[str]]]:
+    with open(path, "r") as f:
+        payload = json.load(f)
+    canary_guid = payload.get("canary_guid")
+    behaviors = payload.get("behaviors", [])
+    if not isinstance(behaviors, list):
+        logger.warning("Unexpected AgentHarm format in %s (expected behaviors list)", path)
+        return
+    for idx, record in enumerate(behaviors, start=1):
+        if isinstance(record, dict):
+            yield idx, record, canary_guid
+
+
+def convert_agentharm_record(
+    record: Dict[str, Any],
+    split: str,
+    line_number: int,
+    subset: str,
+    canary_guid: Optional[str] = None,
+    system_prompt: Optional[str] = None,
+) -> Optional[Trace]:
+    """
+    Convert AgentHarm behavior record to trace_v1.
+
+    AgentHarm provides behavior prompts (harmful/benign/chat) without assistant
+    completions, so traces are represented as skeletons (B1) for downstream
+    rendering and optional generation.
+    """
+    if system_prompt is None:
+        system_prompt = "You are a helpful AI assistant."
+
+    try:
+        user_prompt = record.get("prompt") or record.get("detailed_prompt") or ""
+        messages = [
+            Message(role="system", content=system_prompt),
+            Message(role="user", content=user_prompt),
+        ]
+
+        is_attack = subset in {"harmful", "chat"}
+        attack_succeeded = is_attack
+        category = "harmful" if is_attack else "benign"
+
+        target_functions = record.get("target_functions")
+        expected_tool_name = None
+        if isinstance(target_functions, list) and target_functions:
+            first = target_functions[0]
+            if isinstance(first, str):
+                expected_tool_name = first
+
+        completeness = _determine_completeness(messages)
+        tier = _determine_tier(messages)
+
+        trace = Trace(
+            id=Trace.generate_id("agentharm", messages=messages),
+            completeness=completeness,
+            tier=tier,
+            source=TraceSource(
+                dataset="agentharm",
+                tier="raw",
+                subset=subset,
+                record_locator=_record_locator(record, line_number, ["id", "id_original", "name"]),
+                ingest_version="etl_a_v1",
+            ),
+            messages=messages,
+            split=split,
+            task=TraceTask(
+                family="intent_safety",
+                name=subset,
+                variant=record.get("category"),
+            ),
+            labels=TraceLabels(
+                category=category,
+                security_outcome="unsafe" if is_attack else "safe",
+                attack_type="malicious_request" if is_attack else None,
+                attack_succeeded=attack_succeeded,
+                attack_present=is_attack,
+                capability_category=record.get("category") if not is_attack else None,
+            ),
+            training=TraceTraining(
+                sample_weight=1.0,
+                loss_mask_policy="assistant_only",
+                mixture=TraceMixture(class_id=f"agentharm/{category}"),
+            ),
+            links=TraceLinks(raw_id=record.get("id")),
+            signal_hints=SignalHints(
+                expected_tool_name=expected_tool_name,
+            ),
+            raw_metadata=RawMetadata(
+                source_fields={
+                    "id_original": record.get("id_original"),
+                    "name": record.get("name"),
+                    "category": record.get("category"),
+                    "detailed_prompt": record.get("detailed_prompt"),
+                    "hint_included": record.get("hint_included"),
+                    "target_functions": target_functions,
+                    "grading_function": record.get("grading_function"),
+                    "canary_guid": canary_guid,
+                    "source_subset": subset,
+                },
+            ),
+        )
+        return trace
+    except Exception as exc:
+        logger.warning("Failed to convert AgentHarm record at item %d: %s", line_number, exc)
+        return None
+
+
+def _write_agentharm_converted(
+    files: List[Path],
+    output_handle,
+    split: str,
+    limit: Optional[int] = None,
+    system_prompt: Optional[str] = None,
+) -> Tuple[int, int]:
+    converted = 0
+    failed = 0
+
+    for file_path in files:
+        subset = _infer_agentharm_subset(file_path)
+        logger.info("Converting AgentHarm file %s (subset=%s)", file_path, subset)
+        for item_number, record, canary_guid in _iter_agentharm_behaviors(file_path):
+            if limit is not None and converted >= limit:
+                return converted, failed
+            trace = convert_agentharm_record(
+                record=record,
+                split=split,
+                line_number=item_number,
+                subset=subset,
+                canary_guid=canary_guid,
+                system_prompt=system_prompt,
+            )
+            if trace:
+                output_handle.write(json.dumps(trace.to_dict()) + "\n")
+                converted += 1
+            else:
+                failed += 1
+
+    return converted, failed
+
+
+# =============================================================================
 # LLMail-Inject Converter
 # =============================================================================
 
@@ -1264,6 +1429,18 @@ def main() -> None:
 
     parser.add_argument("--agentdojo", type=Path, help="AgentDojo JSONL file")
     parser.add_argument("--agentdojo-limit", type=int, help="Limit AgentDojo records (for testing)")
+    parser.add_argument(
+        "--agentharm",
+        type=Path,
+        nargs="+",
+        help="AgentHarm JSON files (e.g., harmful_behaviors_test_public.json benign_behaviors_test_public.json)",
+    )
+    parser.add_argument(
+        "--agentharm-dir",
+        type=Path,
+        help="AgentHarm directory containing official JSON files",
+    )
+    parser.add_argument("--agentharm-limit", type=int, help="Limit AgentHarm behaviors across all files")
 
     # LLMail-Inject options (Microsoft prompt injection challenge dataset)
     parser.add_argument("--llmail-inject", type=Path, help="LLMail-Inject JSONL file (from HuggingFace)")
@@ -1373,6 +1550,7 @@ def main() -> None:
     llmail_scenarios = _load_llmail_scenarios(args.llmail_scenarios_path)
 
     inputs: List[Tuple[Path, Any, Optional[int]]] = []
+    agentharm_files: List[Path] = []
 
     # Use functools.partial to bind system_prompt to Fujitsu B4 converter
     from functools import partial
@@ -1412,11 +1590,39 @@ def main() -> None:
     if args.agentdojo:
         inputs.append((args.agentdojo, agentdojo_converter, args.agentdojo_limit))
 
+    if args.agentharm_dir:
+        for filename in AGENTHARM_FILE_MAP.values():
+            candidate = args.agentharm_dir / filename
+            if candidate.exists():
+                agentharm_files.append(candidate)
+            else:
+                logger.warning("Missing AgentHarm file: %s", candidate)
+
+    if args.agentharm:
+        for p in args.agentharm:
+            if p.exists():
+                agentharm_files.append(p)
+            else:
+                logger.warning("Missing AgentHarm file: %s", p)
+
+    if agentharm_files:
+        # De-duplicate while preserving order.
+        seen: set[str] = set()
+        deduped: List[Path] = []
+        for p in agentharm_files:
+            key = str(p.resolve())
+            if key not in seen:
+                seen.add(key)
+                deduped.append(p)
+        agentharm_files = deduped
+
     if args.llmail_inject:
         inputs.append((args.llmail_inject, llmail_inject_converter, args.llmail_inject_limit))
 
-    if not inputs:
-        parser.error("No input files provided. Use --fujitsu-dir, --fujitsu-b4, --agentdojo, or --llmail-inject.")
+    if not inputs and not agentharm_files:
+        parser.error(
+            "No input files provided. Use --fujitsu-dir, --fujitsu-b4, --agentdojo, --agentharm/--agentharm-dir, or --llmail-inject."
+        )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1427,6 +1633,16 @@ def main() -> None:
         for path, converter, limit in inputs:
             logger.info("Converting %s", path)
             converted, failed = _write_converted(path, converter, out_f, args.split, limit=limit)
+            total_converted += converted
+            total_failed += failed
+        if agentharm_files:
+            converted, failed = _write_agentharm_converted(
+                files=agentharm_files,
+                output_handle=out_f,
+                split=args.split,
+                limit=args.agentharm_limit,
+                system_prompt=system_prompt,
+            )
             total_converted += converted
             total_failed += failed
 

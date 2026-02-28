@@ -164,6 +164,8 @@ TRIPLET_HARMFUL_POS_DISTANCE="${TRIPLET_HARMFUL_POS_DISTANCE:-dmix}"
 TRIPLET_HARMFUL_NEG_DISTANCE="${TRIPLET_HARMFUL_NEG_DISTANCE:-dmix}"
 TRIPLET_MIX_L2_WEIGHT="${TRIPLET_MIX_L2_WEIGHT:-0.5}"
 TRIPLET_MIX_COS_WEIGHT="${TRIPLET_MIX_COS_WEIGHT:-0.5}"
+STOP_AFTER_ETL_B="${STOP_AFTER_ETL_B:-false}"
+STOP_AFTER_SPLIT="${STOP_AFTER_SPLIT:-false}"
 
 echo "Configuration:"
 echo "  TOTAL_STEPS: $TOTAL_STEPS"
@@ -179,6 +181,8 @@ echo "  NUM_EXAMPLES: $NUM_EXAMPLES"
 echo "  SHOW_EXAMPLES: $SHOW_EXAMPLES"
 echo "  QUICK_TEST: $QUICK_TEST"
 echo "  LLMAIL_RETRIEVED_ONLY: $LLMAIL_RETRIEVED_ONLY"
+echo "  STOP_AFTER_ETL_B: $STOP_AFTER_ETL_B"
+echo "  STOP_AFTER_SPLIT: $STOP_AFTER_SPLIT"
 echo ""
 
 # =============================================================================
@@ -188,6 +192,7 @@ TRACES_DIR="$CB_SCRATCH/data/traces"
 DS_TRACES="$TRACES_DIR/fujitsu_b4_ds.jsonl"
 DR_TRACES="$TRACES_DIR/fujitsu_b4_dr.jsonl"
 AGENTDOJO_TRACES="$TRACES_DIR/agentdojo_complete.jsonl"
+AGENTHARM_TRACES="$TRACES_DIR/agentharm_mixed.jsonl"
 LLMAIL_DS_TRACES="$TRACES_DIR/llmail_inject_ds.jsonl"
 LLMAIL_DR_TRACES="$TRACES_DIR/llmail_inject_dr.jsonl"
 
@@ -200,6 +205,15 @@ for trace in "$DS_TRACES" "$DR_TRACES" "$AGENTDOJO_TRACES"; do
         exit 1
     fi
 done
+
+HAS_AGENTHARM=false
+if [[ -f "$AGENTHARM_TRACES" ]]; then
+    HAS_AGENTHARM=true
+    echo "  ✓ $(basename "$AGENTHARM_TRACES"): $(wc -l < "$AGENTHARM_TRACES") lines"
+    echo "  AgentHarm: enabled"
+else
+    echo "  AgentHarm: not found (optional, continuing without it)"
+fi
 
 HAS_LLMAIL=false
 if [[ -f "$LLMAIL_DS_TRACES" && -f "$LLMAIL_DR_TRACES" ]]; then
@@ -316,6 +330,9 @@ for alpha in "${ALPHA_ARRAY[@]}"; do
             
             etl_start=$(date +%s)
             TRACE_FILES=("$DS_TRACES" "$DR_TRACES" "$AGENTDOJO_TRACES")
+            if [[ "$HAS_AGENTHARM" == "true" ]]; then
+                TRACE_FILES+=("$AGENTHARM_TRACES")
+            fi
             if [[ "$HAS_LLMAIL" == "true" ]]; then
                 TRACE_FILES+=("$LLMAIL_DS_TRACES" "$LLMAIL_DR_TRACES")
             fi
@@ -330,6 +347,11 @@ for alpha in "${ALPHA_ARRAY[@]}"; do
                 if [[ -n "$LLMAIL_LIMIT" && "$basename" == llmail_inject_* ]]; then
                     ETL_B_LIMIT_ARGS+=(--limit "$LLMAIL_LIMIT")
                 fi
+                ETL_B_EXTRA_ARGS=()
+                if [[ "$basename" == agentharm_* ]]; then
+                    # AgentHarm traces are prompt-only skeletons.
+                    ETL_B_EXTRA_ARGS+=(--allow-skeleton)
+                fi
 
                 echo "  Processing: $basename"
                 python src/schemas/tools/ETL_B.py \
@@ -339,11 +361,17 @@ for alpha in "${ALPHA_ARRAY[@]}"; do
                     --tokenizer "$TOKENIZER" \
                     --max-length 4096 \
                     --policy-override "$policy" \
-                    "${ETL_B_LIMIT_ARGS[@]}" 2>&1 | tee -a "$RUN_DIR/etl_b.log"
+                    "${ETL_B_LIMIT_ARGS[@]}" \
+                    "${ETL_B_EXTRA_ARGS[@]}" 2>&1 | tee -a "$RUN_DIR/etl_b.log"
             done
             etl_end=$(date +%s)
             echo "  ETL_B completed in $((etl_end - etl_start))s"
             echo ""
+
+            if [[ "$STOP_AFTER_ETL_B" == "true" ]]; then
+                echo "Checkpoint reached: STOP_AFTER_ETL_B=true. Exiting after ETL_B for run $RUN_NAME."
+                exit 0
+            fi
             
             # Verify lossmasks are non-zero
             echo "  Verifying lossmasks..."
@@ -377,8 +405,27 @@ print(total)
                 --lossmasks "$RUN_DIR/lossmasks/agentdojo_complete.jsonl" \
                 --output-dir "$SPLIT_DIR" \
                 --legacy-harmful-naming 2>&1 | tee -a "$RUN_DIR/split.log"
+
+            AGENTHARM_SPLIT_DIR="$RUN_DIR/agentharm_split"
+            if [[ "$HAS_AGENTHARM" == "true" ]]; then
+                mkdir -p "$AGENTHARM_SPLIT_DIR"
+                echo "Step 2b: Splitting AgentHarm data"
+                python "$REPO_DIR/scripts/split_dataset.py" \
+                    --traces "$AGENTHARM_TRACES" \
+                    --renders "$RUN_DIR/renders/agentharm_mixed.jsonl" \
+                    --lossmasks "$RUN_DIR/lossmasks/agentharm_mixed.jsonl" \
+                    --output-dir "$AGENTHARM_SPLIT_DIR" \
+                    --prefix "agentharm" \
+                    --legacy-naming \
+                    --resisted-handling retain 2>&1 | tee -a "$RUN_DIR/split.log"
+            fi
             
             echo ""
+
+            if [[ "$STOP_AFTER_SPLIT" == "true" ]]; then
+                echo "Checkpoint reached: STOP_AFTER_SPLIT=true. Exiting after split for run $RUN_NAME."
+                exit 0
+            fi
             
             # =====================================================
             # Step 3: Training (same args as sweep_policies.sbatch)
@@ -410,6 +457,16 @@ print(total)
                 HARMFUL_LOSSMASK_ARGS+=("$RUN_DIR/lossmasks/llmail_inject_ds.jsonl")
                 BENIGN_RENDER_ARGS+=("$RUN_DIR/renders/llmail_inject_dr.jsonl")
                 BENIGN_LOSSMASK_ARGS+=("$RUN_DIR/lossmasks/llmail_inject_dr.jsonl")
+            fi
+            if [[ "$HAS_AGENTHARM" == "true" ]]; then
+                if [[ -f "$AGENTHARM_SPLIT_DIR/agentharm_renders_harmful.jsonl" ]]; then
+                    HARMFUL_RENDER_ARGS+=("$AGENTHARM_SPLIT_DIR/agentharm_renders_harmful.jsonl")
+                    HARMFUL_LOSSMASK_ARGS+=("$AGENTHARM_SPLIT_DIR/agentharm_lossmasks_harmful.jsonl")
+                fi
+                if [[ -f "$AGENTHARM_SPLIT_DIR/agentharm_renders_benign.jsonl" ]]; then
+                    BENIGN_RENDER_ARGS+=("$AGENTHARM_SPLIT_DIR/agentharm_renders_benign.jsonl")
+                    BENIGN_LOSSMASK_ARGS+=("$AGENTHARM_SPLIT_DIR/agentharm_lossmasks_benign.jsonl")
+                fi
             fi
             
             # Build training args (matching sweep_policies.sbatch exactly)

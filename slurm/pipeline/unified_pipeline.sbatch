@@ -142,6 +142,9 @@ SKIP_ETL_B="${SKIP_ETL_B:-false}"
 SKIP_SPLIT="${SKIP_SPLIT:-false}"
 SKIP_TRAIN="${SKIP_TRAIN:-false}"
 SKIP_EVAL="${SKIP_EVAL:-false}"
+STOP_AFTER_ETL_A="${STOP_AFTER_ETL_A:-false}"
+STOP_AFTER_ETL_B="${STOP_AFTER_ETL_B:-false}"
+STOP_AFTER_SPLIT="${STOP_AFTER_SPLIT:-false}"
 
 # Paths
 OUTPUT_BASE="${OUTPUT_BASE:-$CB_SCRATCH/data}"
@@ -156,6 +159,7 @@ mkdir -p "$TRACES_DIR" "$RENDERS_DIR" "$LOSSMASKS_DIR" "$MODELS_DIR" "$EVAL_DIR"
 # Default data paths
 FUJITSU_B4_PATH="${FUJITSU_B4_PATH:-data/fujitsu/orchestrator_attacks_combined_deduplicated.jsonl}"
 AGENTDOJO_PATH="${AGENTDOJO_PATH:-data/agent_dojo/agentdojo_spotlight_extract.jsonl}"
+AGENTHARM_DIR="${AGENTHARM_DIR:-data/agent_harm}"
 LLMAIL_INJECT_PATH="${LLMAIL_INJECT_PATH:-data/llmail_inject/raw_submissions_phase1.jsonl}"
 
 # Model/tokenizer
@@ -224,6 +228,7 @@ echo "Configuration:"
 echo "  DATASETS: $DATASETS"
 echo "  OUTPUT_BASE: $OUTPUT_BASE"
 echo "  LLMAIL_INJECT_PATH: $LLMAIL_INJECT_PATH"
+echo "  AGENTHARM_DIR: $AGENTHARM_DIR"
 echo "  LLMAIL_TOOL_SCHEMA: $LLMAIL_TOOL_SCHEMA"
 echo "  LLMAIL_CONTEXT_MODE: $LLMAIL_CONTEXT_MODE"
 echo "  LLMAIL_EXCLUDE_NOT_RETRIEVED: $LLMAIL_EXCLUDE_NOT_RETRIEVED"
@@ -249,6 +254,9 @@ echo "  SKIP_ETL_B: $SKIP_ETL_B"
 echo "  SKIP_SPLIT: $SKIP_SPLIT"
 echo "  SKIP_TRAIN: $SKIP_TRAIN"
 echo "  SKIP_EVAL: $SKIP_EVAL"
+echo "  STOP_AFTER_ETL_A: $STOP_AFTER_ETL_A"
+echo "  STOP_AFTER_ETL_B: $STOP_AFTER_ETL_B"
+echo "  STOP_AFTER_SPLIT: $STOP_AFTER_SPLIT"
 echo ""
 
 # Parse datasets once and expose helper for dataset-aware stages.
@@ -320,6 +328,22 @@ if [[ "$SKIP_ETL_A" != "true" ]]; then
                 fi
                 ;;
 
+            agentharm)
+                if [[ -d "$AGENTHARM_DIR" ]]; then
+                    echo "Processing AgentHarm..."
+                    OUTPUT_FILE="$TRACES_DIR/agentharm_mixed.jsonl"
+
+                    python src/schemas/tools/ETL_A.py \
+                        --agentharm-dir "$AGENTHARM_DIR" \
+                        --output "$OUTPUT_FILE" \
+                        --split train
+
+                    echo "  Output: $OUTPUT_FILE ($(wc -l < "$OUTPUT_FILE") lines)"
+                else
+                    echo "  WARNING: AgentHarm directory not found: $AGENTHARM_DIR"
+                fi
+                ;;
+
             fujitsu_b4)
                 if [[ -f "$FUJITSU_B4_PATH" ]]; then
                     echo "Processing Fujitsu B4..."
@@ -363,6 +387,11 @@ if [[ "$SKIP_ETL_A" != "true" ]]; then
         esac
     done
     echo ""
+fi
+
+if [[ "$STOP_AFTER_ETL_A" == "true" ]]; then
+    echo "Checkpoint reached: STOP_AFTER_ETL_A=true. Exiting before Stage 2."
+    exit 0
 fi
 
 # =============================================================================
@@ -608,12 +637,22 @@ if [[ "$SKIP_ETL_B" != "true" ]]; then
                     continue
                 fi
             fi
+            if [[ "$basename" == agentharm_* ]]; then
+                if ! dataset_enabled "agentharm"; then
+                    continue
+                fi
+            fi
 
             render_out="$RENDERS_DIR/${basename}.jsonl"
             lossmask_out="$LOSSMASKS_DIR/${basename}.jsonl"
             ETL_B_LIMIT_ARGS=()
             if [[ -n "$LLMAIL_LIMIT" && "$basename" == llmail_inject_* ]]; then
                 ETL_B_LIMIT_ARGS+=(--limit "$LLMAIL_LIMIT")
+            fi
+            ETL_B_EXTRA_ARGS=()
+            if [[ "$basename" == agentharm_* ]]; then
+                # AgentHarm traces are skeletons by design (prompt-only benchmark).
+                ETL_B_EXTRA_ARGS+=(--allow-skeleton)
             fi
 
             echo "Processing: $basename"
@@ -624,13 +663,19 @@ if [[ "$SKIP_ETL_B" != "true" ]]; then
                 --tokenizer "$TOKENIZER" \
                 --max-length 4096 \
                 --policy-override "$LMP_POLICY" \
-                "${ETL_B_LIMIT_ARGS[@]}"
+                "${ETL_B_LIMIT_ARGS[@]}" \
+                "${ETL_B_EXTRA_ARGS[@]}"
 
             echo "  Render: $render_out ($(wc -l < "$render_out") lines)"
             echo "  Lossmask: $lossmask_out ($(wc -l < "$lossmask_out") lines)"
         fi
     done
     echo ""
+fi
+
+if [[ "$STOP_AFTER_ETL_B" == "true" ]]; then
+    echo "Checkpoint reached: STOP_AFTER_ETL_B=true. Exiting before Stage 5."
+    exit 0
 fi
 
 # =============================================================================
@@ -668,6 +713,24 @@ if [[ "$SKIP_SPLIT" != "true" ]]; then
                 echo "  DR (Retain): $TRACES_DIR/fujitsu_b4_dr.jsonl"
                 ;;
 
+            agentharm)
+                TRACE_FILE="$TRACES_DIR/agentharm_mixed.jsonl"
+                RENDER_FILE="$RENDERS_DIR/agentharm_mixed.jsonl"
+                LOSSMASK_FILE="$LOSSMASKS_DIR/agentharm_mixed.jsonl"
+                SPLIT_DIR="$OUTPUT_BASE/split/agentharm"
+
+                if [[ -f "$TRACE_FILE" ]]; then
+                    echo "Splitting AgentHarm..."
+                    python scripts/split_dataset.py \
+                        --traces "$TRACE_FILE" \
+                        --renders "$RENDER_FILE" \
+                        --lossmasks "$LOSSMASK_FILE" \
+                        --output-dir "$SPLIT_DIR" \
+                        --prefix "agentharm" \
+                        --resisted-handling retain
+                fi
+                ;;
+
             llmail_inject)
                 echo "LLMail-Inject: Using existing DS/DR split"
                 echo "  DS (CB): $TRACES_DIR/llmail_inject_ds.jsonl"
@@ -676,6 +739,11 @@ if [[ "$SKIP_SPLIT" != "true" ]]; then
         esac
     done
     echo ""
+fi
+
+if [[ "$STOP_AFTER_SPLIT" == "true" ]]; then
+    echo "Checkpoint reached: STOP_AFTER_SPLIT=true. Exiting before Stage 6."
+    exit 0
 fi
 
 # =============================================================================
@@ -791,6 +859,28 @@ if [[ "$SKIP_TRAIN" != "true" ]]; then
         else
             BENIGN_RENDERS="$AGENTDOJO_SPLIT/agentdojo_renders_retain.jsonl"
             BENIGN_LOSSMASKS="$AGENTDOJO_SPLIT/agentdojo_lossmasks_retain.jsonl"
+        fi
+    fi
+
+    # AgentHarm split
+    AGENTHARM_SPLIT="$OUTPUT_BASE/split/agentharm"
+    if dataset_enabled "agentharm" && [[ -f "$AGENTHARM_SPLIT/agentharm_renders_cb.jsonl" ]]; then
+        if [[ -n "$HARMFUL_RENDERS" ]]; then
+            HARMFUL_RENDERS="$HARMFUL_RENDERS,$AGENTHARM_SPLIT/agentharm_renders_cb.jsonl"
+            HARMFUL_LOSSMASKS="$HARMFUL_LOSSMASKS,$AGENTHARM_SPLIT/agentharm_lossmasks_cb.jsonl"
+        else
+            HARMFUL_RENDERS="$AGENTHARM_SPLIT/agentharm_renders_cb.jsonl"
+            HARMFUL_LOSSMASKS="$AGENTHARM_SPLIT/agentharm_lossmasks_cb.jsonl"
+        fi
+    fi
+
+    if dataset_enabled "agentharm" && [[ -f "$AGENTHARM_SPLIT/agentharm_renders_retain.jsonl" ]]; then
+        if [[ -n "$BENIGN_RENDERS" ]]; then
+            BENIGN_RENDERS="$BENIGN_RENDERS,$AGENTHARM_SPLIT/agentharm_renders_retain.jsonl"
+            BENIGN_LOSSMASKS="$BENIGN_LOSSMASKS,$AGENTHARM_SPLIT/agentharm_lossmasks_retain.jsonl"
+        else
+            BENIGN_RENDERS="$AGENTHARM_SPLIT/agentharm_renders_retain.jsonl"
+            BENIGN_LOSSMASKS="$AGENTHARM_SPLIT/agentharm_lossmasks_retain.jsonl"
         fi
     fi
 

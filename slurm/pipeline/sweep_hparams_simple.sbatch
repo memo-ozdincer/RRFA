@@ -64,6 +64,7 @@ export NUM_EXAMPLES="${NUM_EXAMPLES:-50}"
 export SHOW_EXAMPLES="${SHOW_EXAMPLES:-true}"
 export BATCH_SIZE="${BATCH_SIZE:-1}"
 export VIS_CHECKPOINT_STEPS="${VIS_CHECKPOINT_STEPS:-80,100,110,150}"
+export STOP_AFTER_DATA_PREP="${STOP_AFTER_DATA_PREP:-false}"
 
 echo "Starting sweep_hparams_simple.sbatch..."
 echo "  ALPHAS: ${ALPHAS}"
@@ -71,6 +72,7 @@ echo "  LAYER_CONFIGS: ${LAYER_CONFIGS}"
 echo "  POLICIES: ${POLICIES}"
 echo "  Datasets: Fujitsu, AgentDojo (auto-detected)"
 echo "  Logging: Compatible with scripts/visualize_sweep_results.py"
+echo "  STOP_AFTER_DATA_PREP: ${STOP_AFTER_DATA_PREP}"
 
 # =============================================================================
 # Cache Setup (Offline Mode)
@@ -121,7 +123,9 @@ TRACES_DIR="/scratch/memoozd/cb-scratch/data/traces"
 FUJITSU_SKELETON="$TRACES_DIR/fujitsu_b4_skeletons.jsonl"
 FUJITSU_DS="$TRACES_DIR/fujitsu_b4_ds.jsonl"
 FUJITSU_DR="$TRACES_DIR/fujitsu_b4_dr.jsonl"
+AGENTHARM_TRACES="$TRACES_DIR/agentharm_mixed.jsonl"
 TOOL_SCHEMA="configs/tool_schemas/b4_standard_v1.json"
+AGENTHARM_DIR="${AGENTHARM_DIR:-$REPO_DIR/data/agent_harm}"
 # MODEL is now set above via cache resolution
 
 # Helper to generate DS/DR
@@ -185,9 +189,29 @@ generate_data() {
 # Run generation
 generate_data "Fujitsu B4" "$FUJITSU_SKELETON" "$FUJITSU_DS" "$FUJITSU_DR" "$TOOL_SCHEMA"
 
+# AgentHarm conversion (skeleton traces, split later in sweep script)
+if [[ ! -f "$AGENTHARM_TRACES" ]]; then
+    if [[ -d "$AGENTHARM_DIR" ]]; then
+        echo "Generating missing AgentHarm traces (ETL_A)..."
+        python src/schemas/tools/ETL_A.py \
+            --agentharm-dir "$AGENTHARM_DIR" \
+            --output "$AGENTHARM_TRACES" \
+            --split train
+    else
+        echo "WARNING: AgentHarm directory not found at $AGENTHARM_DIR. Continuing without AgentHarm."
+    fi
+else
+    echo "AgentHarm traces already exist. Skipping conversion."
+fi
+
 echo ""
 echo "Data preparation complete. Launching sweep..."
 echo ""
+
+if [[ "$STOP_AFTER_DATA_PREP" == "true" ]]; then
+    echo "Checkpoint reached: STOP_AFTER_DATA_PREP=true. Exiting before sweep launch."
+    exit 0
+fi
 
 bash "$SWEEP_SCRIPT"
 

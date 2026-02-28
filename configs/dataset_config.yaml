@@ -57,6 +57,32 @@ datasets:
       eval_mode: "generation_comparison"  # Compare baseline vs CB generations
 
   # ---------------------------------------------------------------------------
+  # AgentHarm - Harmful/Benign Intent Benchmark (prompt-only)
+  # ---------------------------------------------------------------------------
+  agentharm:
+    description: "AgentHarm harmful/benign intent benchmark"
+    type: complete_with_labels
+
+    labels:
+      attack_present_field: "labels.attack_present"
+      attack_present_check: "is_not_null"
+      attack_succeeded_source: "field"
+      attack_succeeded_field: "labels.attack_succeeded"
+
+    split:
+      method: label_based
+      cb_condition: "attack_succeeded == True"
+      retain_condition: "attack_succeeded == False OR attack_present == False"
+      resisted_handling: "retain"
+
+    injection_patterns:
+      preset: "common"
+
+    evaluation:
+      use_sample_context: true
+      eval_mode: "generation_comparison"
+
+  # ---------------------------------------------------------------------------
   # Fujitsu B4 - Tool-Flip Attacks (Skeleton)
   # ---------------------------------------------------------------------------
   fujitsu_b4:

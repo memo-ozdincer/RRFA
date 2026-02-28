@@ -1171,7 +1171,39 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, local_files_only=True)
+    tokenizer_ref = str(Path(args.tokenizer).expanduser()) if args.tokenizer.startswith("~") else args.tokenizer
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(
+            tokenizer_ref,
+            local_files_only=True,
+            trust_remote_code=True,
+        )
+    except Exception as fast_err:
+        # Fallback for tokenizers that only provide slow artifacts.
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(
+                tokenizer_ref,
+                local_files_only=True,
+                trust_remote_code=True,
+                use_fast=False,
+            )
+        except Exception as slow_err:
+            hint = ""
+            tok_path = Path(tokenizer_ref)
+            if tok_path.exists() and tok_path.is_dir():
+                existing = sorted(p.name for p in tok_path.iterdir() if p.is_file())
+                hint = (
+                    f"Tokenizer directory exists but appears incomplete: {tokenizer_ref}\n"
+                    f"Found files: {existing}\n"
+                    "Expected at least one tokenizer artifact such as "
+                    "`tokenizer.json` or `tokenizer.model`."
+                )
+            raise RuntimeError(
+                "Failed to load tokenizer.\n"
+                f"Fast tokenizer error: {fast_err}\n"
+                f"Slow tokenizer error: {slow_err}\n"
+                f"{hint}"
+            ) from slow_err
     chat_template = args.chat_template
     if chat_template and Path(chat_template).exists():
         chat_template = Path(chat_template).read_text()
