@@ -180,15 +180,16 @@ class CircuitBreakerConfigLlama3_1_8B_Instruct(CircuitBreakerConfig):
     """Preset configuration for meta-llama/Llama-3.1-8B-Instruct."""
     base_model: str = "meta-llama/Llama-3.1-8B-Instruct"
 
-    # Llama 3.1 8B has 32 layers (0-31). Research shows shallow-to-middle layers
-    # (0-15) are most effective for adversarial/safety training:
-    #   Layer 4:  shallow — knowledge injection, defensive behaviors
-    #   Layer 8:  mid-shallow — core of critical 1-10 range
-    #   Layer 14: upper boundary of recommended 0-15 range
-    cb_target_layers: List[int] = field(default_factory=lambda: [4, 8, 14])
+    # Llama 3.1 8B has 32 layers (0-31).
+    # CB target layers = where triplet loss extracts representations.
+    # Layers 10, 20 are proven working (semantic decision layers).
+    # NOTE: Shallow layers (4, 8) disrupt tool-call formatting — CB training
+    # modifies representation geometry, which at shallow layers breaks the
+    # model's ability to emit structured <|python_tag|>{"name":...} output.
+    cb_target_layers: List[int] = field(default_factory=lambda: [10, 20])
 
     lora: LoRAConfig = field(default_factory=lambda: LoRAConfig(
-        target_layers=list(range(0, 16))
+        target_layers=list(range(0, 21))
     ))
 
     alpha_max: float = 10.0
