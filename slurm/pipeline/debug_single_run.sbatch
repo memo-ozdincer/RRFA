@@ -157,7 +157,7 @@ LLMAIL_DR_TRACES="$TRACES_DIR/llmail_inject_dr.jsonl"
 TOOL_SCHEMA="$REPO_DIR/configs/tool_schemas/b4_standard_v1.json"
 
 echo "Input traces:"
-for trace in "$DS_TRACES" "$DR_TRACES" "$AGENTDOJO_TRACES"; do
+for trace in "$DS_TRACES" "$DR_TRACES"; do
     if [[ -f "$trace" ]]; then
         echo "  OK $(basename "$trace"): $(wc -l < "$trace") lines"
     else
@@ -165,6 +165,32 @@ for trace in "$DS_TRACES" "$DR_TRACES" "$AGENTDOJO_TRACES"; do
         exit 1
     fi
 done
+
+# AgentDojo: regenerate via ETL_A if missing or suspiciously small
+AGENTDOJO_RAW="$REPO_DIR/data/agent_dojo/agentdojo_spotlight_extract.jsonl"
+AGENTDOJO_MIN_LINES=100
+if [[ -f "$AGENTDOJO_RAW" ]]; then
+    regen=false
+    if [[ ! -f "$AGENTDOJO_TRACES" ]]; then
+        regen=true
+        echo "  AgentDojo traces not found. Regenerating via ETL_A..."
+    elif [[ $(wc -l < "$AGENTDOJO_TRACES") -lt $AGENTDOJO_MIN_LINES ]]; then
+        regen=true
+        echo "  AgentDojo traces too small ($(wc -l < "$AGENTDOJO_TRACES") < $AGENTDOJO_MIN_LINES). Regenerating..."
+    fi
+    if [[ "$regen" == "true" ]]; then
+        python src/schemas/tools/ETL_A.py \
+            --agentdojo "$AGENTDOJO_RAW" \
+            --output "$AGENTDOJO_TRACES" \
+            --split train
+        echo "  OK AgentDojo regenerated: $(wc -l < "$AGENTDOJO_TRACES") traces"
+    else
+        echo "  OK $(basename "$AGENTDOJO_TRACES"): $(wc -l < "$AGENTDOJO_TRACES") lines"
+    fi
+else
+    echo "  MISSING AgentDojo raw file: $AGENTDOJO_RAW"
+    exit 1
+fi
 
 HAS_AGENTHARM=false
 if [[ -f "$AGENTHARM_TRACES" ]]; then
