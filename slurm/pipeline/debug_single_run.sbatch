@@ -64,6 +64,7 @@ export DS_TRITON_CACHE_DIR="$TRITON_CACHE_DIR"
 mkdir -p "$TRITON_CACHE_DIR" "$TRITON_CACHE_DIR/autotune"
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
+export TQDM_DISABLE=1
 
 # =============================================================================
 # Single Run Configuration

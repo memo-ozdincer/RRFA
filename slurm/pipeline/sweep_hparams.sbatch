@@ -109,6 +109,8 @@ mkdir -p "$TRITON_CACHE_DIR" "$TRITON_CACHE_DIR/autotune"
 
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
+# Suppress tqdm progress bars in batch mode (they produce noisy multi-line output)
+export TQDM_DISABLE=1
 
 echo "========================================"
 echo "COMPREHENSIVE HYPERPARAMETER SWEEP"
@@ -681,13 +683,19 @@ RUNCFG
             )
             
             train_start=$(date +%s)
-            if python src/training/train_schema.py "${TRAIN_ARGS[@]}" 2>&1 | tee "$RUN_DIR/train.log"; then
+            echo "  Training... (log: $RUN_DIR/train.log)"
+            if python src/training/train_schema.py "${TRAIN_ARGS[@]}" > "$RUN_DIR/train.log" 2>&1; then
                 train_status="SUCCESS"
             else
                 train_status="FAILED"
             fi
             train_end=$(date +%s)
-            echo "  Training $train_status in $((train_end - train_start))s"
+            train_mins=$(( (train_end - train_start) / 60 ))
+            echo "  Training $train_status (${train_mins}m)"
+            if [[ "$train_status" == "FAILED" ]]; then
+                echo "  Last 5 lines of train.log:"
+                tail -5 "$RUN_DIR/train.log" | sed 's/^/    /'
+            fi
             echo ""
             
             # =====================================================
@@ -710,7 +718,7 @@ RUNCFG
                         --output "$CKPT_EVAL_DIR/fujitsu_eval.json" \
                         --limit "$LIMIT_EVAL" \
                         --merge-adapter \
-                        --dtype "$DTYPE" 2>&1 | tee -a "$CKPT_EVAL_DIR/fujitsu.log"
+                        --dtype "$DTYPE" >> "$CKPT_EVAL_DIR/fujitsu.log" 2>&1
 
                     # AgentDojo harmful checkpoint eval
                     if [[ -f "$SPLIT_DIR/agentdojo_traces_harmful.jsonl" ]]; then
@@ -723,7 +731,7 @@ RUNCFG
                             --use-sample-context \
                             --limit "$LIMIT_EVAL" \
                             --merge-adapter \
-                            --dtype "$DTYPE" 2>&1 | tee -a "$CKPT_EVAL_DIR/agentdojo.log"
+                            --dtype "$DTYPE" >> "$CKPT_EVAL_DIR/agentdojo.log" 2>&1
                     fi
 
                     # AgentDojo benign checkpoint eval
@@ -737,10 +745,20 @@ RUNCFG
                             --use-sample-context \
                             --limit "$LIMIT_EVAL" \
                             --merge-adapter \
-                            --dtype "$DTYPE" 2>&1 | tee -a "$CKPT_EVAL_DIR/agentdojo_benign.log"
+                            --dtype "$DTYPE" >> "$CKPT_EVAL_DIR/agentdojo_benign.log" 2>&1
                     fi
 
-                    echo "  $ckpt_name eval complete."
+                    # Compact checkpoint summary
+                    if [[ -f "$CKPT_EVAL_DIR/fujitsu_eval.json" ]]; then
+                        python3 -c "
+import json
+with open('$CKPT_EVAL_DIR/fujitsu_eval.json') as f: r = json.load(f)
+cb = r.get('cb_model',{}).get('tool_flip_asr',{})
+cap = r.get('cb_model',{}).get('capability_retention',{})
+if cb:
+    print(f'    {\"$ckpt_name\"}: ASR={cb.get(\"attack_success_rate\",0):.0%} correct={cb.get(\"correct_tool_call_rate\",0):.0%} no_tool={cb.get(\"no_tool_call_rate\",0):.0%} cap={cap.get(\"capability_retention\",0):.0%}')
+"
+                    fi
                 done
             fi
 
@@ -775,8 +793,33 @@ RUNCFG
                         --output "$FUJITSU_OUTPUT" \
                         --limit "$LIMIT_EVAL" \
                         --merge-adapter \
-                        --dtype "$DTYPE" 2>&1 | tee -a "$RUN_DIR/eval/fujitsu.log"
-                    
+                        --dtype "$DTYPE" >> "$RUN_DIR/eval/fujitsu.log" 2>&1
+
+                    # Print compact Fujitsu summary from JSON
+                    if [[ -f "$FUJITSU_OUTPUT" ]]; then
+                        python3 -c "
+import json, sys
+with open('$FUJITSU_OUTPUT') as f: r = json.load(f)
+for lbl, k in [('Baseline','baseline'),('CB','cb_model')]:
+    tf = r.get(k,{}).get('tool_flip_asr',{})
+    cap = r.get(k,{}).get('capability_retention',{})
+    if not tf: continue
+    asr = tf.get('attack_success_rate',0)
+    cor = tf.get('correct_tool_call_rate',0)
+    nt = tf.get('no_tool_call_rate',0)
+    cr = cap.get('capability_retention',0)
+    n = tf.get('total_samples',0)
+    print(f'    {lbl}: ASR={asr:.0%} correct={cor:.0%} no_tool={nt:.0%} cap_ret={cr:.0%} (n={n})')
+d = r.get('delta',{})
+if d:
+    print(f'    Delta: ASR={d.get(\"tool_flip_asr\",0):+.0%} cap={d.get(\"capability_retention\",0):+.0%}')
+    g = r.get('stage1_gates',{})
+    failed = [k for k,v in g.items() if not v]
+    if failed: print(f'    FAILED gates: {\" \".join(failed)}')
+    else: print(f'    All gates PASSED')
+"
+                    fi
+
                     # Print Fujitsu examples
                     if [[ "$SHOW_EXAMPLES" == "true" ]]; then
                         PAIRED_FILE="${FUJITSU_OUTPUT%.json}.paired_outputs.jsonl"
@@ -843,8 +886,22 @@ PYEOF
                             --use-sample-context \
                             --limit "$LIMIT_EVAL" \
                             --merge-adapter \
-                            --dtype "$DTYPE" 2>&1 | tee -a "$RUN_DIR/eval/agentdojo.log"
-                        
+                            --dtype "$DTYPE" >> "$RUN_DIR/eval/agentdojo.log" 2>&1
+
+                        # Print compact AgentDojo summary
+                        if [[ -f "$AGENTDOJO_OUTPUT" ]]; then
+                            python3 -c "
+import json
+with open('$AGENTDOJO_OUTPUT') as f: r = json.load(f)
+cb = r.get('cb_model',{}).get('generation_comparison',{})
+if cb:
+    resist = cb.get('harmful_resistance_rate',0)
+    mal = cb.get('malicious_tool_call_rate',0)
+    n = cb.get('total_samples',0)
+    print(f'    AgentDojo: resist={resist:.0%} malicious={mal:.0%} (n={n})')
+"
+                        fi
+
                         # Print AgentDojo examples
                         if [[ "$SHOW_EXAMPLES" == "true" ]]; then
                             PAIRED_FILE="${AGENTDOJO_OUTPUT%.json}.paired_outputs.jsonl"
@@ -911,7 +968,21 @@ PYEOF
                             --use-sample-context \
                             --limit "$LIMIT_EVAL" \
                             --merge-adapter \
-                            --dtype "$DTYPE" 2>&1 | tee -a "$RUN_DIR/eval/agentdojo_benign.log"
+                            --dtype "$DTYPE" >> "$RUN_DIR/eval/agentdojo_benign.log" 2>&1
+
+                        # Print compact benign summary
+                        if [[ -f "$AGENTDOJO_BENIGN_OUTPUT" ]]; then
+                            python3 -c "
+import json
+with open('$AGENTDOJO_BENIGN_OUTPUT') as f: r = json.load(f)
+cb = r.get('cb_model',{}).get('generation_comparison',{})
+if cb:
+    cor = cb.get('correct_tool_call_rate',0)
+    nt = cb.get('no_tool_call_rate',0)
+    n = cb.get('total_samples',0)
+    print(f'    AD Benign: correct={cor:.0%} no_tool={nt:.0%} (n={n})')
+"
+                        fi
 
                         # Print benign examples
                         if [[ "$SHOW_EXAMPLES" == "true" ]]; then
@@ -966,71 +1037,12 @@ PYEOF
             fi
 
             # =====================================================
-            # Step 5: Quick Summary
+            # Step 5: Quick Summary (compact, metrics already printed above)
             # =====================================================
+            run_end=$(date +%s)
+            run_mins=$(( (run_end - train_start) / 60 ))
             echo ""
-            echo "--- Run Summary: $RUN_NAME ---"
-            echo "  Training: $train_status"
-            if [[ -f "$RUN_DIR/eval/fujitsu_eval.json" ]]; then
-                python3 -c "
-import json
-with open('$RUN_DIR/eval/fujitsu_eval.json') as f:
-    r = json.load(f)
-if 'baseline' in r:
-    baseline_asr = r['baseline']['tool_flip_asr']['attack_success_rate']
-    baseline_mal = r['baseline']['tool_flip_asr'].get('malicious_tool_call_rate', baseline_asr)
-    baseline_corr = r['baseline']['tool_flip_asr'].get('correct_tool_call_rate', r['baseline']['tool_flip_asr'].get('correct_behavior_rate', 0))
-    print(f'  Fujitsu Baseline ASR: {baseline_asr:.1%}')
-    print(f'  Fujitsu Baseline Malicious Tool Rate: {baseline_mal:.1%}')
-    print(f'  Fujitsu Baseline Correct Tool Rate:   {baseline_corr:.1%}')
-if 'cb_model' in r:
-    asr = r['cb_model']['tool_flip_asr']['attack_success_rate']
-    cb_mal = r['cb_model']['tool_flip_asr'].get('malicious_tool_call_rate', asr)
-    cb_corr = r['cb_model']['tool_flip_asr'].get('correct_tool_call_rate', r['cb_model']['tool_flip_asr'].get('correct_behavior_rate', 0))
-    cb_no = r['cb_model']['tool_flip_asr'].get('no_tool_call_rate', 0)
-    cb_other = r['cb_model']['tool_flip_asr'].get('other_tool_call_rate', 0)
-    cb_multi = r['cb_model']['tool_flip_asr'].get('multiple_tool_call_rate', 0)
-    cb_malformed = r['cb_model']['tool_flip_asr'].get('malformed_tool_call_rate', 0)
-    print(f'  Fujitsu CB ASR:       {asr:.1%}')
-    print(f'  Fujitsu CB Malicious Tool Rate: {cb_mal:.1%}')
-    print(f'  Fujitsu CB Correct Tool Rate:   {cb_corr:.1%}')
-    print(f'  Fujitsu CB No-Tool Rate:        {cb_no:.1%}')
-    print(f'  Fujitsu CB Other-Tool Rate:     {cb_other:.1%}')
-    print(f'  Fujitsu CB Multi-Tool Rate:     {cb_multi:.1%}')
-    print(f'  Fujitsu CB Malformed-Tool Rate: {cb_malformed:.1%}')
-if 'delta' in r:
-    delta = r['delta']['tool_flip_asr']
-    print(f'  Fujitsu Delta:        {delta:+.1%}')
-" 2>/dev/null || echo "  Fujitsu: (parse error)"
-            fi
-            if [[ -f "$RUN_DIR/eval/agentdojo_eval.json" ]]; then
-                python3 -c "
-import json
-with open('$RUN_DIR/eval/agentdojo_eval.json') as f:
-    r = json.load(f)
-if 'output_comparison' in r:
-    print(f'  AgentDojo Diff Rate:  {r[\"output_comparison\"].get(\"difference_rate\",-1):.1%}')
-for key in ('baseline', 'cb_model'):
-    gc = r.get(key, {}).get('generation_comparison', {})
-    if gc:
-        label = 'Baseline' if key == 'baseline' else 'CB'
-        print(f'  AgentDojo {label}: malicious={gc.get(\"malicious_tool_call_rate\",0):.1%} resist={gc.get(\"harmful_resistance_rate\",0):.1%} correct={gc.get(\"correct_tool_call_rate\",0):.1%} no_tool={gc.get(\"no_tool_call_rate\",0):.1%}')
-" 2>/dev/null || echo "  AgentDojo: (parse error)"
-            fi
-            if [[ -f "$RUN_DIR/eval/agentdojo_benign_eval.json" ]]; then
-                python3 -c "
-import json
-with open('$RUN_DIR/eval/agentdojo_benign_eval.json') as f:
-    r = json.load(f)
-for key in ('baseline', 'cb_model'):
-    gc = r.get(key, {}).get('generation_comparison', {})
-    if gc:
-        label = 'Baseline' if key == 'baseline' else 'CB'
-        cor = gc.get('correct_tool_call_rate', 0)
-        no = gc.get('no_tool_call_rate', 0)
-        print(f'  AgentDojo Benign {label}: correct_tool={cor:.1%} no_tool={no:.1%}')
-" 2>/dev/null || echo "  AgentDojo Benign: (parse error)"
-            fi
+            echo "--- $RUN_NAME: $train_status (${run_mins}m total) ---"
             echo ""
 
             # Generate per-run summary
