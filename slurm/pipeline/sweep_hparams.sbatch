@@ -187,7 +187,9 @@ LOSS_MODES="${LOSS_MODES:-cosine_simple}"
 
 # Pooling presets: each is "name:pooling_mode:distance:margin_b:margin_h"
 # Multiple presets separated by spaces. Swept as innermost dimension.
-POOLING_PRESETS="${POOLING_PRESETS:-m500:legacy:dmix:500:1500}"
+# "correct" pooling uses all 4096 dims (dense); "legacy" uses ~2% (sparse, ineffective for CB).
+# Margins/distance don't matter for cosine_simple (only used by triplet_full).
+POOLING_PRESETS="${POOLING_PRESETS:-cor:correct:dmix:500:1500}"
 POOLING_POLICY="${POOLING_POLICY:-cb_full_sequence}"
 POOLING_MASK_POLICY="${POOLING_MASK_POLICY:-auto}"
 STOP_AFTER_ETL_B="${STOP_AFTER_ETL_B:-false}"
