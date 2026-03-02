@@ -141,7 +141,7 @@ else
     DEFAULT_STEPS=100
     DEFAULT_ALPHAS="10.0"
     DEFAULT_LAYER_CONFIGS="4,8,14"
-    DEFAULT_POLICIES="assistant_only,cb_full_sequence"
+    DEFAULT_POLICIES="cb_full_sequence"
     DEFAULT_LIMIT_EVAL=50
     DEFAULT_NUM_EXAMPLES=10
 fi
@@ -175,11 +175,16 @@ TRIPLET_MIX_COS_WEIGHT="${TRIPLET_MIX_COS_WEIGHT:-0.5}"
 # Gamma KL sweep: comma-separated values for triplet_gamma_kl.
 # Higher values = stronger KL anchor (prevents model collapse/gibberish).
 # Default "0.9" preserves backward compat. Try "0.9,5.0,20.0" for stability grid.
-GAMMA_KLS="${GAMMA_KLS:-$TRIPLET_GAMMA_KL}"
+GAMMA_KLS="${GAMMA_KLS:-1,5,50,100}"
+
+# Loss mode sweep: comma-separated loss modes.
+# "triplet_full" uses margin-based triplet (losses ~500-1500, needs gamma_kl=50-200).
+# "cosine_simple" uses bounded cosine loss (losses ~0-1, needs gamma_kl=1-10).
+LOSS_MODES="${LOSS_MODES:-triplet_full,cosine_simple}"
 
 # Pooling presets: each is "name:pooling_mode:distance:margin_b:margin_h"
 # Multiple presets separated by spaces. Swept as innermost dimension.
-POOLING_PRESETS="${POOLING_PRESETS:-m500:legacy:dmix:500:1500 m750:legacy:dmix:750:2250}"
+POOLING_PRESETS="${POOLING_PRESETS:-m500:legacy:dmix:500:1500}"
 POOLING_POLICY="${POOLING_POLICY:-cb_full_sequence}"
 POOLING_MASK_POLICY="${POOLING_MASK_POLICY:-auto}"
 STOP_AFTER_ETL_B="${STOP_AFTER_ETL_B:-false}"
@@ -198,7 +203,7 @@ echo "  POLICIES: $POLICIES"
 echo "  BATCH_SIZE: $BATCH_SIZE"
 echo "  GRAD_ACCUM: $GRAD_ACCUM"
 echo "  LEARNING_RATE: $LEARNING_RATE"
-echo "  LOSS_MODE: $LOSS_MODE"
+echo "  LOSS_MODES: $LOSS_MODES"
 echo "  LIMIT_EVAL: $LIMIT_EVAL"
 echo "  NUM_EXAMPLES: $NUM_EXAMPLES"
 echo "  SHOW_EXAMPLES: $SHOW_EXAMPLES"
@@ -353,16 +358,19 @@ count_configs() {
     local count=0
     IFS=',' read -ra ALPHA_ARRAY <<< "$ALPHAS"
     IFS=',' read -ra GAMMA_KL_ARRAY <<< "$GAMMA_KLS"
+    IFS=',' read -ra LOSS_MODE_ARRAY <<< "$LOSS_MODES"
     IFS='|' read -ra LAYER_ARRAY <<< "$LAYER_CONFIGS"
     IFS=',' read -ra POLICY_ARRAY <<< "$POLICIES"
     read -ra PRESET_ARRAY <<< "$POOLING_PRESETS"
 
     for _a in "${ALPHA_ARRAY[@]}"; do
         for _g in "${GAMMA_KL_ARRAY[@]}"; do
-            for _l in "${LAYER_ARRAY[@]}"; do
-                for _pol in "${POLICY_ARRAY[@]}"; do
-                    for _p in "${PRESET_ARRAY[@]}"; do
-                        count=$((count + 1))
+            for _lm in "${LOSS_MODE_ARRAY[@]}"; do
+                for _l in "${LAYER_ARRAY[@]}"; do
+                    for _pol in "${POLICY_ARRAY[@]}"; do
+                        for _p in "${PRESET_ARRAY[@]}"; do
+                            count=$((count + 1))
+                        done
                     done
                 done
             done
@@ -386,6 +394,7 @@ fail_count=0
 
 IFS=',' read -ra ALPHA_ARRAY <<< "$ALPHAS"
 IFS=',' read -ra GAMMA_KL_ARRAY <<< "$GAMMA_KLS"
+IFS=',' read -ra LOSS_MODE_ARRAY <<< "$LOSS_MODES"
 IFS='|' read -ra LAYER_ARRAY <<< "$LAYER_CONFIGS"
 IFS=',' read -ra POLICY_ARRAY <<< "$POLICIES"
 read -ra PRESET_ARRAY <<< "$POOLING_PRESETS"
@@ -518,14 +527,29 @@ print(total)
             IFS=',' read -ra CB_LAYER_ARRAY <<< "$layers"
 
             for gamma_kl in "${GAMMA_KL_ARRAY[@]}"; do
+            for loss_mode in "${LOSS_MODE_ARRAY[@]}"; do
             for preset_str in "${PRESET_ARRAY[@]}"; do
             # Parse preset: name:pooling_mode:distance:margin_b:margin_h
             IFS=':' read -r _PNAME _PMODE _PDIST _PMB _PMH <<< "$preset_str"
 
-            # Build run name: include gamma_kl and preset as needed
-            # Format: [preset_]a{alpha}_g{gamma}_l{layers}_{policy}
-            _RUN_CORE="a${alpha}_g${gamma_kl}_l${layers_short}_${policy}"
-            if [[ ${#PRESET_ARRAY[@]} -gt 1 || ${#GAMMA_KL_ARRAY[@]} -gt 1 ]]; then
+            # Compute loss mode short tag (only included when sweeping multiple)
+            _LM_TAG=""
+            if [[ ${#LOSS_MODE_ARRAY[@]} -gt 1 ]]; then
+                case "$loss_mode" in
+                    triplet_full) _LM_TAG="tf" ;;
+                    cosine_simple) _LM_TAG="cs" ;;
+                    *) _LM_TAG="${loss_mode:0:2}" ;;
+                esac
+            fi
+
+            # Build run name: include gamma_kl, loss_mode tag, and preset as needed
+            # Format: [preset_]a{alpha}_g{gamma}[_lm]_l{layers}_{policy}
+            if [[ -n "$_LM_TAG" ]]; then
+                _RUN_CORE="a${alpha}_g${gamma_kl}_${_LM_TAG}_l${layers_short}_${policy}"
+            else
+                _RUN_CORE="a${alpha}_g${gamma_kl}_l${layers_short}_${policy}"
+            fi
+            if [[ ${#PRESET_ARRAY[@]} -gt 1 || ${#GAMMA_KL_ARRAY[@]} -gt 1 || ${#LOSS_MODE_ARRAY[@]} -gt 1 ]]; then
                 RUN_NAME="${_PNAME}_${_RUN_CORE}"
                 RUN_DIR="$SWEEP_DIR/$RUN_NAME"
                 mkdir -p "$RUN_DIR"/{model,eval}
@@ -540,7 +564,7 @@ print(total)
             echo "========================================"
             echo "[$run_idx/$TOTAL_RUNS] $RUN_NAME"
             echo "========================================"
-            echo "  Alpha: $alpha  Gamma KL: $gamma_kl"
+            echo "  Alpha: $alpha  Gamma KL: $gamma_kl  Loss Mode: $loss_mode"
             echo "  Layers: $layers  Policy: $policy"
             echo "  Preset: $_PNAME (${_PMODE}/${_PDIST}/${_PMB}/${_PMH})"
             echo "  Output: $RUN_DIR"
@@ -563,7 +587,7 @@ print(total)
   "batch_size": $BATCH_SIZE,
   "grad_accum": $GRAD_ACCUM,
   "learning_rate": "$LEARNING_RATE",
-  "loss_mode": "$LOSS_MODE",
+  "loss_mode": "$loss_mode",
   "loss_weighting": "$LOSS_WEIGHTING",
   "pooling_policy": "${POOLING_POLICY:-}",
   "pooling_mask_policy": "$POOLING_MASK_POLICY",
@@ -583,7 +607,7 @@ RUNCFG
             # =====================================================
             # Step 3: Training
             # =====================================================
-            echo "Step 3: Training with alpha=$alpha, gamma_kl=$gamma_kl, layers=$layers, policy=$policy, preset=$_PNAME (${_PMODE}/${_PDIST}/${_PMB}/${_PMH})"
+            echo "Step 3: Training with alpha=$alpha, gamma_kl=$gamma_kl, loss_mode=$loss_mode, layers=$layers, policy=$policy, preset=$_PNAME (${_PMODE}/${_PDIST}/${_PMB}/${_PMH})"
 
             # NOTE: Renders/lossmasks/splits live in BASE_DIR (shared across presets/gamma_kl).
             # RUN_DIR may differ from BASE_DIR for multi-config sweeps.
@@ -627,7 +651,7 @@ RUNCFG
                 --alpha-max "$alpha"
                 --max-seq-length "$MAX_SEQ_LENGTH"
                 --gradient-accumulation-steps "$GRAD_ACCUM"
-                --loss-mode "$LOSS_MODE"
+                --loss-mode "$loss_mode"
                 --loss-weighting "$LOSS_WEIGHTING"
                 --triplet-alpha-benign "$TRIPLET_ALPHA_BENIGN"
                 --triplet-beta-harmful "$TRIPLET_BETA_HARMFUL"
@@ -1013,6 +1037,7 @@ for key in ('baseline', 'cb_model'):
             python scripts/generate_run_summary.py --run-dir "$RUN_DIR" 2>&1 || echo "(run summary generation failed)"
 
             done  # preset loop
+            done  # loss_mode loop
             done  # gamma_kl loop
 
         done  # alpha loop
@@ -1036,22 +1061,53 @@ echo ""
 
 # Generate summary CSV
 SUMMARY_CSV="$SWEEP_DIR/summary.csv"
-echo "preset,alpha,gamma_kl,layers,policy,fujitsu_baseline_asr,fujitsu_cb_asr,fujitsu_delta,fujitsu_cb_correct_rate,fujitsu_cb_no_tool_rate,fujitsu_cb_other_tool_rate,fujitsu_gibberish_rate,agentdojo_diff,agentdojo_cb_malicious_rate,agentdojo_cb_harmful_resist,agentdojo_gibberish_rate,agentdojo_benign_correct_rate,agentdojo_benign_no_tool_rate,status" > "$SUMMARY_CSV"
+echo "preset,alpha,gamma_kl,loss_mode,layers,policy,fujitsu_baseline_asr,fujitsu_cb_asr,fujitsu_delta,fujitsu_cb_correct_rate,fujitsu_cb_no_tool_rate,fujitsu_cb_other_tool_rate,fujitsu_gibberish_rate,agentdojo_diff,agentdojo_cb_malicious_rate,agentdojo_cb_harmful_resist,agentdojo_gibberish_rate,agentdojo_benign_correct_rate,agentdojo_benign_no_tool_rate,status" > "$SUMMARY_CSV"
 
 for run_dir in "$SWEEP_DIR"/*/; do
     [[ -d "$run_dir" ]] || continue
     run_name=$(basename "$run_dir")
 
     # Extract config from run directory name.
-    # New format: "preset_a10.0_g5.0_l10_20_policy" or "a10.0_g5.0_l10_20_policy"
-    # Legacy format: "preset_a10.0_l10_20_policy" or "a10.0_l10_20_policy"
+    # Formats (newest to oldest):
+    #   "preset_a10.0_g5.0_tf_l10_20_policy"  (with loss mode tag)
+    #   "preset_a10.0_g5.0_l10_20_policy"     (without loss mode tag)
+    #   "a10.0_g5.0_l10_20_policy"            (no preset)
+    #   "preset_a10.0_l10_20_policy"           (legacy, no gamma)
+    #   "a10.0_l10_20_policy"                  (legacy, no preset/gamma)
     gamma_kl_csv="0.9"  # default for legacy dirs
-    if [[ "$run_name" =~ ^([a-zA-Z][a-zA-Z0-9]*)_a([0-9.]+)_g([0-9.]+)_l([0-9_]+)_(.+)$ ]]; then
+    loss_mode_csv="triplet_full"  # default
+    if [[ "$run_name" =~ ^([a-zA-Z][a-zA-Z0-9]*)_a([0-9.]+)_g([0-9.]+)_([a-z]{2})_l([0-9_]+)_(.+)$ ]]; then
+        # New format with loss mode tag: preset_a10.0_g5.0_tf_l4_8_14_policy
+        preset="${BASH_REMATCH[1]}"
+        alpha="${BASH_REMATCH[2]}"
+        gamma_kl_csv="${BASH_REMATCH[3]}"
+        _lm_tag="${BASH_REMATCH[4]}"
+        layers="${BASH_REMATCH[5]//\_/,}"
+        policy="${BASH_REMATCH[6]}"
+        case "$_lm_tag" in
+            tf) loss_mode_csv="triplet_full" ;;
+            cs) loss_mode_csv="cosine_simple" ;;
+            *) loss_mode_csv="$_lm_tag" ;;
+        esac
+    elif [[ "$run_name" =~ ^([a-zA-Z][a-zA-Z0-9]*)_a([0-9.]+)_g([0-9.]+)_l([0-9_]+)_(.+)$ ]]; then
         preset="${BASH_REMATCH[1]}"
         alpha="${BASH_REMATCH[2]}"
         gamma_kl_csv="${BASH_REMATCH[3]}"
         layers="${BASH_REMATCH[4]//\_/,}"
         policy="${BASH_REMATCH[5]}"
+    elif [[ "$run_name" =~ ^a([0-9.]+)_g([0-9.]+)_([a-z]{2})_l([0-9_]+)_(.+)$ ]]; then
+        # No preset, with loss mode tag
+        preset="default"
+        alpha="${BASH_REMATCH[1]}"
+        gamma_kl_csv="${BASH_REMATCH[2]}"
+        _lm_tag="${BASH_REMATCH[3]}"
+        layers="${BASH_REMATCH[4]//\_/,}"
+        policy="${BASH_REMATCH[5]}"
+        case "$_lm_tag" in
+            tf) loss_mode_csv="triplet_full" ;;
+            cs) loss_mode_csv="cosine_simple" ;;
+            *) loss_mode_csv="$_lm_tag" ;;
+        esac
     elif [[ "$run_name" =~ ^a([0-9.]+)_g([0-9.]+)_l([0-9_]+)_(.+)$ ]]; then
         preset="default"
         alpha="${BASH_REMATCH[1]}"
@@ -1072,10 +1128,12 @@ for run_dir in "$SWEEP_DIR"/*/; do
         continue
     fi
 
-    # Try to get gamma_kl from run_config.json (more reliable than name parsing)
+    # Try to get gamma_kl and loss_mode from run_config.json (more reliable than name parsing)
     if [[ -f "$run_dir/run_config.json" ]]; then
         _cfg_gamma=$(python3 -c "import json; print(json.load(open('${run_dir}run_config.json')).get('triplet_gamma_kl', '$gamma_kl_csv'))" 2>/dev/null || echo "$gamma_kl_csv")
         gamma_kl_csv="$_cfg_gamma"
+        _cfg_lm=$(python3 -c "import json; print(json.load(open('${run_dir}run_config.json')).get('loss_mode', '$loss_mode_csv'))" 2>/dev/null || echo "$loss_mode_csv")
+        loss_mode_csv="$_cfg_lm"
     fi
 
     # Defaults
@@ -1141,7 +1199,7 @@ print(gc.get('correct_tool_call_rate','N/A'), gc.get('no_tool_call_rate','N/A'))
 " 2>/dev/null || echo "N/A N/A")
     fi
 
-    echo "$preset,$alpha,$gamma_kl_csv,$layers,$policy,$fujitsu_baseline,$fujitsu_cb,$fujitsu_delta,$fujitsu_cb_correct,$fujitsu_cb_no_tool,$fujitsu_cb_other_tool,$fujitsu_gib,$agentdojo_diff,$agentdojo_cb_mal,$agentdojo_harmful_resist,$agentdojo_gib,$agentdojo_benign_correct,$agentdojo_benign_no_tool,$status" >> "$SUMMARY_CSV"
+    echo "$preset,$alpha,$gamma_kl_csv,$loss_mode_csv,$layers,$policy,$fujitsu_baseline,$fujitsu_cb,$fujitsu_delta,$fujitsu_cb_correct,$fujitsu_cb_no_tool,$fujitsu_cb_other_tool,$fujitsu_gib,$agentdojo_diff,$agentdojo_cb_mal,$agentdojo_harmful_resist,$agentdojo_gib,$agentdojo_benign_correct,$agentdojo_benign_no_tool,$status" >> "$SUMMARY_CSV"
 done
 
 echo "Summary CSV: $SUMMARY_CSV"
@@ -1179,7 +1237,7 @@ try:
             ad_mal = r.get('agentdojo_cb_malicious_rate', 'N/A')
             ad_res = r.get('agentdojo_cb_harmful_resist', 'N/A')
             ad_gib = r.get('agentdojo_gibberish_rate', 'N/A')
-            print(f'#{rank} {r[\"preset\"]} a={r[\"alpha\"]} g={r.get(\"gamma_kl\",\"?\")} l={r[\"layers\"]} {r[\"policy\"]}')
+            print(f'#{rank} {r[\"preset\"]} a={r[\"alpha\"]} g={r.get(\"gamma_kl\",\"?\")} lm={r.get(\"loss_mode\",\"?\")} l={r[\"layers\"]} {r[\"policy\"]}')
             benign_cor = r.get('agentdojo_benign_correct_rate', 'N/A')
             benign_no = r.get('agentdojo_benign_no_tool_rate', 'N/A')
             print(f'   Fujitsu: ASR={asr:.1%} correct={r.get(\"fujitsu_cb_correct_rate\",\"N/A\")} no_tool={r.get(\"fujitsu_cb_no_tool_rate\",\"N/A\")} gibberish={gib_str}')

@@ -15,11 +15,13 @@ import torch.nn.functional as F
 
 
 LOSS_MODE_TRIPLET_FULL = "triplet_full"
+LOSS_MODE_COSINE_SIMPLE = "cosine_simple"
 LOSS_MODE_LEGACY_SCHEMA = "legacy_schema"
 LOSS_MODE_LEGACY_CB = "legacy_cb"
 
 SUPPORTED_LOSS_MODES = (
     LOSS_MODE_TRIPLET_FULL,
+    LOSS_MODE_COSINE_SIMPLE,
     LOSS_MODE_LEGACY_SCHEMA,
     LOSS_MODE_LEGACY_CB,
 )
@@ -358,6 +360,66 @@ def triplet_full_loss(
         "triplet_alpha": float(alpha_benign),
         "triplet_beta": float(beta_harmful),
         "triplet_gamma": float(gamma_kl),
+        "total_loss": total.item(),
+    }
+    return total, metrics
+
+
+def simple_cosine_loss(
+    harmful_new: torch.Tensor,
+    harmful_old: torch.Tensor,
+    benign_new: torch.Tensor,
+    benign_old: torch.Tensor,
+    benign_student_logits: torch.Tensor,
+    benign_teacher_logits: torch.Tensor,
+    benign_attention_mask: Optional[torch.Tensor],
+    benign_loss_mask: Optional[torch.Tensor],
+    *,
+    alpha_benign: float,
+    beta_harmful: float,
+    gamma_kl: float,
+    kl_temperature: float,
+) -> Tuple[torch.Tensor, Dict[str, float]]:
+    """Simple cosine-based circuit breaker loss with bounded terms.
+
+    Harmful: ReLU(cos_sim(new, old)) -- pushes reps away from frozen until
+        perpendicular (cos_sim <= 0), then gradient stops.  In [0, 1].
+    Benign: 1 - cos_sim(new, old) -- keeps reps close to frozen.  In [0, 2].
+    KL: standard KL divergence on benign logits.
+
+    Total = alpha_benign * L_benign + beta_harmful * L_harmful + gamma_kl * L_kl
+
+    All cosine terms are naturally bounded, so gamma_kl=1-10 is typically
+    sufficient (vs 50-200 for triplet_full with unbounded margins).
+    """
+    # Harmful: minimize cosine similarity (push away from frozen)
+    harmful_cos = F.cosine_similarity(harmful_new, harmful_old, dim=-1, eps=1e-8)
+    harmful_loss = F.relu(harmful_cos).mean()
+
+    # Benign: keep representations close to frozen
+    benign_cos = F.cosine_similarity(benign_new, benign_old, dim=-1, eps=1e-8)
+    benign_loss = (1.0 - benign_cos).mean()
+
+    # KL divergence: preserve language modeling capability
+    kl_loss = kl_divergence_loss(
+        student_logits=benign_student_logits,
+        teacher_logits=benign_teacher_logits,
+        attention_mask=benign_attention_mask,
+        loss_mask=benign_loss_mask,
+        temperature=kl_temperature,
+    )
+
+    total = alpha_benign * benign_loss + beta_harmful * harmful_loss + gamma_kl * kl_loss
+
+    metrics = {
+        "triplet_benign_loss": benign_loss.item(),
+        "triplet_harmful_loss": harmful_loss.item(),
+        "triplet_kl_loss": kl_loss.item(),
+        "triplet_alpha": float(alpha_benign),
+        "triplet_beta": float(beta_harmful),
+        "triplet_gamma": float(gamma_kl),
+        "mean_harmful_cos": harmful_cos.mean().item(),
+        "mean_benign_cos": benign_cos.mean().item(),
         "total_loss": total.item(),
     }
     return total, metrics

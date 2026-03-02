@@ -49,6 +49,7 @@ from accelerate.utils import set_seed, DistributedDataParallelKwargs
 from .config import CircuitBreakerConfig
 from .hf_utils import resolve_hf_token, resolve_local_model_path
 from .losses import (
+    LOSS_MODE_COSINE_SIMPLE,
     LOSS_MODE_LEGACY_CB,
     LOSS_MODE_LEGACY_SCHEMA,
     LOSS_MODE_TRIPLET_FULL,
@@ -59,6 +60,7 @@ from .losses import (
     reroute_loss_relu_cos,
     retain_ce_loss,
     retain_loss_l2,
+    simple_cosine_loss,
     triplet_full_loss,
 )
 from src.utils.wandb_logging import (
@@ -1319,8 +1321,15 @@ class CircuitBreakerTrainer:
                 )
                 cs, cr = alpha, 1.0
         else:
-            cs, cr = 1.0, 1.0
-            alpha = float(getattr(self.config, "triplet_beta_harmful", 0.4))
+            # Triplet modes: warmup schedule for triplet terms.
+            # Ramp triplet_scale from 0 → 1 over warmup_steps while KL anchors
+            # at full strength throughout.  This lets KL divergence build up as
+            # a counterforce before triplet losses push representations too far.
+            warmup = max(1, self.config.warmup_steps)
+            triplet_scale = min(1.0, self.global_step / warmup)
+            cs = triplet_scale
+            cr = 1.0
+            alpha = triplet_scale
 
         # Extract batch data
         harmful_input_ids = batch['harmful_input_ids']
@@ -1367,7 +1376,7 @@ class CircuitBreakerTrainer:
 
         combined_input_ids = torch.cat([harmful_input_ids, benign_input_ids], dim=0)
         combined_attention_mask = torch.cat([harmful_attention_mask, benign_attention_mask], dim=0)
-        needs_frozen = loss_mode in (LOSS_MODE_TRIPLET_FULL, LOSS_MODE_LEGACY_CB)
+        needs_frozen = loss_mode in (LOSS_MODE_TRIPLET_FULL, LOSS_MODE_COSINE_SIMPLE, LOSS_MODE_LEGACY_CB)
         combined_frozen_reps = {}
         combined_teacher_logits = None
 
@@ -1585,8 +1594,8 @@ class CircuitBreakerTrainer:
                 benign_teacher_logits=teacher_logits_benign,
                 benign_attention_mask=benign_attention_mask,
                 benign_loss_mask=benign_loss_mask,
-                alpha_benign=float(getattr(self.config, "triplet_alpha_benign", 0.5)),
-                beta_harmful=float(getattr(self.config, "triplet_beta_harmful", 0.4)),
+                alpha_benign=cs * float(getattr(self.config, "triplet_alpha_benign", 0.5)),
+                beta_harmful=cs * float(getattr(self.config, "triplet_beta_harmful", 0.4)),
                 gamma_kl=float(getattr(self.config, "triplet_gamma_kl", 0.9)),
                 margin_benign=float(getattr(self.config, "triplet_margin_benign", 500.0)),
                 margin_harmful=float(getattr(self.config, "triplet_margin_harmful", 1500.0)),
@@ -1607,6 +1616,99 @@ class CircuitBreakerTrainer:
                 "triplet_alpha": triplet_metrics["triplet_alpha"],
                 "triplet_beta": triplet_metrics["triplet_beta"],
                 "triplet_gamma": triplet_metrics["triplet_gamma"],
+                "alpha": alpha,
+            }
+        elif loss_mode == LOSS_MODE_COSINE_SIMPLE:
+            if teacher_logits_benign is None:
+                raise RuntimeError("cosine_simple requires frozen-model logits")
+
+            _pool_mode = getattr(self.config, "pooling_mode", "legacy")
+
+            harmful_new = pooled_representations(
+                reps_by_layer=harmful_model_reps,
+                target_layers=self.config.cb_target_layers,
+                token_mask=harmful_pool_mask if harmful_pool_mask is not None else harmful_attention_mask,
+                pooling_mode=_pool_mode,
+            )
+            harmful_old = pooled_representations(
+                reps_by_layer=harmful_frozen_reps,
+                target_layers=self.config.cb_target_layers,
+                token_mask=harmful_pool_mask if harmful_pool_mask is not None else harmful_attention_mask,
+                pooling_mode=_pool_mode,
+            )
+            benign_new = pooled_representations(
+                reps_by_layer=benign_model_reps,
+                target_layers=self.config.cb_target_layers,
+                token_mask=benign_pool_mask if benign_pool_mask is not None else benign_attention_mask,
+                pooling_mode=_pool_mode,
+            )
+            benign_old = pooled_representations(
+                reps_by_layer=benign_frozen_reps,
+                target_layers=self.config.cb_target_layers,
+                token_mask=benign_pool_mask if benign_pool_mask is not None else benign_attention_mask,
+                pooling_mode=_pool_mode,
+            )
+
+            # === Step-0 Diagnostic ===
+            if self.global_step == 0 and self.accelerator.is_main_process:
+                _h_pool_diag = harmful_pool_mask if harmful_pool_mask is not None else harmful_attention_mask
+                _b_pool_diag = benign_pool_mask if benign_pool_mask is not None else benign_attention_mask
+                _h_label_diag = harmful_loss_mask if harmful_loss_mask is not None else harmful_attention_mask
+                _b_label_diag = benign_loss_mask if benign_loss_mask is not None else benign_attention_mask
+
+                _masks_decoupled = (harmful_pooling_mask is not None
+                                    and not torch.equal(harmful_pooling_mask, harmful_loss_mask)
+                                    if harmful_pooling_mask is not None and harmful_loss_mask is not None
+                                    else False)
+                self.accelerator.print(
+                    f"\n  Decoupled masks: {'ACTIVE' if _masks_decoupled else 'INACTIVE'} "
+                    f"(pooling_mask_policy={_pool_policy})"
+                )
+                if _masks_decoupled:
+                    self.accelerator.print(
+                        f"  Harmful pool mask active: {_h_pool_diag.sum().item():.0f} vs "
+                        f"label mask active: {_h_label_diag.sum().item():.0f}"
+                    )
+                    self.accelerator.print(
+                        f"  Benign pool mask active:  {_b_pool_diag.sum().item():.0f} vs "
+                        f"label mask active: {_b_label_diag.sum().item():.0f}"
+                    )
+
+                self._log_pooling_diagnostic(
+                    harmful_model_reps=harmful_model_reps,
+                    harmful_frozen_reps=harmful_frozen_reps,
+                    benign_model_reps=benign_model_reps,
+                    benign_frozen_reps=benign_frozen_reps,
+                    harmful_mask=_h_pool_diag,
+                    benign_mask=_b_pool_diag,
+                    current_mode=_pool_mode,
+                )
+
+            total_loss, cosine_metrics = simple_cosine_loss(
+                harmful_new=harmful_new,
+                harmful_old=harmful_old,
+                benign_new=benign_new,
+                benign_old=benign_old,
+                benign_student_logits=student_logits_benign,
+                benign_teacher_logits=teacher_logits_benign,
+                benign_attention_mask=benign_attention_mask,
+                benign_loss_mask=benign_loss_mask,
+                alpha_benign=cs * float(getattr(self.config, "triplet_alpha_benign", 0.5)),
+                beta_harmful=cs * float(getattr(self.config, "triplet_beta_harmful", 0.4)),
+                gamma_kl=float(getattr(self.config, "triplet_gamma_kl", 0.9)),
+                kl_temperature=kl_temp,
+            )
+
+            metrics = {
+                "loss": total_loss.item(),
+                "loss_triplet_benign": cosine_metrics["triplet_benign_loss"],
+                "loss_triplet_harmful": cosine_metrics["triplet_harmful_loss"],
+                "loss_triplet_kl": cosine_metrics["triplet_kl_loss"],
+                "triplet_alpha": cosine_metrics["triplet_alpha"],
+                "triplet_beta": cosine_metrics["triplet_beta"],
+                "triplet_gamma": cosine_metrics["triplet_gamma"],
+                "mean_harmful_cos": cosine_metrics.get("mean_harmful_cos", 0),
+                "mean_benign_cos": cosine_metrics.get("mean_benign_cos", 0),
                 "alpha": alpha,
             }
         elif loss_mode == LOSS_MODE_LEGACY_CB:
@@ -1901,6 +2003,10 @@ class CircuitBreakerTrainer:
                         log_msg += f", kl={metrics['loss_kl']:.4f}"
                     if 'loss_triplet_kl' in metrics:
                         log_msg += f", triplet_kl={metrics['loss_triplet_kl']:.4f}"
+                    if 'mean_harmful_cos' in metrics:
+                        log_msg += f", h_cos={metrics['mean_harmful_cos']:.4f}"
+                    if 'mean_benign_cos' in metrics:
+                        log_msg += f", b_cos={metrics['mean_benign_cos']:.4f}"
                     log_msg += f", α={metrics['alpha']:.4f}"
                     self.accelerator.print(log_msg)
                     

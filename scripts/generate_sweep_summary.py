@@ -42,11 +42,38 @@ def count_gibberish(paired_path: Path) -> tuple:
     return gib, len(pairs)
 
 
+def _lm_tag_to_name(tag: str) -> str:
+    """Convert loss mode short tag to full name."""
+    return {"tf": "triplet_full", "cs": "cosine_simple"}.get(tag, tag)
+
+
 def parse_run_name(name: str) -> dict:
     """Parse a run directory name into components."""
-    result = {"preset": "default", "alpha": "?", "gamma_kl": "0.9", "layers": "?", "policy": "?"}
+    result = {"preset": "default", "alpha": "?", "gamma_kl": "0.9",
+              "loss_mode": "triplet_full", "layers": "?", "policy": "?"}
 
-    # New format with gamma: preset_a10.0_g5.0_l10_20_policy
+    # With loss mode tag + preset: preset_a10.0_g5.0_tf_l10_20_policy
+    m = re.match(r"^([a-zA-Z][a-zA-Z0-9]*)_a([\d.]+)_g([\d.]+)_([a-z]{2})_l([\d_]+)_(.+)$", name)
+    if m:
+        result["preset"] = m.group(1)
+        result["alpha"] = m.group(2)
+        result["gamma_kl"] = m.group(3)
+        result["loss_mode"] = _lm_tag_to_name(m.group(4))
+        result["layers"] = m.group(5).replace("_", ",")
+        result["policy"] = m.group(6)
+        return result
+
+    # With loss mode tag, no preset: a10.0_g5.0_tf_l10_20_policy
+    m = re.match(r"^a([\d.]+)_g([\d.]+)_([a-z]{2})_l([\d_]+)_(.+)$", name)
+    if m:
+        result["alpha"] = m.group(1)
+        result["gamma_kl"] = m.group(2)
+        result["loss_mode"] = _lm_tag_to_name(m.group(3))
+        result["layers"] = m.group(4).replace("_", ",")
+        result["policy"] = m.group(5)
+        return result
+
+    # With gamma, no loss mode tag: preset_a10.0_g5.0_l10_20_policy
     m = re.match(r"^([a-zA-Z][a-zA-Z0-9]*)_a([\d.]+)_g([\d.]+)_l([\d_]+)_(.+)$", name)
     if m:
         result["preset"] = m.group(1)
@@ -56,7 +83,7 @@ def parse_run_name(name: str) -> dict:
         result["policy"] = m.group(5)
         return result
 
-    # New format without preset: a10.0_g5.0_l10_20_policy
+    # No preset, with gamma: a10.0_g5.0_l10_20_policy
     m = re.match(r"^a([\d.]+)_g([\d.]+)_l([\d_]+)_(.+)$", name)
     if m:
         result["alpha"] = m.group(1)
@@ -99,6 +126,7 @@ def collect_run_metrics(run_dir: Path) -> dict:
         info["preset"] = config.get("preset", info["preset"])
         info["alpha"] = str(config.get("alpha", info["alpha"]))
         info["gamma_kl"] = str(config.get("triplet_gamma_kl", info["gamma_kl"]))
+        info["loss_mode"] = config.get("loss_mode", info.get("loss_mode", "triplet_full"))
         info["layers"] = config.get("layers", info["layers"])
         info["policy"] = config.get("policy", info["policy"])
 
@@ -239,7 +267,8 @@ def generate_sweep_summary(sweep_dir: Path) -> str:
             )
             parts.append(
                 f"   Config: preset={m['preset']} alpha={m['alpha']} "
-                f"gamma_kl={m['gamma_kl']} layers={m['layers']} policy={m['policy']}"
+                f"gamma_kl={m['gamma_kl']} loss_mode={m.get('loss_mode', '?')} "
+                f"layers={m['layers']} policy={m['policy']}"
             )
             parts.append(
                 f"   Fujitsu: ASR={fmt_pct(m.get('fuj_cb_asr'))} "
