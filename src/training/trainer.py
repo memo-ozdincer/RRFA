@@ -1773,7 +1773,7 @@ class CircuitBreakerTrainer:
 
         # === Diagnostic Logging ===
         if self.global_step % 50 == 0:
-            if loss_mode == LOSS_MODE_TRIPLET_FULL:
+            if loss_mode in (LOSS_MODE_TRIPLET_FULL, LOSS_MODE_COSINE_SIMPLE):
                 self.accelerator.print(
                     f"[Step {self.global_step}] mode={loss_mode} | "
                     f"L_b={metrics['loss_triplet_benign']:.4f} "
