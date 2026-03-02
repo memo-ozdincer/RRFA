@@ -50,6 +50,7 @@ from .config import CircuitBreakerConfig
 from .hf_utils import resolve_hf_token, resolve_local_model_path
 from .losses import (
     LOSS_MODE_COSINE_SIMPLE,
+    LOSS_MODE_L2_SIMPLE,
     LOSS_MODE_LEGACY_CB,
     LOSS_MODE_LEGACY_SCHEMA,
     LOSS_MODE_TRIPLET_FULL,
@@ -61,6 +62,7 @@ from .losses import (
     retain_ce_loss,
     retain_loss_l2,
     simple_cosine_loss,
+    simple_l2_loss,
     triplet_full_loss,
 )
 from src.utils.wandb_logging import (
@@ -1376,7 +1378,7 @@ class CircuitBreakerTrainer:
 
         combined_input_ids = torch.cat([harmful_input_ids, benign_input_ids], dim=0)
         combined_attention_mask = torch.cat([harmful_attention_mask, benign_attention_mask], dim=0)
-        needs_frozen = loss_mode in (LOSS_MODE_TRIPLET_FULL, LOSS_MODE_COSINE_SIMPLE, LOSS_MODE_LEGACY_CB)
+        needs_frozen = loss_mode in (LOSS_MODE_TRIPLET_FULL, LOSS_MODE_COSINE_SIMPLE, LOSS_MODE_L2_SIMPLE, LOSS_MODE_LEGACY_CB)
         combined_frozen_reps = {}
         combined_teacher_logits = None
 
@@ -1711,6 +1713,78 @@ class CircuitBreakerTrainer:
                 "mean_benign_cos": cosine_metrics.get("mean_benign_cos", 0),
                 "alpha": alpha,
             }
+        elif loss_mode == LOSS_MODE_L2_SIMPLE:
+            if teacher_logits_benign is None:
+                raise RuntimeError("l2_simple requires frozen-model logits")
+
+            _pool_mode = getattr(self.config, "pooling_mode", "legacy")
+
+            harmful_new = pooled_representations(
+                reps_by_layer=harmful_model_reps,
+                target_layers=self.config.cb_target_layers,
+                token_mask=harmful_pool_mask if harmful_pool_mask is not None else harmful_attention_mask,
+                pooling_mode=_pool_mode,
+            )
+            harmful_old = pooled_representations(
+                reps_by_layer=harmful_frozen_reps,
+                target_layers=self.config.cb_target_layers,
+                token_mask=harmful_pool_mask if harmful_pool_mask is not None else harmful_attention_mask,
+                pooling_mode=_pool_mode,
+            )
+            benign_new = pooled_representations(
+                reps_by_layer=benign_model_reps,
+                target_layers=self.config.cb_target_layers,
+                token_mask=benign_pool_mask if benign_pool_mask is not None else benign_attention_mask,
+                pooling_mode=_pool_mode,
+            )
+            benign_old = pooled_representations(
+                reps_by_layer=benign_frozen_reps,
+                target_layers=self.config.cb_target_layers,
+                token_mask=benign_pool_mask if benign_pool_mask is not None else benign_attention_mask,
+                pooling_mode=_pool_mode,
+            )
+
+            # Step-0 diagnostic (reuse the same helper)
+            if self.global_step == 0 and self.accelerator.is_main_process:
+                _h_pool_diag = harmful_pool_mask if harmful_pool_mask is not None else harmful_attention_mask
+                _b_pool_diag = benign_pool_mask if benign_pool_mask is not None else benign_attention_mask
+                self._log_pooling_diagnostic(
+                    harmful_model_reps=harmful_model_reps,
+                    harmful_frozen_reps=harmful_frozen_reps,
+                    benign_model_reps=benign_model_reps,
+                    benign_frozen_reps=benign_frozen_reps,
+                    harmful_mask=_h_pool_diag,
+                    benign_mask=_b_pool_diag,
+                    current_mode=_pool_mode,
+                )
+
+            total_loss, l2_metrics = simple_l2_loss(
+                harmful_new=harmful_new,
+                harmful_old=harmful_old,
+                benign_new=benign_new,
+                benign_old=benign_old,
+                benign_student_logits=student_logits_benign,
+                benign_teacher_logits=teacher_logits_benign,
+                benign_attention_mask=benign_attention_mask,
+                benign_loss_mask=benign_loss_mask,
+                alpha_benign=cs * float(getattr(self.config, "triplet_alpha_benign", 0.5)),
+                beta_harmful=cs * float(getattr(self.config, "triplet_beta_harmful", 0.4)),
+                gamma_kl=float(getattr(self.config, "triplet_gamma_kl", 0.9)),
+                kl_temperature=kl_temp,
+            )
+
+            metrics = {
+                "loss": total_loss.item(),
+                "loss_triplet_benign": l2_metrics["triplet_benign_loss"],
+                "loss_triplet_harmful": l2_metrics["triplet_harmful_loss"],
+                "loss_triplet_kl": l2_metrics["triplet_kl_loss"],
+                "triplet_alpha": l2_metrics["triplet_alpha"],
+                "triplet_beta": l2_metrics["triplet_beta"],
+                "triplet_gamma": l2_metrics["triplet_gamma"],
+                "mean_harmful_l2": l2_metrics.get("mean_harmful_l2", 0),
+                "mean_benign_l2": l2_metrics.get("mean_benign_l2", 0),
+                "alpha": alpha,
+            }
         elif loss_mode == LOSS_MODE_LEGACY_CB:
             loss_reroute, reroute_metrics = reroute_loss(
                 harmful_model_reps,
@@ -1773,7 +1847,7 @@ class CircuitBreakerTrainer:
 
         # === Diagnostic Logging ===
         if self.global_step % 50 == 0:
-            if loss_mode in (LOSS_MODE_TRIPLET_FULL, LOSS_MODE_COSINE_SIMPLE):
+            if loss_mode in (LOSS_MODE_TRIPLET_FULL, LOSS_MODE_COSINE_SIMPLE, LOSS_MODE_L2_SIMPLE):
                 self.accelerator.print(
                     f"[Step {self.global_step}] mode={loss_mode} | "
                     f"L_b={metrics['loss_triplet_benign']:.4f} "
@@ -2005,6 +2079,10 @@ class CircuitBreakerTrainer:
                         log_msg += f", h_cos={metrics['mean_harmful_cos']:.4f}"
                     if 'mean_benign_cos' in metrics:
                         log_msg += f", b_cos={metrics['mean_benign_cos']:.4f}"
+                    if 'mean_harmful_l2' in metrics:
+                        log_msg += f", h_l2={metrics['mean_harmful_l2']:.4f}"
+                    if 'mean_benign_l2' in metrics:
+                        log_msg += f", b_l2={metrics['mean_benign_l2']:.4f}"
                     log_msg += f", α={metrics['alpha']:.4f}"
                     self.accelerator.print(log_msg)
                     

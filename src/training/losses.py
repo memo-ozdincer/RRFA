@@ -16,12 +16,14 @@ import torch.nn.functional as F
 
 LOSS_MODE_TRIPLET_FULL = "triplet_full"
 LOSS_MODE_COSINE_SIMPLE = "cosine_simple"
+LOSS_MODE_L2_SIMPLE = "l2_simple"
 LOSS_MODE_LEGACY_SCHEMA = "legacy_schema"
 LOSS_MODE_LEGACY_CB = "legacy_cb"
 
 SUPPORTED_LOSS_MODES = (
     LOSS_MODE_TRIPLET_FULL,
     LOSS_MODE_COSINE_SIMPLE,
+    LOSS_MODE_L2_SIMPLE,
     LOSS_MODE_LEGACY_SCHEMA,
     LOSS_MODE_LEGACY_CB,
 )
@@ -420,6 +422,78 @@ def simple_cosine_loss(
         "triplet_gamma": float(gamma_kl),
         "mean_harmful_cos": harmful_cos.mean().item(),
         "mean_benign_cos": benign_cos.mean().item(),
+        "total_loss": total.item(),
+    }
+    return total, metrics
+
+
+def simple_l2_loss(
+    harmful_new: torch.Tensor,
+    harmful_old: torch.Tensor,
+    benign_new: torch.Tensor,
+    benign_old: torch.Tensor,
+    benign_student_logits: torch.Tensor,
+    benign_teacher_logits: torch.Tensor,
+    benign_attention_mask: Optional[torch.Tensor],
+    benign_loss_mask: Optional[torch.Tensor],
+    *,
+    alpha_benign: float,
+    beta_harmful: float,
+    gamma_kl: float,
+    kl_temperature: float,
+) -> Tuple[torch.Tensor, Dict[str, float]]:
+    """L2-based circuit breaker loss with bounded terms.
+
+    Uses L2 distance instead of cosine similarity.  Cosine has vanishing
+    gradients when vectors are nearly identical (cos ~ 1), which makes it
+    unable to learn with LoRA (rank-16 changes in 4096-dim space barely
+    move the cosine angle).  L2 distance provides a gradient of -1/scale
+    at d=0, so learning starts immediately.
+
+    Harmful: exp(-||new - old||₂ / scale) -- bounded [0, 1].
+        1.0 when identical, decreases as reps diverge.
+    Benign:  1 - exp(-||new - old||₂² / scale²) -- bounded [0, 1].
+        0.0 when identical, increases as reps diverge.
+    KL: standard KL divergence on benign logits.
+
+    The scale is auto-computed from the frozen model's representation norm
+    so the loss is well-calibrated regardless of layer / model size.
+    """
+    # Auto-scale: use the frozen model's norm as reference.
+    # Detach so it doesn't affect gradients.
+    scale_h = harmful_old.detach().norm(dim=-1).mean().clamp(min=1.0)
+    scale_b = benign_old.detach().norm(dim=-1).mean().clamp(min=1.0)
+
+    # Harmful: push apart (maximize L2 distance from frozen)
+    harmful_l2 = (harmful_new - harmful_old).norm(dim=-1)  # per-token or per-sample
+    harmful_loss = torch.exp(-harmful_l2 / scale_h).mean()
+
+    # Benign: keep close (minimize L2 distance from frozen)
+    benign_l2 = (benign_new - benign_old).norm(dim=-1)
+    benign_loss = (1.0 - torch.exp(-(benign_l2 / scale_b).square())).mean()
+
+    # KL divergence: preserve language modeling capability
+    kl_loss = kl_divergence_loss(
+        student_logits=benign_student_logits,
+        teacher_logits=benign_teacher_logits,
+        attention_mask=benign_attention_mask,
+        loss_mask=benign_loss_mask,
+        temperature=kl_temperature,
+    )
+
+    total = alpha_benign * benign_loss + beta_harmful * harmful_loss + gamma_kl * kl_loss
+
+    metrics = {
+        "triplet_benign_loss": benign_loss.item(),
+        "triplet_harmful_loss": harmful_loss.item(),
+        "triplet_kl_loss": kl_loss.item(),
+        "triplet_alpha": float(alpha_benign),
+        "triplet_beta": float(beta_harmful),
+        "triplet_gamma": float(gamma_kl),
+        "mean_harmful_l2": harmful_l2.mean().item(),
+        "mean_benign_l2": benign_l2.mean().item(),
+        "scale_h": scale_h.item(),
+        "scale_b": scale_b.item(),
         "total_loss": total.item(),
     }
     return total, metrics

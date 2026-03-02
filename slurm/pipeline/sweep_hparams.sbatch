@@ -45,27 +45,24 @@
 #    sbatch slurm/pipeline/sweep_hparams.sbatch
 #
 # 5) Legacy loss sweep:
-#    LOSS_MODE=legacy_cb LOSS_WEIGHTING=dual \
+#    LOSS_MODES=legacy_cb LOSS_WEIGHTING=dual \
 #    sbatch slurm/pipeline/sweep_hparams.sbatch
 #
 # -----------------------------------------------------------------------------
 # Config knobs (pass with `VAR=value sbatch ...`)
 # -----------------------------------------------------------------------------
 # Sweep controls:
-#   QUICK_TEST, TOTAL_STEPS, ALPHAS, GAMMA_KLS, LAYER_CONFIGS, POLICIES
+#   QUICK_TEST, TOTAL_STEPS, ALPHAS, GAMMA_KLS, LOSS_MODES, LAYER_CONFIGS, POLICIES
 #
 # Eval/logging:
 #   LIMIT_EVAL, NUM_EXAMPLES, SHOW_EXAMPLES, VIS_CHECKPOINT_STEPS
 #
 # Core training:
-#   LOSS_MODE, LOSS_WEIGHTING, BATCH_SIZE, LEARNING_RATE, WARMUP_STEPS,
+#   LOSS_WEIGHTING, BATCH_SIZE, LEARNING_RATE, WARMUP_STEPS,
 #   MAX_SEQ_LENGTH, MAX_MODEL_LEN, DTYPE, LORA_R, LORA_ALPHA
 #
-# Triplet parameters:
-#   TRIPLET_ALPHA_BENIGN, TRIPLET_BETA_HARMFUL, TRIPLET_GAMMA_KL,
-#   TRIPLET_MARGIN_BENIGN, TRIPLET_MARGIN_HARMFUL,
-#   TRIPLET_BENIGN_POS_DISTANCE, TRIPLET_BENIGN_NEG_DISTANCE,
-#   TRIPLET_HARMFUL_POS_DISTANCE, TRIPLET_HARMFUL_NEG_DISTANCE,
+# Triplet/loss parameters:
+#   TRIPLET_ALPHA_BENIGN, TRIPLET_BETA_HARMFUL,
 #   TRIPLET_MIX_L2_WEIGHT, TRIPLET_MIX_COS_WEIGHT
 #
 # Pooling / mask:
@@ -166,24 +163,24 @@ LORA_ALPHA="${LORA_ALPHA:-32}"
 MAX_SEQ_LENGTH="${MAX_SEQ_LENGTH:-4096}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
 DTYPE="${DTYPE:-bfloat16}"
-LOSS_MODE="${LOSS_MODE:-triplet_full}"
 LOSS_WEIGHTING="${LOSS_WEIGHTING:-dual}"
 TRIPLET_ALPHA_BENIGN="${TRIPLET_ALPHA_BENIGN:-0.5}"
 TRIPLET_BETA_HARMFUL="${TRIPLET_BETA_HARMFUL:-0.4}"
-TRIPLET_GAMMA_KL="${TRIPLET_GAMMA_KL:-0.9}"
 TRIPLET_MIX_L2_WEIGHT="${TRIPLET_MIX_L2_WEIGHT:-0.5}"
 TRIPLET_MIX_COS_WEIGHT="${TRIPLET_MIX_COS_WEIGHT:-0.5}"
 
+# Loss mode sweep: comma-separated loss modes.
+# "l2_simple" uses L2 distance (non-vanishing gradients, works with LoRA).
+# "cosine_simple" has vanishing gradients when cos≈1 — broken with LoRA.
+# "triplet_full" uses margin-based triplet (hard to calibrate).
+LOSS_MODES="${LOSS_MODES:-l2_simple}"
+
 # Gamma KL sweep: comma-separated values for triplet_gamma_kl.
 # Scale depends on loss mode:
-#   cosine_simple: losses bounded [0,1], KL~7 → gamma_kl 0.05-1.0 gives good balance
+#   l2_simple:     losses bounded [0,1], KL~7 → gamma_kl 0.05-0.3
+#   cosine_simple: BROKEN with LoRA (vanishing gradients at cos≈1)
 #   triplet_full:  losses ~500-1500,   KL~7 → gamma_kl 50-200 needed
-GAMMA_KLS="${GAMMA_KLS:-0.1,0.3,1.0}"
-
-# Loss mode sweep: comma-separated loss modes.
-# "cosine_simple" is preferred — bounded losses, easier to calibrate.
-# "triplet_full" uses margin-based triplet (hard to calibrate with legacy pooling).
-LOSS_MODES="${LOSS_MODES:-cosine_simple}"
+GAMMA_KLS="${GAMMA_KLS:-0.05,0.1,0.3}"
 
 # Pooling presets: each is "name:pooling_mode:distance:margin_b:margin_h"
 # Multiple presets separated by spaces. Swept as innermost dimension.
@@ -1102,6 +1099,7 @@ for run_dir in "$SWEEP_DIR"/*/; do
         case "$_lm_tag" in
             tf) loss_mode_csv="triplet_full" ;;
             cs) loss_mode_csv="cosine_simple" ;;
+            l2) loss_mode_csv="l2_simple" ;;
             *) loss_mode_csv="$_lm_tag" ;;
         esac
     elif [[ "$run_name" =~ ^([a-zA-Z][a-zA-Z0-9]*)_a([0-9.]+)_g([0-9.]+)_l([0-9_]+)_(.+)$ ]]; then
@@ -1121,6 +1119,7 @@ for run_dir in "$SWEEP_DIR"/*/; do
         case "$_lm_tag" in
             tf) loss_mode_csv="triplet_full" ;;
             cs) loss_mode_csv="cosine_simple" ;;
+            l2) loss_mode_csv="l2_simple" ;;
             *) loss_mode_csv="$_lm_tag" ;;
         esac
     elif [[ "$run_name" =~ ^a([0-9.]+)_g([0-9.]+)_l([0-9_]+)_(.+)$ ]]; then

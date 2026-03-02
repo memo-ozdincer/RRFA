@@ -70,7 +70,8 @@ class CircuitBreakerConfig:
     # === Agentic Enhancements ===
     # Core loss objective:
     # - "triplet_full": triplet paper loss (benign triplet + harmful triplet + KL)
-    # - "cosine_simple": bounded cosine loss (ReLU(cos_sim) harmful + (1-cos_sim) benign + KL)
+    # - "cosine_simple": bounded cosine loss (has vanishing gradients with LoRA)
+    # - "l2_simple": L2-based bounded loss (non-vanishing gradients, works with LoRA)
     # - "legacy_schema": random reroute + benign CE (historical train_schema behavior)
     # - "legacy_cb": CB-style reroute ReLU + benign L2 (+ optional KL)
     loss_mode: str = "triplet_full"

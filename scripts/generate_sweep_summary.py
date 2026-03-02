@@ -44,7 +44,7 @@ def count_gibberish(paired_path: Path) -> tuple:
 
 def _lm_tag_to_name(tag: str) -> str:
     """Convert loss mode short tag to full name."""
-    return {"tf": "triplet_full", "cs": "cosine_simple"}.get(tag, tag)
+    return {"tf": "triplet_full", "cs": "cosine_simple", "l2": "l2_simple"}.get(tag, tag)
 
 
 def parse_run_name(name: str) -> dict:
