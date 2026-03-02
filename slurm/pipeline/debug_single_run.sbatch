@@ -13,7 +13,7 @@ set -euo pipefail
 # =============================================================================
 # DEBUG SINGLE RUN
 # =============================================================================
-# Mirrors sweep_hparams_simple.sbatch but runs ONE configuration only.
+# Mirrors sweep_hparams.sbatch but runs ONE configuration only.
 # Use this to quickly verify training produces coherent output.
 #
 # Usage:
@@ -69,11 +69,11 @@ export TRANSFORMERS_OFFLINE=1
 # Single Run Configuration
 # =============================================================================
 POOLING_MODE="${POOLING_MODE:-legacy}"
-POOLING_POLICY=cb_full_sequence
+POOLING_POLICY="${POOLING_POLICY:-}"
 POOLING_MASK_POLICY="${POOLING_MASK_POLICY:-auto}"
 ALPHA="${ALPHA:-10.0}"
 LAYERS="${LAYERS:-10,20}"  # alt: LAYERS=10,20 (use with PRESET=llama-3.1-8b-instruct-l1020)
-POLICY="${POLICY:-assistant_only}"  # alt: assistant_only
+POLICY="${POLICY:-cb_full_sequence}"  # alt: assistant_only
 TOTAL_STEPS="${TOTAL_STEPS:-100}"
 LIMIT_EVAL="${LIMIT_EVAL:-50}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
@@ -868,6 +868,10 @@ for key in ('baseline', 'cb_model'):
         print(f'AgentDojo Benign {label}: correct_tool={cor:.1%} no_tool={no:.1%}')
 " 2>/dev/null || echo "(parse error)"
 fi
+
+# Generate run summary
+python scripts/generate_run_summary.py --run-dir "$RUN_DIR" 2>&1 || echo "(summary generation failed)"
+echo "Run summary: $RUN_DIR/run_summary.txt"
 
 echo ""
 echo "Finished at: $(date)"

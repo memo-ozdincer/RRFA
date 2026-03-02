@@ -9,15 +9,21 @@
 #SBATCH --account=def-zhijing
 
 # =============================================================================
-# CANONICAL PIPELINE ENTRYPOINT (2/2): HPARAM SWEEP
+# CANONICAL PIPELINE ENTRYPOINT: HPARAM SWEEP
 # =============================================================================
 #
-# This is the only sweep script. It sweeps:
-#   - `POLICIES` (lossmask policy)
-#   - `LAYER_CONFIGS` (CB target layers)
-#   - `ALPHAS` (alpha_max for legacy schedules)
+# This is the sole sweep/entrypoint script (sweep_hparams_simple.sbatch was
+# merged into this file). It handles data auto-generation, ETL_B, training,
+# evaluation, and summary generation.
 #
-# For each configuration: ETL_B (policy) -> train -> eval.
+# Sweep dimensions:
+#   - POLICIES        (lossmask policy)
+#   - LAYER_CONFIGS   (CB target layers)
+#   - ALPHAS          (alpha_max for legacy schedules)
+#   - GAMMA_KLS       (triplet KL weight — stability tuning)
+#   - POOLING_PRESETS  (pooling mode / distance / margins)
+#
+# For each configuration: ETL_B (policy) -> train -> eval -> run_summary.
 # Datasets: Fujitsu B4 + AgentDojo (+ optional AgentHarm).
 #
 # -----------------------------------------------------------------------------
@@ -33,9 +39,9 @@
 #    ALPHAS=10.0 LAYER_CONFIGS=10,20 POLICIES=assistant_only \
 #    sbatch slurm/pipeline/sweep_hparams.sbatch
 #
-# 4) Policy-only sweep (fixed layers/alpha):
-#    ALPHAS=10.0 LAYER_CONFIGS=10,20 \
-#    POLICIES=assistant_only,assistant_and_tool,cb_full_sequence,tool_calls_only,completion_only \
+# 4) Stability-fix grid (gamma_kl sweep):
+#    ALPHAS="5.0,10.0" GAMMA_KLS="0.9,5.0,20.0" \
+#    POLICIES=cb_full_sequence TOTAL_STEPS=100 \
 #    sbatch slurm/pipeline/sweep_hparams.sbatch
 #
 # 5) Legacy loss sweep:
@@ -46,10 +52,10 @@
 # Config knobs (pass with `VAR=value sbatch ...`)
 # -----------------------------------------------------------------------------
 # Sweep controls:
-#   QUICK_TEST, TOTAL_STEPS, ALPHAS, LAYER_CONFIGS, POLICIES
+#   QUICK_TEST, TOTAL_STEPS, ALPHAS, GAMMA_KLS, LAYER_CONFIGS, POLICIES
 #
 # Eval/logging:
-#   LIMIT_EVAL, NUM_EXAMPLES, SHOW_EXAMPLES
+#   LIMIT_EVAL, NUM_EXAMPLES, SHOW_EXAMPLES, VIS_CHECKPOINT_STEPS
 #
 # Core training:
 #   LOSS_MODE, LOSS_WEIGHTING, BATCH_SIZE, LEARNING_RATE, WARMUP_STEPS,
@@ -61,6 +67,12 @@
 #   TRIPLET_BENIGN_POS_DISTANCE, TRIPLET_BENIGN_NEG_DISTANCE,
 #   TRIPLET_HARMFUL_POS_DISTANCE, TRIPLET_HARMFUL_NEG_DISTANCE,
 #   TRIPLET_MIX_L2_WEIGHT, TRIPLET_MIX_COS_WEIGHT
+#
+# Pooling / mask:
+#   POOLING_PRESETS, POOLING_POLICY, POOLING_MASK_POLICY
+#
+# Data generation:
+#   LIMIT_GEN (for generate_completions.py)
 # =============================================================================
 
 set -euo pipefail
@@ -160,18 +172,27 @@ TRIPLET_GAMMA_KL="${TRIPLET_GAMMA_KL:-0.9}"
 TRIPLET_MIX_L2_WEIGHT="${TRIPLET_MIX_L2_WEIGHT:-0.5}"
 TRIPLET_MIX_COS_WEIGHT="${TRIPLET_MIX_COS_WEIGHT:-0.5}"
 
+# Gamma KL sweep: comma-separated values for triplet_gamma_kl.
+# Higher values = stronger KL anchor (prevents model collapse/gibberish).
+# Default "0.9" preserves backward compat. Try "0.9,5.0,20.0" for stability grid.
+GAMMA_KLS="${GAMMA_KLS:-$TRIPLET_GAMMA_KL}"
+
 # Pooling presets: each is "name:pooling_mode:distance:margin_b:margin_h"
 # Multiple presets separated by spaces. Swept as innermost dimension.
-# Use POOLING_PRESETS env var to customize, or these defaults:
-POOLING_PRESETS="${POOLING_PRESETS:-legacy:legacy:dmix:500:1500}"
-POOLING_POLICY="${POOLING_POLICY:-}"
+POOLING_PRESETS="${POOLING_PRESETS:-m500:legacy:dmix:500:1500 m750:legacy:dmix:750:2250}"
+POOLING_POLICY="${POOLING_POLICY:-cb_full_sequence}"
 POOLING_MASK_POLICY="${POOLING_MASK_POLICY:-auto}"
 STOP_AFTER_ETL_B="${STOP_AFTER_ETL_B:-false}"
 STOP_AFTER_SPLIT="${STOP_AFTER_SPLIT:-false}"
 
+# Data generation params (for auto-generating missing DS/DR traces)
+LIMIT_GEN="${LIMIT_GEN:-5000}"
+VIS_CHECKPOINT_STEPS="${VIS_CHECKPOINT_STEPS:-50,100}"
+
 echo "Configuration:"
 echo "  TOTAL_STEPS: $TOTAL_STEPS"
 echo "  ALPHAS: $ALPHAS"
+echo "  GAMMA_KLS: $GAMMA_KLS"
 echo "  LAYER_CONFIGS: $LAYER_CONFIGS"
 echo "  POLICIES: $POLICIES"
 echo "  BATCH_SIZE: $BATCH_SIZE"
@@ -197,7 +218,45 @@ DS_TRACES="$TRACES_DIR/fujitsu_b4_ds.jsonl"
 DR_TRACES="$TRACES_DIR/fujitsu_b4_dr.jsonl"
 AGENTDOJO_TRACES="$TRACES_DIR/agentdojo_complete.jsonl"
 AGENTHARM_TRACES="$TRACES_DIR/agentharm_mixed.jsonl"
+FUJITSU_SKELETON="$TRACES_DIR/fujitsu_b4_skeletons.jsonl"
+TOOL_SCHEMA="configs/tool_schemas/b4_standard_v1.json"
+
 echo "Input traces (ALL used for training):"
+
+# Auto-generate missing Fujitsu DS/DR from skeletons if needed
+if [[ ! -f "$DS_TRACES" || ! -f "$DR_TRACES" ]]; then
+    if [[ -f "$FUJITSU_SKELETON" ]]; then
+        echo "  Auto-generating missing Fujitsu data..."
+        if [[ ! -f "$DS_TRACES" ]]; then
+            echo "    Generating DS (Harmful)..."
+            python src/data_generation/generate_completions.py \
+                --traces "$FUJITSU_SKELETON" \
+                --output "$DS_TRACES" \
+                --model "$TOKENIZER" \
+                --tool-schema "$TOOL_SCHEMA" \
+                --mode ds \
+                --temperature-ds 0.7 \
+                --strict-simulated-match true \
+                --use-vllm \
+                --limit "$LIMIT_GEN"
+        fi
+        if [[ ! -f "$DR_TRACES" ]]; then
+            echo "    Generating DR (Benign)..."
+            python src/data_generation/generate_completions.py \
+                --ds-data "$DS_TRACES" \
+                --output "$DR_TRACES" \
+                --model "$TOKENIZER" \
+                --tool-schema "$TOOL_SCHEMA" \
+                --mode dr \
+                --temperature-dr 0.3 \
+                --use-vllm \
+                --limit "$LIMIT_GEN"
+        fi
+    else
+        echo "  WARNING: Fujitsu skeleton not found at $FUJITSU_SKELETON"
+    fi
+fi
+
 for trace in "$DS_TRACES" "$DR_TRACES"; do
     if [[ -f "$trace" ]]; then
         echo "  ✓ $(basename "$trace"): $(wc -l < "$trace") lines"
@@ -293,15 +352,18 @@ echo ""
 count_configs() {
     local count=0
     IFS=',' read -ra ALPHA_ARRAY <<< "$ALPHAS"
+    IFS=',' read -ra GAMMA_KL_ARRAY <<< "$GAMMA_KLS"
     IFS='|' read -ra LAYER_ARRAY <<< "$LAYER_CONFIGS"
     IFS=',' read -ra POLICY_ARRAY <<< "$POLICIES"
     read -ra PRESET_ARRAY <<< "$POOLING_PRESETS"
 
-    for alpha in "${ALPHA_ARRAY[@]}"; do
-        for layers in "${LAYER_ARRAY[@]}"; do
-            for policy in "${POLICY_ARRAY[@]}"; do
-                for _p in "${PRESET_ARRAY[@]}"; do
-                    count=$((count + 1))
+    for _a in "${ALPHA_ARRAY[@]}"; do
+        for _g in "${GAMMA_KL_ARRAY[@]}"; do
+            for _l in "${LAYER_ARRAY[@]}"; do
+                for _pol in "${POLICY_ARRAY[@]}"; do
+                    for _p in "${PRESET_ARRAY[@]}"; do
+                        count=$((count + 1))
+                    done
                 done
             done
         done
@@ -323,6 +385,7 @@ success_count=0
 fail_count=0
 
 IFS=',' read -ra ALPHA_ARRAY <<< "$ALPHAS"
+IFS=',' read -ra GAMMA_KL_ARRAY <<< "$GAMMA_KLS"
 IFS='|' read -ra LAYER_ARRAY <<< "$LAYER_CONFIGS"
 IFS=',' read -ra POLICY_ARRAY <<< "$POLICIES"
 read -ra PRESET_ARRAY <<< "$POOLING_PRESETS"
@@ -330,30 +393,23 @@ read -ra PRESET_ARRAY <<< "$POOLING_PRESETS"
 for policy in "${POLICY_ARRAY[@]}"; do
     for layers in "${LAYER_ARRAY[@]}"; do
         for alpha in "${ALPHA_ARRAY[@]}"; do
-            # Create base name (without preset) for ETL_B sharing
+            # Create base name for ETL_B sharing (shared across gamma_kl + presets)
             layers_short="${layers//,/_}"
             BASE_NAME="a${alpha}_l${layers_short}_${policy}"
             BASE_DIR="$SWEEP_DIR/$BASE_NAME"
 
-            # For single-preset runs, use flat naming; multi-preset sets RUN_NAME in preset loop
-            if [[ ${#PRESET_ARRAY[@]} -eq 1 ]]; then
-                RUN_NAME="$BASE_NAME"
-            else
-                RUN_NAME="$BASE_NAME"  # placeholder, overridden per preset below
-            fi
-
-            run_idx=$((run_idx + 1))
+            RUN_NAME="$BASE_NAME"
             RUN_DIR="$BASE_DIR"
 
             echo "========================================"
-            echo "[$run_idx/$TOTAL_RUNS] $RUN_NAME"
+            echo "ETL_B: $RUN_NAME"
             echo "========================================"
             echo "  Alpha: $alpha"
             echo "  Layers: $layers"
             echo "  Policy: $policy"
             echo "  Output: $RUN_DIR"
             echo ""
-            
+
             mkdir -p "$RUN_DIR"/{renders,lossmasks,model,eval}
             
             # =====================================================
@@ -458,19 +514,37 @@ print(total)
                 exit 0
             fi
             
-            # Parse layers to array (shared by all presets)
+            # Parse layers to array (shared by all presets and gamma_kl values)
             IFS=',' read -ra CB_LAYER_ARRAY <<< "$layers"
 
+            for gamma_kl in "${GAMMA_KL_ARRAY[@]}"; do
             for preset_str in "${PRESET_ARRAY[@]}"; do
             # Parse preset: name:pooling_mode:distance:margin_b:margin_h
             IFS=':' read -r _PNAME _PMODE _PDIST _PMB _PMH <<< "$preset_str"
 
-            # Adjust run dir for multi-preset sweeps
-            if [[ ${#PRESET_ARRAY[@]} -gt 1 ]]; then
-                RUN_NAME="${_PNAME}_a${alpha}_l${layers_short}_${policy}"
+            # Build run name: include gamma_kl and preset as needed
+            # Format: [preset_]a{alpha}_g{gamma}_l{layers}_{policy}
+            _RUN_CORE="a${alpha}_g${gamma_kl}_l${layers_short}_${policy}"
+            if [[ ${#PRESET_ARRAY[@]} -gt 1 || ${#GAMMA_KL_ARRAY[@]} -gt 1 ]]; then
+                RUN_NAME="${_PNAME}_${_RUN_CORE}"
+                RUN_DIR="$SWEEP_DIR/$RUN_NAME"
+                mkdir -p "$RUN_DIR"/{model,eval}
+            else
+                RUN_NAME="$_RUN_CORE"
                 RUN_DIR="$SWEEP_DIR/$RUN_NAME"
                 mkdir -p "$RUN_DIR"/{model,eval}
             fi
+
+            run_idx=$((run_idx + 1))
+            echo ""
+            echo "========================================"
+            echo "[$run_idx/$TOTAL_RUNS] $RUN_NAME"
+            echo "========================================"
+            echo "  Alpha: $alpha  Gamma KL: $gamma_kl"
+            echo "  Layers: $layers  Policy: $policy"
+            echo "  Preset: $_PNAME (${_PMODE}/${_PDIST}/${_PMB}/${_PMH})"
+            echo "  Output: $RUN_DIR"
+            echo ""
 
             # =====================================================
             # Save run configuration
@@ -495,7 +569,7 @@ print(total)
   "pooling_mask_policy": "$POOLING_MASK_POLICY",
   "triplet_alpha_benign": $TRIPLET_ALPHA_BENIGN,
   "triplet_beta_harmful": $TRIPLET_BETA_HARMFUL,
-  "triplet_gamma_kl": $TRIPLET_GAMMA_KL,
+  "triplet_gamma_kl": $gamma_kl,
   "lora_r": $LORA_R,
   "lora_alpha": $LORA_ALPHA,
   "model": "$TOKENIZER",
@@ -509,10 +583,10 @@ RUNCFG
             # =====================================================
             # Step 3: Training
             # =====================================================
-            echo "Step 3: Training with alpha=$alpha, layers=$layers, policy=$policy, preset=$_PNAME (${_PMODE}/${_PDIST}/${_PMB}/${_PMH})"
+            echo "Step 3: Training with alpha=$alpha, gamma_kl=$gamma_kl, layers=$layers, policy=$policy, preset=$_PNAME (${_PMODE}/${_PDIST}/${_PMB}/${_PMH})"
 
-            # NOTE: Renders/lossmasks/splits live in BASE_DIR (shared across presets).
-            # RUN_DIR may differ from BASE_DIR for multi-preset sweeps.
+            # NOTE: Renders/lossmasks/splits live in BASE_DIR (shared across presets/gamma_kl).
+            # RUN_DIR may differ from BASE_DIR for multi-config sweeps.
             HARMFUL_RENDER_ARGS=(
                 "$BASE_DIR/renders/fujitsu_b4_ds.jsonl"
                 "$SPLIT_DIR/agentdojo_renders_harmful.jsonl"
@@ -557,7 +631,7 @@ RUNCFG
                 --loss-weighting "$LOSS_WEIGHTING"
                 --triplet-alpha-benign "$TRIPLET_ALPHA_BENIGN"
                 --triplet-beta-harmful "$TRIPLET_BETA_HARMFUL"
-                --triplet-gamma-kl "$TRIPLET_GAMMA_KL"
+                --triplet-gamma-kl "$gamma_kl"
                 --triplet-margin-benign "$_PMB"
                 --triplet-margin-harmful "$_PMH"
                 --triplet-benign-positive-distance "$_PDIST"
@@ -935,7 +1009,11 @@ for key in ('baseline', 'cb_model'):
             fi
             echo ""
 
+            # Generate per-run summary
+            python scripts/generate_run_summary.py --run-dir "$RUN_DIR" 2>&1 || echo "(run summary generation failed)"
+
             done  # preset loop
+            done  # gamma_kl loop
 
         done  # alpha loop
     done  # layers loop
@@ -958,15 +1036,29 @@ echo ""
 
 # Generate summary CSV
 SUMMARY_CSV="$SWEEP_DIR/summary.csv"
-echo "preset,alpha,layers,policy,fujitsu_baseline_asr,fujitsu_cb_asr,fujitsu_delta,fujitsu_cb_correct_rate,fujitsu_cb_no_tool_rate,fujitsu_cb_other_tool_rate,fujitsu_gibberish_rate,agentdojo_diff,agentdojo_cb_malicious_rate,agentdojo_cb_harmful_resist,agentdojo_gibberish_rate,agentdojo_benign_correct_rate,agentdojo_benign_no_tool_rate,status" > "$SUMMARY_CSV"
+echo "preset,alpha,gamma_kl,layers,policy,fujitsu_baseline_asr,fujitsu_cb_asr,fujitsu_delta,fujitsu_cb_correct_rate,fujitsu_cb_no_tool_rate,fujitsu_cb_other_tool_rate,fujitsu_gibberish_rate,agentdojo_diff,agentdojo_cb_malicious_rate,agentdojo_cb_harmful_resist,agentdojo_gibberish_rate,agentdojo_benign_correct_rate,agentdojo_benign_no_tool_rate,status" > "$SUMMARY_CSV"
 
 for run_dir in "$SWEEP_DIR"/*/; do
     [[ -d "$run_dir" ]] || continue
     run_name=$(basename "$run_dir")
 
-    # Extract preset (if present, it's the first segment before _a)
-    # Formats: "preset_a10.0_l10_20_policy" or "a10.0_l10_20_policy" (single preset)
-    if [[ "$run_name" =~ ^([a-zA-Z][a-zA-Z0-9]*)_a([0-9.]+)_l([0-9_]+)_(.+)$ ]]; then
+    # Extract config from run directory name.
+    # New format: "preset_a10.0_g5.0_l10_20_policy" or "a10.0_g5.0_l10_20_policy"
+    # Legacy format: "preset_a10.0_l10_20_policy" or "a10.0_l10_20_policy"
+    gamma_kl_csv="0.9"  # default for legacy dirs
+    if [[ "$run_name" =~ ^([a-zA-Z][a-zA-Z0-9]*)_a([0-9.]+)_g([0-9.]+)_l([0-9_]+)_(.+)$ ]]; then
+        preset="${BASH_REMATCH[1]}"
+        alpha="${BASH_REMATCH[2]}"
+        gamma_kl_csv="${BASH_REMATCH[3]}"
+        layers="${BASH_REMATCH[4]//\_/,}"
+        policy="${BASH_REMATCH[5]}"
+    elif [[ "$run_name" =~ ^a([0-9.]+)_g([0-9.]+)_l([0-9_]+)_(.+)$ ]]; then
+        preset="default"
+        alpha="${BASH_REMATCH[1]}"
+        gamma_kl_csv="${BASH_REMATCH[2]}"
+        layers="${BASH_REMATCH[3]//\_/,}"
+        policy="${BASH_REMATCH[4]}"
+    elif [[ "$run_name" =~ ^([a-zA-Z][a-zA-Z0-9]*)_a([0-9.]+)_l([0-9_]+)_(.+)$ ]]; then
         preset="${BASH_REMATCH[1]}"
         alpha="${BASH_REMATCH[2]}"
         layers="${BASH_REMATCH[3]//\_/,}"
@@ -978,6 +1070,12 @@ for run_dir in "$SWEEP_DIR"/*/; do
         policy="${BASH_REMATCH[3]}"
     else
         continue
+    fi
+
+    # Try to get gamma_kl from run_config.json (more reliable than name parsing)
+    if [[ -f "$run_dir/run_config.json" ]]; then
+        _cfg_gamma=$(python3 -c "import json; print(json.load(open('${run_dir}run_config.json')).get('triplet_gamma_kl', '$gamma_kl_csv'))" 2>/dev/null || echo "$gamma_kl_csv")
+        gamma_kl_csv="$_cfg_gamma"
     fi
 
     # Defaults
@@ -1043,7 +1141,7 @@ print(gc.get('correct_tool_call_rate','N/A'), gc.get('no_tool_call_rate','N/A'))
 " 2>/dev/null || echo "N/A N/A")
     fi
 
-    echo "$preset,$alpha,$layers,$policy,$fujitsu_baseline,$fujitsu_cb,$fujitsu_delta,$fujitsu_cb_correct,$fujitsu_cb_no_tool,$fujitsu_cb_other_tool,$fujitsu_gib,$agentdojo_diff,$agentdojo_cb_mal,$agentdojo_harmful_resist,$agentdojo_gib,$agentdojo_benign_correct,$agentdojo_benign_no_tool,$status" >> "$SUMMARY_CSV"
+    echo "$preset,$alpha,$gamma_kl_csv,$layers,$policy,$fujitsu_baseline,$fujitsu_cb,$fujitsu_delta,$fujitsu_cb_correct,$fujitsu_cb_no_tool,$fujitsu_cb_other_tool,$fujitsu_gib,$agentdojo_diff,$agentdojo_cb_mal,$agentdojo_harmful_resist,$agentdojo_gib,$agentdojo_benign_correct,$agentdojo_benign_no_tool,$status" >> "$SUMMARY_CSV"
 done
 
 echo "Summary CSV: $SUMMARY_CSV"
@@ -1081,7 +1179,7 @@ try:
             ad_mal = r.get('agentdojo_cb_malicious_rate', 'N/A')
             ad_res = r.get('agentdojo_cb_harmful_resist', 'N/A')
             ad_gib = r.get('agentdojo_gibberish_rate', 'N/A')
-            print(f'#{rank} {r[\"preset\"]} a={r[\"alpha\"]} l={r[\"layers\"]} {r[\"policy\"]}')
+            print(f'#{rank} {r[\"preset\"]} a={r[\"alpha\"]} g={r.get(\"gamma_kl\",\"?\")} l={r[\"layers\"]} {r[\"policy\"]}')
             benign_cor = r.get('agentdojo_benign_correct_rate', 'N/A')
             benign_no = r.get('agentdojo_benign_no_tool_rate', 'N/A')
             print(f'   Fujitsu: ASR={asr:.1%} correct={r.get(\"fujitsu_cb_correct_rate\",\"N/A\")} no_tool={r.get(\"fujitsu_cb_no_tool_rate\",\"N/A\")} gibberish={gib_str}')
@@ -1099,5 +1197,17 @@ echo ""
 echo "Generating tradeoff visualizations..."
 python "$REPO_DIR/scripts/plot_tradeoff.py" --sweep-dir "$SWEEP_DIR" --output "$SWEEP_DIR/plots" 2>&1 || echo "(plot generation skipped - install matplotlib for plots)"
 
+# =============================================================================
+# Sweep Summary (aggregates all run summaries)
+# =============================================================================
+echo ""
+echo "Generating sweep summary..."
+python scripts/generate_sweep_summary.py --sweep-dir "$SWEEP_DIR" 2>&1 || echo "(sweep summary generation failed)"
+
+echo ""
+echo "Checkpoint-aware visualization command:"
+echo "  python scripts/visualize_sweep_results.py \"$SWEEP_DIR\" \\"
+echo "    --compare-checkpoints --checkpoint-steps \"$VIS_CHECKPOINT_STEPS\" --no-color \\"
+echo "    --csv \"$SWEEP_DIR/eval_summary.csv\""
 echo ""
 echo "Finished at: $(date)"
