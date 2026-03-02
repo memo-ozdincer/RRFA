@@ -1791,6 +1791,20 @@ class CircuitBreakerTrainer:
         # Backward pass (SINGLE backward through combined graph)
         self.accelerator.backward(total_loss)
 
+        # Gradient diagnostics (BEFORE clipping/zero_grad so we see real gradients)
+        if self.global_step % 50 == 0 and self.accelerator.is_main_process:
+            grad_stats = self._compute_gradient_stats()
+            metrics.update(grad_stats)
+            gnorm = grad_stats.get('grad_norm_total', 0)
+            if gnorm < 1e-8:
+                self.accelerator.print(
+                    f"  WARNING: grad_norm={gnorm:.2e} (zero gradients!)"
+                )
+            else:
+                self.accelerator.print(
+                    f"  grad_norm={gnorm:.4f}"
+                )
+
         # Gradient clipping
         if self.config.max_grad_norm > 0:
             self.accelerator.clip_grad_norm_(
@@ -1817,22 +1831,6 @@ class CircuitBreakerTrainer:
             if reroute_metrics.get('target_type') != 'frozen_baseline':
                 self.accelerator.print(
                     f"  WARNING: Unexpected reroute target type: {reroute_metrics.get('target_type')}"
-                )
-
-        # Gradient diagnostics (every 50 steps on main process)
-        if self.global_step % 50 == 1 and self.accelerator.is_main_process:
-            grad_stats = self._compute_gradient_stats()
-            metrics.update(grad_stats)
-            if grad_stats.get('grad_norm_total', 0) < 1e-8:
-                self.accelerator.print(
-                    f"  WARNING: Very small gradients detected! "
-                    f"grad_norm={grad_stats.get('grad_norm_total', 0):.2e}"
-                )
-            if reroute_metrics is not None:
-                self.accelerator.print(
-                    f"  Reroute metrics: cos_sim_mean={reroute_metrics['cos_sim_mean']:.4f}, "
-                    f"positive_frac={reroute_metrics['cos_sim_positive_frac']:.2%}, "
-                    f"target={reroute_metrics['target_type']}"
                 )
 
         return metrics
