@@ -1146,8 +1146,8 @@ class CircuitBreakerTrainer:
         benign_mask: torch.Tensor,
         current_mode: str,
     ) -> None:
-        """Log pooling diagnostic at step 0, comparing legacy vs correct modes."""
-        modes = ["legacy", "correct"]
+        """Log pooling diagnostic at step 0."""
+        modes = [current_mode]
         results: Dict[str, Dict[str, torch.Tensor]] = {}
 
         with torch.no_grad():
@@ -1197,41 +1197,25 @@ class CircuitBreakerTrainer:
                 d_mix = 0.5 * d_l2 + 0.5 * d_cos
                 self.accelerator.print(f"      {label:25s}  L2={d_l2:10.2f}  cos={d_cos:.4f}  mix={d_mix:10.2f}  ({role})")
 
-        # Suggest margins for correct mode by scaling from current legacy margins
-        # At step 0, new==old so d_pos/d_neg are 0. Use inter-class distance ratio instead.
-        lvecs = results["legacy"]
-        cvecs = results["correct"]
+        # Inter-class distance diagnostic
+        vecs = results[current_mode]
 
-        # Inter-class distance: d(benign, harmful) — the main separation signal
         def _dmix(a: torch.Tensor, b: torch.Tensor) -> float:
             d_l2 = torch.norm(a - b, p=2, dim=-1).mean().item()
             d_cos = (1.0 - F.cosine_similarity(a, b, dim=-1, eps=1e-8)).mean().item()
             return 0.5 * d_l2 + 0.5 * d_cos
 
-        legacy_sep = _dmix(lvecs["b_new"], lvecs["h_new"])
-        correct_sep = _dmix(cvecs["b_new"], cvecs["h_new"])
-
-        cur_margin_b = self.config.triplet_margin_benign
-        cur_margin_h = self.config.triplet_margin_harmful
-
-        # Also compute cosine-only inter-class separation
         def _dcos(a: torch.Tensor, b: torch.Tensor) -> float:
             return (1.0 - F.cosine_similarity(a, b, dim=-1, eps=1e-8)).mean().item()
 
-        correct_cos_sep = _dcos(cvecs["b_new"], cvecs["h_new"])
+        sep = _dmix(vecs["b_new"], vecs["h_new"])
+        cos_sep = _dcos(vecs["b_new"], vecs["h_new"])
+        cur_margin_b = self.config.triplet_margin_benign
+        cur_margin_h = self.config.triplet_margin_harmful
 
-        self.accelerator.print(f"\n  SUGGESTED MARGINS for pooling_mode=correct:")
-        if legacy_sep > 1e-6:
-            scale = correct_sep / legacy_sep
-            sug_b = cur_margin_b * scale
-            sug_h = cur_margin_h * scale
-            self.accelerator.print(f"    Inter-class separation:  legacy_dmix={legacy_sep:.2f}  correct_dmix={correct_sep:.2f}  correct_cos={correct_cos_sep:.4f}")
-            self.accelerator.print(f"    Current margins:  benign={cur_margin_b}  harmful={cur_margin_h}")
-            self.accelerator.print(f"    Scaled dmix margins:  benign~{sug_b:.1f}  harmful~{sug_h:.1f}")
-            self.accelerator.print(f"    Recommended dcos margins:  benign~{2.5*correct_cos_sep:.2f}  harmful~{7*correct_cos_sep:.2f}  (2.5x/7x cos_sep)")
-        else:
-            self.accelerator.print(f"    WARNING: legacy inter-class separation ~0, cannot compute ratio")
-            self.accelerator.print(f"    correct inter-class sep={correct_sep:.4f}")
+        self.accelerator.print(f"\n  INTER-CLASS SEPARATION (pooling_mode={current_mode}):")
+        self.accelerator.print(f"    dmix={sep:.2f}  cos_dist={cos_sep:.4f}")
+        self.accelerator.print(f"    Current margins:  benign={cur_margin_b}  harmful={cur_margin_h}")
         self.accelerator.print("=" * 70 + "\n")
 
     def _compute_gradient_stats(self) -> Dict[str, float]:
