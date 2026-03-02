@@ -14,7 +14,7 @@ from pathlib import Path
 class LoRAConfig:
     """LoRA adapter configuration."""
     r: int = 16                          # LoRA rank
-    alpha: int = 32                      # LoRA alpha (scaling factor)
+    alpha: int = 16                      # LoRA alpha (paper: alpha=rank=16)
     dropout: float = 0.05                # LoRA dropout
     target_modules: List[str] = field(default_factory=lambda: [
         "q_proj", "k_proj", "v_proj", "o_proj",
@@ -90,9 +90,9 @@ class CircuitBreakerConfig:
     triplet_mix_cos_weight: float = 0.5
 
     # Pooling mode for representation aggregation before triplet loss:
-    # - "legacy": Buggy broadcasting (mask along H dim when T==H). Margins 500/1500 tuned for this.
-    # - "correct": Proper token masking via unsqueeze(-1). Needs re-tuned margins (~10-100 range).
-    pooling_mode: str = "legacy"
+    # - "correct": Proper token masking via unsqueeze(-1). Paper uses this (implicitly).
+    # - "legacy": Buggy broadcasting (mask along H dim when T==H). Historical artifact.
+    pooling_mode: str = "correct"
 
     # Pooling mask policy: controls which mask is used for representation pooling.
     # - "auto": use pooling_mask from data if present, else fall back to loss_mask (Phase 1)
@@ -127,10 +127,10 @@ class CircuitBreakerConfig:
     kl_temperature: float = 1.0
 
     # === Training ===
-    total_steps: int = 300               # Training steps (scaled up for larger model)
-    batch_size: int = 16                 # Per-GPU batch size (8 harmful + 8 benign)
+    total_steps: int = 1100              # Paper: 1100 steps
+    batch_size: int = 16                 # Paper: batch_size=16
     gradient_accumulation_steps: int = 1 # Effective batch = batch_size * grad_accum * num_gpus
-    learning_rate: float = 2e-5          # Lower LR for larger model
+    learning_rate: float = 1e-5          # Paper: 1e-5
     warmup_steps: int = 20
     weight_decay: float = 0.01
     max_grad_norm: float = 1.0
@@ -172,76 +172,59 @@ class CircuitBreakerConfig:
 @dataclass
 class CircuitBreakerConfigLlama3_8B(CircuitBreakerConfig):
     """Preset configuration for Llama-3-8B-Instruct (paper baseline).
-    Default layers: 4, 8, 14 (shallow-to-mid range for 32-layer model).
-    Alternative: use CircuitBreakerConfigLlama3_8B_L1020 for layers 10, 20."""
+
+    Paper (TRIPLET.tex appendix): layers 20-31 for CB representations,
+    LoRA r=16 alpha=16, LR=1e-5, 1100 steps, batch_size=16, d_mix for all distances.
+    Llama 3 8B has 32 layers (0-31)."""
     base_model: str = "meta-llama/Meta-Llama-3-8B-Instruct"
-    cb_target_layers: List[int] = field(default_factory=lambda: [4, 8, 14])
+    cb_target_layers: List[int] = field(default_factory=lambda: list(range(20, 32)))
     lora: LoRAConfig = field(default_factory=lambda: LoRAConfig(
-        target_layers=list(range(0, 21))
+        alpha=16,
+        target_layers=list(range(0, 32))  # All 32 layers
     ))
     alpha_max: float = 10.0
-    total_steps: int = 150
-    learning_rate: float = 5e-5
+    total_steps: int = 1100
+    learning_rate: float = 1e-5
     beta_kl: float = 0.5
-
-
-@dataclass
-class CircuitBreakerConfigLlama3_8B_L1020(CircuitBreakerConfigLlama3_8B):
-    """Llama-3-8B-Instruct with layers 10, 20 (paper-style semantic layers)."""
-    cb_target_layers: List[int] = field(default_factory=lambda: [10, 20])
 
 
 @dataclass
 class CircuitBreakerConfigLlama3_1_8B_Instruct(CircuitBreakerConfig):
     """Preset configuration for meta-llama/Llama-3.1-8B-Instruct.
-    Default layers: 4, 8, 14 (shallow-to-mid range for 32-layer model).
-    Alternative: use CircuitBreakerConfigLlama3_1_8B_Instruct_L1020 for layers 10, 20.
 
-    Llama 3.1 8B has 32 layers (0-31).
-    CB target layers = where triplet loss extracts representations.
-    NOTE: Shallow layers (4, 8) may disrupt tool-call formatting — CB training
-    modifies representation geometry, which at shallow layers can break the
-    model's ability to emit structured <|python_tag|>{"name":...} output.
-    Layers 10, 20 are proven working (semantic decision layers)."""
+    Paper (TRIPLET.tex appendix): layers 20-31 for CB representations,
+    LoRA r=16 alpha=16, LR=1e-5, 1100 steps, batch_size=16, d_mix for all distances.
+    Llama 3.1 8B has 32 layers (0-31), same architecture as Llama 3 8B."""
     base_model: str = "meta-llama/Llama-3.1-8B-Instruct"
-    cb_target_layers: List[int] = field(default_factory=lambda: [4, 8, 14])
+    cb_target_layers: List[int] = field(default_factory=lambda: list(range(20, 32)))
 
     lora: LoRAConfig = field(default_factory=lambda: LoRAConfig(
-        target_layers=list(range(0, 21))
+        alpha=16,
+        target_layers=list(range(0, 32))  # All 32 layers
     ))
 
     alpha_max: float = 10.0
-    total_steps: int = 150
-    learning_rate: float = 5e-5
+    total_steps: int = 1100
+    learning_rate: float = 1e-5
     beta_kl: float = 0.5
-
-
-@dataclass
-class CircuitBreakerConfigLlama3_1_8B_Instruct_L1020(CircuitBreakerConfigLlama3_1_8B_Instruct):
-    """Llama-3.1-8B-Instruct with layers 10, 20 (paper-style semantic layers)."""
-    cb_target_layers: List[int] = field(default_factory=lambda: [10, 20])
 
 
 @dataclass
 class CircuitBreakerConfigMistral_7B(CircuitBreakerConfig):
     """Preset configuration for Mistral-7B-Instruct.
-    Default layers: 4, 8, 14 (shallow-to-mid range for 32-layer model).
-    Alternative: use CircuitBreakerConfigMistral_7B_L1020 for layers 10, 20."""
+
+    Paper uses same hyperparameters as Llama 3 8B.
+    Mistral 7B v0.2 has 32 layers (0-31)."""
     base_model: str = "mistralai/Mistral-7B-Instruct-v0.3"
-    cb_target_layers: List[int] = field(default_factory=lambda: [4, 8, 14])
+    cb_target_layers: List[int] = field(default_factory=lambda: list(range(20, 32)))
     lora: LoRAConfig = field(default_factory=lambda: LoRAConfig(
-        target_layers=list(range(0, 21))
+        alpha=16,
+        target_layers=list(range(0, 32))
     ))
     alpha_max: float = 5.0
-    total_steps: int = 150
-    learning_rate: float = 5e-5
+    total_steps: int = 1100
+    learning_rate: float = 1e-5
     beta_kl: float = 0.5
-
-
-@dataclass
-class CircuitBreakerConfigMistral_7B_L1020(CircuitBreakerConfigMistral_7B):
-    """Mistral-7B-Instruct with layers 10, 20 (paper-style semantic layers)."""
-    cb_target_layers: List[int] = field(default_factory=lambda: [10, 20])
 
 
 @dataclass  
@@ -260,7 +243,7 @@ class CircuitBreakerConfigLlama4Scout(CircuitBreakerConfig):
     # MoE-specific: include router weights
     lora: LoRAConfig = field(default_factory=lambda: LoRAConfig(
         r=16,
-        alpha=32,
+        alpha=16,
         dropout=0.05,
         target_modules=[
             "q_proj", "k_proj", "v_proj", "o_proj",  # Attention
@@ -288,15 +271,9 @@ class CircuitBreakerConfigLlama4Scout(CircuitBreakerConfig):
 
 CONFIG_PRESETS = {
     "llama-4-scout": CircuitBreakerConfigLlama4Scout,
-    # Llama-3-8B: layers 4,8,14 (default) or 10,20
     "llama-3-8b": CircuitBreakerConfigLlama3_8B,
-    "llama-3-8b-l1020": CircuitBreakerConfigLlama3_8B_L1020,
-    # Llama-3.1-8B-Instruct: layers 4,8,14 (default) or 10,20
     "llama-3.1-8b-instruct": CircuitBreakerConfigLlama3_1_8B_Instruct,
-    "llama-3.1-8b-instruct-l1020": CircuitBreakerConfigLlama3_1_8B_Instruct_L1020,
-    # Mistral-7B: layers 4,8,14 (default) or 10,20
     "mistral-7b": CircuitBreakerConfigMistral_7B,
-    "mistral-7b-l1020": CircuitBreakerConfigMistral_7B_L1020,
     "default": CircuitBreakerConfig,
 }
 
@@ -306,9 +283,8 @@ def get_config(preset: str = "llama-4-scout", **overrides) -> CircuitBreakerConf
     Get a configuration preset with optional overrides.
     
     Args:
-        preset: One of "llama-4-scout", "llama-3-8b", "llama-3-8b-l1020",
-                "llama-3.1-8b-instruct", "llama-3.1-8b-instruct-l1020",
-                "mistral-7b", "mistral-7b-l1020", "default"
+        preset: One of "llama-4-scout", "llama-3-8b",
+                "llama-3.1-8b-instruct", "mistral-7b", "default"
         **overrides: Any config fields to override
     
     Returns:

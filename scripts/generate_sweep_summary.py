@@ -53,7 +53,7 @@ def parse_run_name(name: str) -> dict:
               "loss_mode": "triplet_full", "layers": "?", "policy": "?"}
 
     # With loss mode tag + preset: preset_a10.0_g5.0_tf_l10_20_policy
-    m = re.match(r"^([a-zA-Z][a-zA-Z0-9]*)_a([\d.]+)_g([\d.]+)_([a-z]{2})_l([\d_]+)_(.+)$", name)
+    m = re.match(r"^([a-zA-Z][a-zA-Z0-9]*)_a([\d.]+)_g([\d.]+)_([a-z]{2})_l([\d_\-]+)_(.+)$", name)
     if m:
         result["preset"] = m.group(1)
         result["alpha"] = m.group(2)
@@ -64,7 +64,7 @@ def parse_run_name(name: str) -> dict:
         return result
 
     # With loss mode tag, no preset: a10.0_g5.0_tf_l10_20_policy
-    m = re.match(r"^a([\d.]+)_g([\d.]+)_([a-z]{2})_l([\d_]+)_(.+)$", name)
+    m = re.match(r"^a([\d.]+)_g([\d.]+)_([a-z]{2})_l([\d_\-]+)_(.+)$", name)
     if m:
         result["alpha"] = m.group(1)
         result["gamma_kl"] = m.group(2)
@@ -74,7 +74,7 @@ def parse_run_name(name: str) -> dict:
         return result
 
     # With gamma, no loss mode tag: preset_a10.0_g5.0_l10_20_policy
-    m = re.match(r"^([a-zA-Z][a-zA-Z0-9]*)_a([\d.]+)_g([\d.]+)_l([\d_]+)_(.+)$", name)
+    m = re.match(r"^([a-zA-Z][a-zA-Z0-9]*)_a([\d.]+)_g([\d.]+)_l([\d_\-]+)_(.+)$", name)
     if m:
         result["preset"] = m.group(1)
         result["alpha"] = m.group(2)
@@ -84,7 +84,7 @@ def parse_run_name(name: str) -> dict:
         return result
 
     # No preset, with gamma: a10.0_g5.0_l10_20_policy
-    m = re.match(r"^a([\d.]+)_g([\d.]+)_l([\d_]+)_(.+)$", name)
+    m = re.match(r"^a([\d.]+)_g([\d.]+)_l([\d_\-]+)_(.+)$", name)
     if m:
         result["alpha"] = m.group(1)
         result["gamma_kl"] = m.group(2)
@@ -93,7 +93,7 @@ def parse_run_name(name: str) -> dict:
         return result
 
     # Legacy with preset: preset_a10.0_l10_20_policy
-    m = re.match(r"^([a-zA-Z][a-zA-Z0-9]*)_a([\d.]+)_l([\d_]+)_(.+)$", name)
+    m = re.match(r"^([a-zA-Z][a-zA-Z0-9]*)_a([\d.]+)_l([\d_\-]+)_(.+)$", name)
     if m:
         result["preset"] = m.group(1)
         result["alpha"] = m.group(2)
@@ -102,7 +102,7 @@ def parse_run_name(name: str) -> dict:
         return result
 
     # Legacy without preset: a10.0_l10_20_policy
-    m = re.match(r"^a([\d.]+)_l([\d_]+)_(.+)$", name)
+    m = re.match(r"^a([\d.]+)_l([\d_\-]+)_(.+)$", name)
     if m:
         result["alpha"] = m.group(1)
         result["layers"] = m.group(2).replace("_", ",")

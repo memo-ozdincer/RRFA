@@ -69,21 +69,21 @@ export TQDM_DISABLE=1
 # =============================================================================
 # Single Run Configuration
 # =============================================================================
-POOLING_MODE="${POOLING_MODE:-legacy}"
+POOLING_MODE="${POOLING_MODE:-correct}"
 POOLING_POLICY="${POOLING_POLICY:-}"
 POOLING_MASK_POLICY="${POOLING_MASK_POLICY:-auto}"
 ALPHA="${ALPHA:-10.0}"
-LAYERS="${LAYERS:-10,20}"  # alt: LAYERS=10,20 (use with PRESET=llama-3.1-8b-instruct-l1020)
+LAYERS="${LAYERS:-20,21,22,23,24,25,26,27,28,29,30,31}"  # Paper: layers 20-31
 POLICY="${POLICY:-cb_full_sequence}"  # alt: assistant_only
-TOTAL_STEPS="${TOTAL_STEPS:-100}"
+TOTAL_STEPS="${TOTAL_STEPS:-1100}"
 LIMIT_EVAL="${LIMIT_EVAL:-50}"
-BATCH_SIZE="${BATCH_SIZE:-1}"
+BATCH_SIZE="${BATCH_SIZE:-4}"
 GRAD_ACCUM="${GRAD_ACCUM:-4}"
-LEARNING_RATE="${LEARNING_RATE:-5e-5}"
+LEARNING_RATE="${LEARNING_RATE:-1e-5}"
 WARMUP_STEPS="${WARMUP_STEPS:-20}"
 MAX_SEQ_LENGTH="${MAX_SEQ_LENGTH:-4096}"
 LORA_R="${LORA_R:-16}"
-LORA_ALPHA="${LORA_ALPHA:-32}"
+LORA_ALPHA="${LORA_ALPHA:-16}"
 DTYPE="${DTYPE:-bfloat16}"
 LOSS_MODE="${LOSS_MODE:-triplet_full}"
 LOSS_WEIGHTING="${LOSS_WEIGHTING:-dual}"

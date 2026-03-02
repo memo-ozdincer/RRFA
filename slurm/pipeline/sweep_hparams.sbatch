@@ -36,12 +36,11 @@
 #    QUICK_TEST=true sbatch slurm/pipeline/sweep_hparams.sbatch
 #
 # 3) One configuration only:
-#    ALPHAS=10.0 LAYER_CONFIGS=10,20 POLICIES=assistant_only \
+#    ALPHAS=10.0 LAYER_CONFIGS="20,21,22,23,24,25,26,27,28,29,30,31" \
 #    sbatch slurm/pipeline/sweep_hparams.sbatch
 #
-# 4) Stability-fix grid (gamma_kl sweep):
-#    ALPHAS="5.0,10.0" GAMMA_KLS="0.9,5.0,20.0" \
-#    POLICIES=cb_full_sequence TOTAL_STEPS=100 \
+# 4) Gamma_kl sweep:
+#    GAMMA_KLS="0.9,5.0,20.0" \
 #    sbatch slurm/pipeline/sweep_hparams.sbatch
 #
 # 5) Legacy loss sweep:
@@ -123,23 +122,19 @@ QUICK_TEST="${QUICK_TEST:-false}"
 
 if [[ "$QUICK_TEST" == "true" ]]; then
     echo "QUICK TEST MODE - Reduced configurations"
-    DEFAULT_STEPS=50
+    DEFAULT_STEPS=150
     DEFAULT_ALPHAS="10.0"
-    DEFAULT_LAYER_CONFIGS="4,8,14"  # alt: "10,20" or "4,8,14|10,20"
+    DEFAULT_LAYER_CONFIGS="20,21,22,23,24,25,26,27,28,29,30,31"
     DEFAULT_POLICIES="assistant_only"
     DEFAULT_LIMIT_EVAL=20
     DEFAULT_NUM_EXAMPLES=5
 else
-    # Focused grid: 1 alpha × 2 policies × 1 layer config × N presets
-    # Layer config targets shallow-to-middle layers (4,8,14) per Llama 3.1 8B research:
-    #   Layer 4:  shallow — knowledge injection, defensive behaviors
-    #   Layer 8:  mid-shallow — core of the critical 1-10 range
-    #   Layer 14: upper boundary of recommended 0-15 range
-    # To also sweep paper-style layers 10,20: LAYER_CONFIGS="4,8,14|10,20"
-    # config.py presets: "llama-3.1-8b-instruct" (4,8,14) | "llama-3.1-8b-instruct-l1020" (10,20)
-    DEFAULT_STEPS=100
+    # Paper defaults (TRIPLET.tex appendix):
+    #   Layers 20-31: deep semantic layers (last 12 of 32 for Llama 8B)
+    #   1100 steps, LR=1e-5, LoRA alpha=16, batch_size=16, d_mix for all distances
+    DEFAULT_STEPS=1100
     DEFAULT_ALPHAS="10.0"
-    DEFAULT_LAYER_CONFIGS="4,8,14"
+    DEFAULT_LAYER_CONFIGS="20,21,22,23,24,25,26,27,28,29,30,31"
     DEFAULT_POLICIES="cb_full_sequence"
     DEFAULT_LIMIT_EVAL=50
     DEFAULT_NUM_EXAMPLES=10
@@ -153,13 +148,14 @@ LIMIT_EVAL="${LIMIT_EVAL:-$DEFAULT_LIMIT_EVAL}"
 NUM_EXAMPLES="${NUM_EXAMPLES:-$DEFAULT_NUM_EXAMPLES}"
 SHOW_EXAMPLES="${SHOW_EXAMPLES:-true}"
 
-# Training params (configurable via env vars, safe defaults for single GPU)
-BATCH_SIZE="${BATCH_SIZE:-1}"
+# Training params (paper: batch=16, LR=1e-5, LoRA alpha=16)
+# Single-GPU: BATCH_SIZE=4 + GRAD_ACCUM=4 = effective batch 16 (matches paper)
+BATCH_SIZE="${BATCH_SIZE:-4}"
 GRAD_ACCUM="${GRAD_ACCUM:-4}"
-LEARNING_RATE="${LEARNING_RATE:-5e-5}"
+LEARNING_RATE="${LEARNING_RATE:-1e-5}"
 WARMUP_STEPS="${WARMUP_STEPS:-20}"
 LORA_R="${LORA_R:-16}"
-LORA_ALPHA="${LORA_ALPHA:-32}"
+LORA_ALPHA="${LORA_ALPHA:-16}"
 MAX_SEQ_LENGTH="${MAX_SEQ_LENGTH:-4096}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
 DTYPE="${DTYPE:-bfloat16}"
@@ -405,7 +401,16 @@ for policy in "${POLICY_ARRAY[@]}"; do
     for layers in "${LAYER_ARRAY[@]}"; do
         for alpha in "${ALPHA_ARRAY[@]}"; do
             # Create base name for ETL_B sharing (shared across gamma_kl + presets)
-            layers_short="${layers//,/_}"
+            # Compact layer notation: "20,21,...,31" → "20-31", else "4_8_14"
+            IFS=',' read -ra _LAYER_NUMS <<< "$layers"
+            _n_layers=${#_LAYER_NUMS[@]}
+            _first=${_LAYER_NUMS[0]}
+            _last=${_LAYER_NUMS[$((_n_layers - 1))]}
+            if [[ $_n_layers -gt 3 && $((_last - _first + 1)) -eq $_n_layers ]]; then
+                layers_short="${_first}-${_last}"
+            else
+                layers_short="${layers//,/_}"
+            fi
             BASE_NAME="a${alpha}_l${layers_short}_${policy}"
             BASE_DIR="$SWEEP_DIR/$BASE_NAME"
 
@@ -1081,15 +1086,15 @@ for run_dir in "$SWEEP_DIR"/*/; do
 
     # Extract config from run directory name.
     # Formats (newest to oldest):
-    #   "preset_a10.0_g5.0_tf_l10_20_policy"  (with loss mode tag)
-    #   "preset_a10.0_g5.0_l10_20_policy"     (without loss mode tag)
-    #   "a10.0_g5.0_l10_20_policy"            (no preset)
-    #   "preset_a10.0_l10_20_policy"           (legacy, no gamma)
+    #   "preset_a10.0_g5.0_tf_l20-31_policy"   (with loss mode tag, range layers)
+    #   "preset_a10.0_g5.0_l20-31_policy"      (without loss mode tag)
+    #   "a10.0_g5.0_l20-31_policy"             (no preset)
+    #   "preset_a10.0_l10_20_policy"           (legacy, no gamma, underscore layers)
     #   "a10.0_l10_20_policy"                  (legacy, no preset/gamma)
     gamma_kl_csv="0.9"  # default for legacy dirs
     loss_mode_csv="triplet_full"  # default
-    if [[ "$run_name" =~ ^([a-zA-Z][a-zA-Z0-9]*)_a([0-9.]+)_g([0-9.]+)_([a-z]{2})_l([0-9_]+)_(.+)$ ]]; then
-        # New format with loss mode tag: preset_a10.0_g5.0_tf_l4_8_14_policy
+    if [[ "$run_name" =~ ^([a-zA-Z][a-zA-Z0-9]*)_a([0-9.]+)_g([0-9.]+)_([a-z]{2})_l([0-9_-]+)_(.+)$ ]]; then
+        # New format with loss mode tag: preset_a10.0_g5.0_tf_l20-31_policy
         preset="${BASH_REMATCH[1]}"
         alpha="${BASH_REMATCH[2]}"
         gamma_kl_csv="${BASH_REMATCH[3]}"
@@ -1102,13 +1107,13 @@ for run_dir in "$SWEEP_DIR"/*/; do
             l2) loss_mode_csv="l2_simple" ;;
             *) loss_mode_csv="$_lm_tag" ;;
         esac
-    elif [[ "$run_name" =~ ^([a-zA-Z][a-zA-Z0-9]*)_a([0-9.]+)_g([0-9.]+)_l([0-9_]+)_(.+)$ ]]; then
+    elif [[ "$run_name" =~ ^([a-zA-Z][a-zA-Z0-9]*)_a([0-9.]+)_g([0-9.]+)_l([0-9_-]+)_(.+)$ ]]; then
         preset="${BASH_REMATCH[1]}"
         alpha="${BASH_REMATCH[2]}"
         gamma_kl_csv="${BASH_REMATCH[3]}"
         layers="${BASH_REMATCH[4]//\_/,}"
         policy="${BASH_REMATCH[5]}"
-    elif [[ "$run_name" =~ ^a([0-9.]+)_g([0-9.]+)_([a-z]{2})_l([0-9_]+)_(.+)$ ]]; then
+    elif [[ "$run_name" =~ ^a([0-9.]+)_g([0-9.]+)_([a-z]{2})_l([0-9_-]+)_(.+)$ ]]; then
         # No preset, with loss mode tag
         preset="default"
         alpha="${BASH_REMATCH[1]}"
@@ -1122,18 +1127,18 @@ for run_dir in "$SWEEP_DIR"/*/; do
             l2) loss_mode_csv="l2_simple" ;;
             *) loss_mode_csv="$_lm_tag" ;;
         esac
-    elif [[ "$run_name" =~ ^a([0-9.]+)_g([0-9.]+)_l([0-9_]+)_(.+)$ ]]; then
+    elif [[ "$run_name" =~ ^a([0-9.]+)_g([0-9.]+)_l([0-9_-]+)_(.+)$ ]]; then
         preset="default"
         alpha="${BASH_REMATCH[1]}"
         gamma_kl_csv="${BASH_REMATCH[2]}"
         layers="${BASH_REMATCH[3]//\_/,}"
         policy="${BASH_REMATCH[4]}"
-    elif [[ "$run_name" =~ ^([a-zA-Z][a-zA-Z0-9]*)_a([0-9.]+)_l([0-9_]+)_(.+)$ ]]; then
+    elif [[ "$run_name" =~ ^([a-zA-Z][a-zA-Z0-9]*)_a([0-9.]+)_l([0-9_-]+)_(.+)$ ]]; then
         preset="${BASH_REMATCH[1]}"
         alpha="${BASH_REMATCH[2]}"
         layers="${BASH_REMATCH[3]//\_/,}"
         policy="${BASH_REMATCH[4]}"
-    elif [[ "$run_name" =~ ^a([0-9.]+)_l([0-9_]+)_(.+)$ ]]; then
+    elif [[ "$run_name" =~ ^a([0-9.]+)_l([0-9_-]+)_(.+)$ ]]; then
         preset="default"
         alpha="${BASH_REMATCH[1]}"
         layers="${BASH_REMATCH[2]//\_/,}"
