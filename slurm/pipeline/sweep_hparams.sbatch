@@ -511,20 +511,22 @@ RUNCFG
             # =====================================================
             echo "Step 3: Training with alpha=$alpha, layers=$layers, policy=$policy, preset=$_PNAME (${_PMODE}/${_PDIST}/${_PMB}/${_PMH})"
 
+            # NOTE: Renders/lossmasks/splits live in BASE_DIR (shared across presets).
+            # RUN_DIR may differ from BASE_DIR for multi-preset sweeps.
             HARMFUL_RENDER_ARGS=(
-                "$RUN_DIR/renders/fujitsu_b4_ds.jsonl"
+                "$BASE_DIR/renders/fujitsu_b4_ds.jsonl"
                 "$SPLIT_DIR/agentdojo_renders_harmful.jsonl"
             )
             HARMFUL_LOSSMASK_ARGS=(
-                "$RUN_DIR/lossmasks/fujitsu_b4_ds.jsonl"
+                "$BASE_DIR/lossmasks/fujitsu_b4_ds.jsonl"
                 "$SPLIT_DIR/agentdojo_lossmasks_harmful.jsonl"
             )
             BENIGN_RENDER_ARGS=(
-                "$RUN_DIR/renders/fujitsu_b4_dr.jsonl"
+                "$BASE_DIR/renders/fujitsu_b4_dr.jsonl"
                 "$SPLIT_DIR/agentdojo_renders_benign.jsonl"
             )
             BENIGN_LOSSMASK_ARGS=(
-                "$RUN_DIR/lossmasks/fujitsu_b4_dr.jsonl"
+                "$BASE_DIR/lossmasks/fujitsu_b4_dr.jsonl"
                 "$SPLIT_DIR/agentdojo_lossmasks_benign.jsonl"
             )
 
