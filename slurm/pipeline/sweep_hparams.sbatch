@@ -175,14 +175,15 @@ TRIPLET_MIX_L2_WEIGHT="${TRIPLET_MIX_L2_WEIGHT:-0.5}"
 TRIPLET_MIX_COS_WEIGHT="${TRIPLET_MIX_COS_WEIGHT:-0.5}"
 
 # Gamma KL sweep: comma-separated values for triplet_gamma_kl.
-# Higher values = stronger KL anchor (prevents model collapse/gibberish).
-# Default "0.9" preserves backward compat. Try "0.9,5.0,20.0" for stability grid.
-GAMMA_KLS="${GAMMA_KLS:-1,5,50,100}"
+# Scale depends on loss mode:
+#   cosine_simple: losses bounded [0,1], KL~7 → gamma_kl 0.05-1.0 gives good balance
+#   triplet_full:  losses ~500-1500,   KL~7 → gamma_kl 50-200 needed
+GAMMA_KLS="${GAMMA_KLS:-0.1,0.3,1.0}"
 
 # Loss mode sweep: comma-separated loss modes.
-# "triplet_full" uses margin-based triplet (losses ~500-1500, needs gamma_kl=50-200).
-# "cosine_simple" uses bounded cosine loss (losses ~0-1, needs gamma_kl=1-10).
-LOSS_MODES="${LOSS_MODES:-triplet_full,cosine_simple}"
+# "cosine_simple" is preferred — bounded losses, easier to calibrate.
+# "triplet_full" uses margin-based triplet (hard to calibrate with legacy pooling).
+LOSS_MODES="${LOSS_MODES:-cosine_simple}"
 
 # Pooling presets: each is "name:pooling_mode:distance:margin_b:margin_h"
 # Multiple presets separated by spaces. Swept as innermost dimension.
