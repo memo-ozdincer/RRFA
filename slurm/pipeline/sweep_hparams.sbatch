@@ -529,7 +529,48 @@ print(total)
                 echo "Checkpoint reached: STOP_AFTER_SPLIT=true. Exiting after split for run $RUN_NAME."
                 exit 0
             fi
-            
+
+            # =====================================================
+            # Step 2c: Data Diagnostic (once per BASE_DIR)
+            # =====================================================
+            echo "Step 2c: Running data diagnostic"
+            DIAG_HARMFUL_RENDERS=(
+                "$BASE_DIR/renders/fujitsu_b4_ds.jsonl"
+                "$SPLIT_DIR/agentdojo_renders_harmful.jsonl"
+            )
+            DIAG_HARMFUL_LOSSMASKS=(
+                "$BASE_DIR/lossmasks/fujitsu_b4_ds.jsonl"
+                "$SPLIT_DIR/agentdojo_lossmasks_harmful.jsonl"
+            )
+            DIAG_BENIGN_RENDERS=(
+                "$BASE_DIR/renders/fujitsu_b4_dr.jsonl"
+                "$SPLIT_DIR/agentdojo_renders_benign.jsonl"
+            )
+            DIAG_BENIGN_LOSSMASKS=(
+                "$BASE_DIR/lossmasks/fujitsu_b4_dr.jsonl"
+                "$SPLIT_DIR/agentdojo_lossmasks_benign.jsonl"
+            )
+            if [[ "$HAS_AGENTHARM" == "true" ]]; then
+                [[ -f "$AGENTHARM_SPLIT_DIR/agentharm_renders_harmful.jsonl" ]] && \
+                    DIAG_HARMFUL_RENDERS+=("$AGENTHARM_SPLIT_DIR/agentharm_renders_harmful.jsonl") && \
+                    DIAG_HARMFUL_LOSSMASKS+=("$AGENTHARM_SPLIT_DIR/agentharm_lossmasks_harmful.jsonl")
+                [[ -f "$AGENTHARM_SPLIT_DIR/agentharm_renders_benign.jsonl" ]] && \
+                    DIAG_BENIGN_RENDERS+=("$AGENTHARM_SPLIT_DIR/agentharm_renders_benign.jsonl") && \
+                    DIAG_BENIGN_LOSSMASKS+=("$AGENTHARM_SPLIT_DIR/agentharm_lossmasks_benign.jsonl")
+            fi
+
+            python scripts/diagnose_training_data.py \
+                --tokenizer "$TOKENIZER" \
+                --harmful-renders "${DIAG_HARMFUL_RENDERS[@]}" \
+                --harmful-lossmasks "${DIAG_HARMFUL_LOSSMASKS[@]}" \
+                --benign-renders "${DIAG_BENIGN_RENDERS[@]}" \
+                --benign-lossmasks "${DIAG_BENIGN_LOSSMASKS[@]}" \
+                --output "$BASE_DIR/data_diagnostic.txt" \
+                --num-samples 3 2>&1 | tee -a "$BASE_DIR/diagnostic.log"
+
+            echo "  Diagnostic written to: $BASE_DIR/data_diagnostic.txt"
+            echo ""
+
             # Parse layers to array (shared by all presets and gamma_kl values)
             IFS=',' read -ra CB_LAYER_ARRAY <<< "$layers"
 
