@@ -69,9 +69,11 @@ export TRANSFORMERS_OFFLINE=1
 # Single Run Configuration
 # =============================================================================
 POOLING_MODE="${POOLING_MODE:-legacy}"
+POOLING_POLICY=cb_full_sequence
+POOLING_MASK_POLICY="${POOLING_MASK_POLICY:-auto}"
 ALPHA="${ALPHA:-10.0}"
 LAYERS="${LAYERS:-10,20}"  # alt: LAYERS=10,20 (use with PRESET=llama-3.1-8b-instruct-l1020)
-POLICY="${POLICY:-cb_full_sequence}"  # alt: assistant_only
+POLICY="${POLICY:-assistant_only}"  # alt: assistant_only
 TOTAL_STEPS="${TOTAL_STEPS:-100}"
 LIMIT_EVAL="${LIMIT_EVAL:-50}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
@@ -129,6 +131,8 @@ echo "  LEARNING_RATE: $LEARNING_RATE"
 echo "  LOSS_MODE: $LOSS_MODE"
 echo "  LOSS_WEIGHTING: $LOSS_WEIGHTING"
 echo "  POOLING_MODE: $POOLING_MODE"
+echo "  POOLING_POLICY: ${POOLING_POLICY:-<none>}"
+echo "  POOLING_MASK_POLICY: $POOLING_MASK_POLICY"
 echo "  DISTANCE: $TRIPLET_BENIGN_POS_DISTANCE"
 echo "  TRIPLET_MARGIN_BENIGN: $TRIPLET_MARGIN_BENIGN"
 echo "  TRIPLET_MARGIN_HARMFUL: $TRIPLET_MARGIN_HARMFUL"
@@ -246,6 +250,10 @@ for trace_file in "${TRACE_FILES[@]}"; do
     fi
 
     echo "  Processing: $basename"
+    ETL_B_POOLING_ARGS=()
+    if [[ -n "$POOLING_POLICY" ]]; then
+        ETL_B_POOLING_ARGS+=(--pooling-policy-override "$POOLING_POLICY")
+    fi
     python src/schemas/tools/ETL_B.py \
         --traces "$trace_file" \
         --render-out "$render_out" \
@@ -253,6 +261,7 @@ for trace_file in "${TRACE_FILES[@]}"; do
         --tokenizer "$TOKENIZER" \
         --max-length 4096 \
         --policy-override "$POLICY" \
+        "${ETL_B_POOLING_ARGS[@]}" \
         "${ETL_B_EXTRA_ARGS[@]}" 2>&1 | tee -a "$RUN_DIR/etl_b.log"
 done
 
@@ -365,6 +374,8 @@ cat > "$RUN_DIR/run_config.json" <<RUNCFG
   "learning_rate": "$LEARNING_RATE",
   "loss_mode": "$LOSS_MODE",
   "loss_weighting": "$LOSS_WEIGHTING",
+  "pooling_policy": "${POOLING_POLICY:-}",
+  "pooling_mask_policy": "$POOLING_MASK_POLICY",
   "triplet_alpha_benign": $TRIPLET_ALPHA_BENIGN,
   "triplet_beta_harmful": $TRIPLET_BETA_HARMFUL,
   "triplet_gamma_kl": $TRIPLET_GAMMA_KL,
@@ -422,6 +433,7 @@ TRAIN_ARGS=(
     --triplet-mix-l2-weight "$TRIPLET_MIX_L2_WEIGHT"
     --triplet-mix-cos-weight "$TRIPLET_MIX_COS_WEIGHT"
     --pooling-mode "$POOLING_MODE"
+    --pooling-mask-policy "$POOLING_MASK_POLICY"
     --lora-r "$LORA_R"
     --lora-alpha "$LORA_ALPHA"
     --lora-dropout 0.05
