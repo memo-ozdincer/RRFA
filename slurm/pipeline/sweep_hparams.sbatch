@@ -122,22 +122,21 @@ QUICK_TEST="${QUICK_TEST:-false}"
 
 if [[ "$QUICK_TEST" == "true" ]]; then
     echo "QUICK TEST MODE - Reduced configurations"
-    DEFAULT_STEPS=150
+    DEFAULT_STEPS=50
     DEFAULT_ALPHAS="10.0"
     DEFAULT_LAYER_CONFIGS="20,21,22,23,24,25,26,27,28,29,30,31"
     DEFAULT_POLICIES="assistant_only"
-    DEFAULT_LIMIT_EVAL=20
-    DEFAULT_NUM_EXAMPLES=5
+    DEFAULT_LIMIT_EVAL=10
+    DEFAULT_NUM_EXAMPLES=3
 else
-    # Paper defaults (TRIPLET.tex appendix):
-    #   Layers 20-31: deep semantic layers (last 12 of 32 for Llama 8B)
-    #   1100 steps, LR=1e-5, LoRA alpha=16, batch_size=16, d_mix for all distances
-    DEFAULT_STEPS=1100
+    # Sweep grid: 100 steps is enough — triplet losses collapse by ~110 with weak margins.
+    # If losses stay active at step 100, configuration is viable.
+    DEFAULT_STEPS=100
     DEFAULT_ALPHAS="10.0"
     DEFAULT_LAYER_CONFIGS="20,21,22,23,24,25,26,27,28,29,30,31"
     DEFAULT_POLICIES="cb_full_sequence"
-    DEFAULT_LIMIT_EVAL=50
-    DEFAULT_NUM_EXAMPLES=10
+    DEFAULT_LIMIT_EVAL=20
+    DEFAULT_NUM_EXAMPLES=5
 fi
 
 TOTAL_STEPS="${TOTAL_STEPS:-$DEFAULT_STEPS}"
@@ -164,25 +163,23 @@ TRIPLET_ALPHA_BENIGN="${TRIPLET_ALPHA_BENIGN:-0.5}"
 TRIPLET_BETA_HARMFUL="${TRIPLET_BETA_HARMFUL:-0.4}"
 TRIPLET_MIX_L2_WEIGHT="${TRIPLET_MIX_L2_WEIGHT:-0.5}"
 TRIPLET_MIX_COS_WEIGHT="${TRIPLET_MIX_COS_WEIGHT:-0.5}"
+SAVE_STEPS="${SAVE_STEPS:-9999}"
 
-# Loss mode sweep: comma-separated loss modes.
-# "l2_simple" uses L2 distance (non-vanishing gradients, works with LoRA).
-# "cosine_simple" has vanishing gradients when cos≈1 — broken with LoRA.
-# "triplet_full" uses margin-based triplet (hard to calibrate).
-LOSS_MODES="${LOSS_MODES:-l2_simple}"
+# Loss mode: triplet_full for margin/pooling grid search.
+LOSS_MODES="${LOSS_MODES:-triplet_full}"
 
-# Gamma KL sweep: comma-separated values for triplet_gamma_kl.
-# Scale depends on loss mode:
-#   l2_simple:     losses bounded [0,1], KL~7 → gamma_kl 0.05-0.3
-#   cosine_simple: BROKEN with LoRA (vanishing gradients at cos≈1)
-#   triplet_full:  losses ~500-1500,   KL~7 → gamma_kl 50-200 needed
-GAMMA_KLS="${GAMMA_KLS:-0.05,0.1,0.3}"
+# Gamma KL sweep: 0.1 (low KL) and 0.9 (paper default).
+# For dmix presets both are negligible vs triplet (~500). For dcos, 0.9 dominates.
+GAMMA_KLS="${GAMMA_KLS:-0.1,0.9}"
 
-# Pooling presets: each is "name:pooling_mode:distance:margin_b:margin_h"
-# Multiple presets separated by spaces. Swept as innermost dimension.
-# "correct" pooling uses all 4096 dims (dense); "legacy" uses ~2% (sparse, ineffective for CB).
-# Margins/distance don't matter for cosine_simple (only used by triplet_full).
-POOLING_PRESETS="${POOLING_PRESETS:-cor:correct:dmix:500:1500}"
+# Pooling presets: "name:pooling_mode:distance:margin_b:margin_h"
+# Grid rationale (paper hparams are 10x less aggressive than prior experiments):
+#   leg:      legacy dmix 500/1500  — prior sweet spot, retest at 1x aggression
+#   cdmix5:   correct dmix 5/15    — mild correct
+#   cdmix11:  correct dmix 11/33   — was "too strong" at 10x aggression → sweet spot now?
+#   cdmix25:  correct dmix 25/75   — stronger push, test upper bound
+#   cdcos12:  correct dcos 1.2/1.6 — 4x larger than 0.3/0.8 that had no effect
+POOLING_PRESETS="${POOLING_PRESETS:-leg:legacy:dmix:500:1500 cdmix5:correct:dmix:5:15 cdmix11:correct:dmix:11:33 cdmix25:correct:dmix:25:75 cdcos12:correct:dcos:1.2:1.6}"
 POOLING_POLICY="${POOLING_POLICY:-cb_full_sequence}"
 POOLING_MASK_POLICY="${POOLING_MASK_POLICY:-auto}"
 STOP_AFTER_ETL_B="${STOP_AFTER_ETL_B:-false}"
@@ -202,6 +199,7 @@ echo "  BATCH_SIZE: $BATCH_SIZE"
 echo "  GRAD_ACCUM: $GRAD_ACCUM"
 echo "  LEARNING_RATE: $LEARNING_RATE"
 echo "  LOSS_MODES: $LOSS_MODES"
+echo "  SAVE_STEPS: $SAVE_STEPS"
 echo "  LIMIT_EVAL: $LIMIT_EVAL"
 echo "  NUM_EXAMPLES: $NUM_EXAMPLES"
 echo "  SHOW_EXAMPLES: $SHOW_EXAMPLES"
@@ -591,6 +589,7 @@ print(total)
   "layers": "$layers",
   "policy": "$policy",
   "total_steps": $TOTAL_STEPS,
+  "save_steps": $SAVE_STEPS,
   "batch_size": $BATCH_SIZE,
   "grad_accum": $GRAD_ACCUM,
   "learning_rate": "$LEARNING_RATE",
@@ -677,7 +676,7 @@ RUNCFG
                 --lora-alpha "$LORA_ALPHA"
                 --lora-dropout 0.05
                 --logging-steps 10
-                --save-steps 50
+                --save-steps "$SAVE_STEPS"
                 --no-wandb
                 --cb-target-layers "${CB_LAYER_ARRAY[@]}"
                 --mode mixed
