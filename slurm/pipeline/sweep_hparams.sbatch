@@ -140,7 +140,7 @@ else
     DEFAULT_NUM_EXAMPLES=10
 fi
 
-TOTAL_STEPS=150
+TOTAL_STEPS="${TOTAL_STEPS:-$DEFAULT_STEPS}"
 ALPHAS="${ALPHAS:-$DEFAULT_ALPHAS}"
 LAYER_CONFIGS="${LAYER_CONFIGS:-$DEFAULT_LAYER_CONFIGS}"
 POLICIES="${POLICIES:-$DEFAULT_POLICIES}"
@@ -150,7 +150,7 @@ SHOW_EXAMPLES="${SHOW_EXAMPLES:-true}"
 
 # Training params (paper: batch=16, LR=1e-5, LoRA alpha=16)
 # Single-GPU: BATCH_SIZE=4 + GRAD_ACCUM=4 = effective batch 16 (matches paper)
-BATCH_SIZE=1
+BATCH_SIZE="${BATCH_SIZE:-4}"
 GRAD_ACCUM="${GRAD_ACCUM:-4}"
 LEARNING_RATE="${LEARNING_RATE:-1e-5}"
 WARMUP_STEPS="${WARMUP_STEPS:-20}"
@@ -529,48 +529,7 @@ print(total)
                 echo "Checkpoint reached: STOP_AFTER_SPLIT=true. Exiting after split for run $RUN_NAME."
                 exit 0
             fi
-
-            # =====================================================
-            # Step 2c: Data Diagnostic (once per BASE_DIR)
-            # =====================================================
-            echo "Step 2c: Running data diagnostic"
-            DIAG_HARMFUL_RENDERS=(
-                "$BASE_DIR/renders/fujitsu_b4_ds.jsonl"
-                "$SPLIT_DIR/agentdojo_renders_harmful.jsonl"
-            )
-            DIAG_HARMFUL_LOSSMASKS=(
-                "$BASE_DIR/lossmasks/fujitsu_b4_ds.jsonl"
-                "$SPLIT_DIR/agentdojo_lossmasks_harmful.jsonl"
-            )
-            DIAG_BENIGN_RENDERS=(
-                "$BASE_DIR/renders/fujitsu_b4_dr.jsonl"
-                "$SPLIT_DIR/agentdojo_renders_benign.jsonl"
-            )
-            DIAG_BENIGN_LOSSMASKS=(
-                "$BASE_DIR/lossmasks/fujitsu_b4_dr.jsonl"
-                "$SPLIT_DIR/agentdojo_lossmasks_benign.jsonl"
-            )
-            if [[ "$HAS_AGENTHARM" == "true" ]]; then
-                [[ -f "$AGENTHARM_SPLIT_DIR/agentharm_renders_harmful.jsonl" ]] && \
-                    DIAG_HARMFUL_RENDERS+=("$AGENTHARM_SPLIT_DIR/agentharm_renders_harmful.jsonl") && \
-                    DIAG_HARMFUL_LOSSMASKS+=("$AGENTHARM_SPLIT_DIR/agentharm_lossmasks_harmful.jsonl")
-                [[ -f "$AGENTHARM_SPLIT_DIR/agentharm_renders_benign.jsonl" ]] && \
-                    DIAG_BENIGN_RENDERS+=("$AGENTHARM_SPLIT_DIR/agentharm_renders_benign.jsonl") && \
-                    DIAG_BENIGN_LOSSMASKS+=("$AGENTHARM_SPLIT_DIR/agentharm_lossmasks_benign.jsonl")
-            fi
-
-            python scripts/diagnose_training_data.py \
-                --tokenizer "$TOKENIZER" \
-                --harmful-renders "${DIAG_HARMFUL_RENDERS[@]}" \
-                --harmful-lossmasks "${DIAG_HARMFUL_LOSSMASKS[@]}" \
-                --benign-renders "${DIAG_BENIGN_RENDERS[@]}" \
-                --benign-lossmasks "${DIAG_BENIGN_LOSSMASKS[@]}" \
-                --output "$BASE_DIR/data_diagnostic.txt" \
-                --num-samples 3 2>&1 | tee -a "$BASE_DIR/diagnostic.log"
-
-            echo "  Diagnostic written to: $BASE_DIR/data_diagnostic.txt"
-            echo ""
-
+            
             # Parse layers to array (shared by all presets and gamma_kl values)
             IFS=',' read -ra CB_LAYER_ARRAY <<< "$layers"
 
@@ -1127,15 +1086,15 @@ for run_dir in "$SWEEP_DIR"/*/; do
 
     # Extract config from run directory name.
     # Formats (newest to oldest):
-    #   "preset_a10.0_g5.0_tf_l20-31_policy"   (with loss mode tag, range layers)
-    #   "preset_a10.0_g5.0_l20-31_policy"      (without loss mode tag)
-    #   "a10.0_g5.0_l20-31_policy"             (no preset)
-    #   "preset_a10.0_l10_20_policy"           (legacy, no gamma, underscore layers)
+    #   "preset_a10.0_g5.0_tf_l10_20_policy"  (with loss mode tag)
+    #   "preset_a10.0_g5.0_l10_20_policy"     (without loss mode tag)
+    #   "a10.0_g5.0_l10_20_policy"            (no preset)
+    #   "preset_a10.0_l10_20_policy"           (legacy, no gamma)
     #   "a10.0_l10_20_policy"                  (legacy, no preset/gamma)
     gamma_kl_csv="0.9"  # default for legacy dirs
     loss_mode_csv="triplet_full"  # default
     if [[ "$run_name" =~ ^([a-zA-Z][a-zA-Z0-9]*)_a([0-9.]+)_g([0-9.]+)_([a-z]{2})_l([0-9_-]+)_(.+)$ ]]; then
-        # New format with loss mode tag: preset_a10.0_g5.0_tf_l20-31_policy
+        # New format with loss mode tag: preset_a10.0_g5.0_tf_l4_8_14_policy
         preset="${BASH_REMATCH[1]}"
         alpha="${BASH_REMATCH[2]}"
         gamma_kl_csv="${BASH_REMATCH[3]}"
