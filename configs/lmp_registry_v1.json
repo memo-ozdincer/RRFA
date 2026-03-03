@@ -50,6 +50,18 @@
       "description": "Loss on commitment prefix tokens (up to where action becomes committed).",
       "compatible_with": ["harmful"]
     },
+    "post_injection_only": {
+      "name": "Post Injection Only",
+      "strategy": "post_injection_only",
+      "description": "Loss only on assistant tokens after the injection point. Pre-injection assistant turns are legitimate behavior and excluded from loss. Returns all-zero mask when no injection span is detected.",
+      "compatible_with": ["harmful"]
+    },
+    "post_injection_tool_calls_only": {
+      "name": "Post Injection Tool Calls Only",
+      "strategy": "post_injection_tool_calls_only",
+      "description": "Loss only on tool-call spans after the injection point. Focuses CB penalty on tool-call decision tokens (name + arguments), preserving free-text generation capability. Returns all-zero mask when no injection span is detected.",
+      "compatible_with": ["harmful"]
+    },
     "custom": {
       "name": "Custom",
       "strategy": "custom",

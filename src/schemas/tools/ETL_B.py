@@ -250,6 +250,19 @@ def _default_lmp_registry() -> LMPRegistry:
             strategy="action_commitment",
             description="Loss on commitment prefix tokens.",
         ),
+        "post_injection_only": LMPPolicy(
+            name="Post Injection Only",
+            strategy="post_injection_only",
+            description="Loss only on assistant tokens after the injection point. "
+                        "Returns all-zero mask when no injection span is detected.",
+        ),
+        "post_injection_tool_calls_only": LMPPolicy(
+            name="Post Injection Tool Calls Only",
+            strategy="post_injection_tool_calls_only",
+            description="Loss only on tool-call spans after the injection point. "
+                        "Focuses CB penalty on tool-call decision tokens, not free text. "
+                        "Returns all-zero mask when no injection span is detected.",
+        ),
     }
     return LMPRegistry(version="1.0.0", policies=policies, default_policy="assistant_only")
 
@@ -685,6 +698,72 @@ def _mask_cb_full_sequence(render: RenderedView, mask: List[float]) -> List[floa
     return _mask_full_sequence(render, mask)
 
 
+def _mask_post_injection_only(render: RenderedView, mask: List[float]) -> List[float]:
+    """Loss only on assistant tokens AFTER the injection point.
+
+    For multi-turn AgentDojo traces, assistant turns before the injection are
+    legitimate behavior that should NOT be penalized. This policy:
+    1. Finds the last token of the injection span (from render.signals)
+    2. Masks only assistant message spans that start at or after that boundary
+    3. Returns ALL-ZERO mask when no injection span is detected.
+       Traces without injection spans (benign, or missing signal_hints)
+       should not be penalized — they belong in the retain set, not the
+       reroute set. Use cb_full_sequence explicitly for skeleton traces
+       via --skeleton-policy.
+    """
+    # Find injection boundary from render signals
+    injection_token_end = None
+    if render.signals and render.signals.injection_spans:
+        # Use the LAST injection span's end as the boundary
+        injection_token_end = max(
+            span.token_end for span in render.signals.injection_spans
+        )
+
+    if injection_token_end is None:
+        # No injection info — return all-zero mask (no penalty).
+        # This trace should not be in the harmful/reroute set.
+        return mask
+
+    # Mask only assistant spans that start at or after the injection boundary
+    if render.alignment and render.alignment.assistant_spans:
+        for span in render.alignment.assistant_spans:
+            if span.token_start >= injection_token_end:
+                for i in range(span.token_start, min(span.token_end, len(mask))):
+                    mask[i] = 1.0
+
+    return mask
+
+
+def _mask_post_injection_tool_calls_only(render: RenderedView, mask: List[float]) -> List[float]:
+    """Loss only on tool-call decision tokens AFTER the injection point.
+
+    Refinement of post_injection_only based on Hammer/AgentFlux insights:
+    tool selection (name + python_tag prefix) and argument generation are
+    different tasks. This policy focuses the CB penalty on the tool-call
+    decision tokens only, preserving argument-generation capability.
+
+    Masks: tool_call_spans that start at or after the injection boundary.
+    Returns all-zero when no injection span detected (same as post_injection_only).
+    """
+    injection_token_end = None
+    if render.signals and render.signals.injection_spans:
+        injection_token_end = max(
+            span.token_end for span in render.signals.injection_spans
+        )
+
+    if injection_token_end is None:
+        return mask
+
+    # Mask only tool call spans that start at or after the injection boundary
+    if render.alignment and render.alignment.tool_call_spans:
+        for span in render.alignment.tool_call_spans:
+            if span.token_start >= injection_token_end:
+                for i in range(span.token_start, min(span.token_end, len(mask))):
+                    mask[i] = 1.0
+
+    return mask
+
+
 def _mask_custom(render: RenderedView, mask: List[float], params: Optional[Dict[str, Any]]) -> List[float]:
     params = params or {}
     applied = False
@@ -740,6 +819,10 @@ def _apply_lmp_policy(render: RenderedView, policy: LMPPolicy) -> List[float]:
         return _mask_action_commitment(render, mask)
     if policy.strategy == "cb_full_sequence":
         return _mask_cb_full_sequence(render, mask)
+    if policy.strategy == "post_injection_only":
+        return _mask_post_injection_only(render, mask)
+    if policy.strategy == "post_injection_tool_calls_only":
+        return _mask_post_injection_tool_calls_only(render, mask)
     if policy.strategy == "custom":
         return _mask_custom(render, mask, policy.params)
 
@@ -916,19 +999,6 @@ def _apply_mwcs_weight_with_yaml(
     weights, lmp_overrides = _resolve_yaml_schedule(schedule_data, step or 0)
     lmp_override = lmp_overrides.get(class_id) if lmp_overrides else None
     return base_weight * weights.get(class_id, 1.0), lmp_override
-
-    try:
-        schedule = registry.get_schedule(mwcs_schedule)
-    except Exception:
-        logger.warning("MWCS schedule not found; using base sample weight.")
-        return base_weight
-
-    class_id = trace.training.mixture.class_id if trace.training and trace.training.mixture else None
-    if not class_id:
-        return base_weight
-
-    weights = schedule.get_weights_at_step(step or 0)
-    return base_weight * weights.get(class_id, 1.0)
 
 
 def _render_trace_llama31_manual(

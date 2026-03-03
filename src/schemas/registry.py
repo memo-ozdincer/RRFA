@@ -22,9 +22,12 @@ class LMPPolicy:
     name: str
     strategy: Literal[
         "assistant_only",
+        "assistant_and_tool",
         "completion_only",
         "full_sequence",
         "cb_full_sequence",
+        "post_injection_only",
+        "post_injection_tool_calls_only",
         "tool_calls_only",
         "action_prefix_only",
         "action_commitment",
