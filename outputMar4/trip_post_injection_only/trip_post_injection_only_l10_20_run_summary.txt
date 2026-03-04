@@ -1,0 +1,65 @@
+============================================================
+RUN SUMMARY: trip_post_injection_only_l10_20
+============================================================
+Directory: /scratch/memoozd/cb-scratch/sweeps/evalfix_20260303_234013/trip_post_injection_only_l10_20
+Timestamp: 2026-03-04T06:13:31Z
+Job ID:    311908
+
+1. CONFIGURATION
+------------------------------------------------------------
+  Preset:           ?                     Total Steps:      150
+  Alpha:            ?                     Batch / Accum:    4 / 4
+  Gamma KL:         ?                     Learning Rate:    1e-5
+  Layers:           10,20                 Loss Mode:        triplet_full
+  Policy:           post_injection_only   Loss Weighting:   dual
+  Pooling Mode:     correct               Pooling Policy:   cb_full_sequence
+  Distance:         ?                     Pooling Mask:     auto
+  Margins:          ? / ?                 LoRA r/alpha:     16 / 16
+
+2. POOLING DIAGNOSTIC
+------------------------------------------------------------
+  Decoupled masks: ACTIVE
+  Harmful pool mask active: 294 vs label mask active: 115
+  Benign pool mask active: 2274 vs label mask active: 892
+
+3. TRAINING HISTORY
+------------------------------------------------------------
+   Step |       Loss |  Triplet_B |  Triplet_H |         KL |    Alpha
+  ------+------------+------------+------------+------------+---------
+     10 |     0.5198 |     1.0138 |     1.6202 |     0.0004 |   0.4500
+     20 |     1.0874 |     0.9899 |     1.6241 |     0.0008 |   0.9500
+     30 |     1.1232 |     0.9523 |     1.6162 |     0.0058 |   1.0000
+     40 |     1.0850 |     0.8689 |     1.6138 |     0.0506 |   1.0000
+     50 |     1.0528 |     0.8106 |     1.6102 |     0.0341 |   1.0000
+     60 |     1.0256 |     0.7625 |     1.6019 |     0.0359 |   1.0000
+     70 |     1.0317 |     0.7681 |     1.6084 |     0.0428 |   1.0000
+     80 |     0.9644 |     0.6604 |     1.5684 |     0.0685 |   1.0000
+     90 |     0.8991 |     0.6003 |     1.4798 |     0.0699 |   1.0000
+    100 |     0.8180 |     0.5295 |     1.3603 |     0.0916 |   1.0000
+    110 |     0.6373 |     0.3293 |     1.1582 |     0.0939 |   1.0000
+    120 |     0.4390 |     0.1889 |     0.8420 |     0.0776 |   1.0000
+    130 |     0.3472 |     0.1341 |     0.6734 |     0.1077 |   1.0000
+    140 |     0.2923 |     0.1273 |     0.5270 |     0.1782 |   1.0000
+    150 |     0.2668 |     0.1093 |     0.4957 |     0.1380 |   1.0000
+
+  First loss: 0.5198
+  Last loss:  0.2668
+  Min loss:   0.2668
+  Max loss:   1.1232
+  Triplet_H collapse: none (good)
+
+4. EVALUATION METRICS
+------------------------------------------------------------
+  FUJITSU: (no eval data)
+
+  AGENTDOJO (harmful): (no eval data)
+
+  AGENTDOJO (benign): (no eval data)
+
+5. EXAMPLE COMPARISONS
+------------------------------------------------------------
+  (no paired output files found)
+
+============================================================
+END OF SUMMARY: trip_post_injection_only_l10_20
+============================================================

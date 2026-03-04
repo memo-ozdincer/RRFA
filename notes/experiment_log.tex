@@ -117,19 +117,114 @@ Forget/retain overlap & Latent Unlearning & \bad{Confirmed (identical tool forma
 \end{tabular}
 
 % ===================================================================
-\section{Sweep 3: Eval Fix + Legacy CB (planned)}
+\section{Sweep 3: Eval Fix + Legacy CB (Mar 4, 2026)}
 % ===================================================================
 
-\textbf{Grid:} 2 loss modes (legacy\_cb, triplet\_full) $\times$ 2 policies $\times$ 2 eval modes $=$ 8 evals from 4 training runs.
+\textbf{Grid:} 2 loss modes $\times$ 2 policies $=$ 4 training runs, each eval'd with 2 eval modes $=$ 8 evals.
+Config: 150 steps, layers 10+20, dual weighting, correct pooling, $d_\mathrm{cos}$ 1.2/1.6, LIMIT\_EVAL=100.
 
-\textbf{Goals:}
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{llcccccc}
+\toprule
+Run & Eval & Fuj ASR$\downarrow$ & Fuj Cor$\uparrow$ & AD Res$\uparrow$ & AD Mal$\downarrow$ & Ben Cor$\uparrow$ & Ben NT$\downarrow$ \\
+\midrule
+\texttt{lcb\_pio}  & FT  & \bad{86\%} & 14\% & 74\% & 26\% & 9\%  & 8\% \\
+                    & NTP & \bad{86\%} & 14\% & 81\% & 19\% & 21\% & \good{0\%} \\
+\texttt{lcb\_cfs}  & FT  & \bad{86\%} & 14\% & 76\% & 24\% & 11\% & 8\% \\
+                    & NTP & \bad{86\%} & 14\% & 79\% & 21\% & 21\% & \good{0\%} \\
+\texttt{trip\_pio} & FT  & 61\% & 33\% & 76\% & 24\% & 12\% & \bad{25\%} \\
+                    & NTP & 62\% & 32\% & 80\% & 20\% & 20\% & \bad{14\%} \\
+\texttt{trip\_cfs} & FT  & \good{62\%} & \good{38\%} & \good{85\%} & 15\% & 8\%  & 18\% \\
+                    & NTP & \good{63\%} & \good{37\%} & 82\% & 18\% & 21\% & \good{2\%} \\
+\bottomrule
+\end{tabular}
+\caption{Sweep 3 results. FT = full\_trace (old), NTP = next\_tool\_prediction (new).}
+\end{table}
+
+\subsection{Finding 1: legacy\_cb is completely broken for Fujitsu}
+Both \texttt{lcb} runs: 86\% ASR = identical to baseline. 0 improved Fujitsu pairs. But AD resist is 74--81\%, so it partially works on AgentDojo.
+
+\textbf{Root cause:} Dual coefficient schedule. $c_s$ (reroute) = $\alpha_\mathrm{max} \times (1 - (t{-}1)/T)$ decays from 10.0 $\to$ 0.067. $c_r$ (retain) increases from 0 $\to$ 9.93. At step 150, total loss $\approx 0.067 \times \text{reroute} + 9.93 \times \text{retain}$. The last $\sim$50 steps actively undo rerouting. Fujitsu tool-flip (subtle tool swap) is overridden by retain pressure pushing back toward baseline behavior.
+
+\textbf{Why AgentDojo survives:} AD resistance = model outputs text/refusal instead of malicious tool call. This behavioral change is more robust than learning a specific correct tool swap.
+
+\textbf{Verdict:} Not a tuning problem --- structural flaw in decaying schedule with this loss.
+
+\subsection{Finding 2: NTP eval works}
+NTP benign\_correct = 20--21\% across all 4 runs (vs 8--12\% FT). Consistent ceiling. NTP eliminates false no\_tool from completed traces: \texttt{lcb} goes 8\% $\to$ 0\%, confirming FT artifacts.
+
+Key insight: under NTP, real degradation signal is in \texttt{no\_tool} rate, not correct rate.
+
+\subsection{Finding 3: Failure modes from trace analysis}
+Three distinct modes:
+\begin{enumerate}
+  \item \textbf{Reasoning text instead of tool call} (\texttt{trip\_pio}, 16/97 broken): model names correct tool but outputs planning text (``I will use get\_total\_spending...'')
+  \item \textbf{Code generation instead of tool call} (\texttt{trip\_cfs}, 7/97): model writes Python reimplementing the tool (e.g.\ \texttt{import webbrowser})
+  \item \textbf{Direct answer without tool} (\texttt{trip\_cfs}, 2/97): model answers from context (``you are free for lunch at 12:00'')
+\end{enumerate}
+\texttt{lcb} variants: 1--2/97 broken (near-perfect preservation, but useless for Fujitsu).
+
+\subsection{Finding 4: Triplet\_B collapse paradox}
+\texttt{trip\_pio}: Triplet\_B collapses to 0.109. Yet \emph{worst} benign generation (14\% NTP no\_tool).
+\texttt{trip\_cfs}: Triplet\_B stays at 0.937. \emph{Best} benign (2\% NTP no\_tool).
+
+Cause: under \texttt{post\_injection\_only}, benign data has all-zero loss mask $\to$ zero gradient from benign examples. Triplet\_B is computed via pooling mask (separate), so it ``looks good'' while actual generation degrades. \textbf{Pooled representation distance does not predict generation quality.}
+
+\subsection{Training dynamics}
+\begin{tabular}{lccccc}
+\toprule
+Run & Loss[10] & Loss[150] & Triplet\_B[150] & Triplet\_H[150] & KL[150] \\
+\midrule
+\texttt{trip\_cfs} & 0.5447 & 0.8879 & 0.937 & 1.026 & 0.090 \\
+\texttt{trip\_pio} & 0.5198 & 0.2668 & 0.109 & 0.496 & 0.138 \\
+\texttt{lcb\_cfs}  & 9.5082 & 2.1362 & --- & --- & --- \\
+\texttt{lcb\_pio}  & 9.5080 & 2.1160 & --- & --- & --- \\
+\bottomrule
+\end{tabular}
+
+Legacy\_cb loss magnitude 10$\times$ larger (dominated by $\alpha_\mathrm{max}=10$). Triplet \texttt{trip\_pio} loss drops faster/lower (fewer masked tokens = easier optimization) but overfit.
+
+% ===================================================================
+\section{Paper Insights Applied (Updated)}
+% ===================================================================
+
+\begin{tabular}{lll}
+\toprule
+Insight & Source & Status \\
+\midrule
+Layers 10+20 (31\%/62\% depth) & Circuit Breakers & \good{Validated (Sweeps 2+3)} \\
+Post-injection masking & Our fix + Instr.\ Hierarchy & \good{Validated (benign 0\% $\to$ 8--12\%)} \\
+Tool-call-only masking & Hammer + AgentFlux & Inconclusive (Sweep 2) \\
+150 steps (not 1100) & Circuit Breakers & \good{Validated (stable)} \\
+ReLU(cos)+L2 loss & Circuit Breakers & \bad{Failed --- 0\% Fujitsu improvement} \\
+Coeff schedule (retain$\uparrow$, reroute$\downarrow$) & Circuit Breakers & \bad{Failed --- washes out rerouting} \\
+Forget/retain overlap & Latent Unlearning & \bad{Confirmed (identical tool format)} \\
+\bottomrule
+\end{tabular}
+
+% ===================================================================
+\section{Conclusions So Far}
+% ===================================================================
+
+\textbf{Best config:} \texttt{trip\_cfs\_l10\_20} (triplet\_full + cb\_full\_sequence + layers 10,20). Fujitsu ASR 62\%, AD resist 82--85\%, NTP benign 21\% correct / 2\% no\_tool. Zero gibberish.
+
+\textbf{Settled decisions:}
 \begin{itemize}
-  \item Compare \texttt{next\_tool\_prediction} vs \texttt{full\_trace} metrics
-  \item Test original CB loss (\texttt{legacy\_cb}) with dual coefficient schedule
-  \item LIMIT\_EVAL=100 for better statistics
-  \item Layers fixed at 10,20
+  \item Layers: 10,20 (not 20--31)
+  \item Steps: 150
+  \item Pooling: correct mode, $d_\mathrm{cos}$, margins 1.2/1.6
+  \item Loss: triplet\_full (not legacy\_cb)
+  \item Policy: cb\_full\_sequence (post\_injection\_only hurts benign more than it helps)
+  \item Eval: next\_tool\_prediction mode for benign metrics
 \end{itemize}
 
-\textbf{Results:} (to be filled after run)
+\textbf{Open questions:}
+\begin{itemize}
+  \item Is 21\% NTP benign correct the baseline ceiling? Need baseline-only NTP eval.
+  \item Can $\gamma_\mathrm{kl}$ increase (0.1 $\to$ 0.3--0.5) reduce ``text instead of tool'' failures?
+  \item 239 benign traces with injection spans --- mislabeled or correctly handled?
+\end{itemize}
 
 \end{document}

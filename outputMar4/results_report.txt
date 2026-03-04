@@ -1,0 +1,30 @@
+LOSSMASK FIX VALIDATION RESULTS
+================================================================================================
+Sweep: /scratch/memoozd/cb-scratch/sweeps/evalfix_20260303_234013
+
+LOSSMASK COVERAGE (pre-training diagnostics)
+--------------------------------------------------------------------------------
+Policy                               Total   Zero  Nonzero  Avg Cov           Range
+--------------------------------------------------------------------------------
+cb_full_sequence                       200      0      200     90%         72%-97%
+post_injection_only                    200    118       82     35%          5%-61%
+
+Run                                            Fuj ASR  Fuj Cor   AD Res   AD Mal  BEN COR   BEN NT
+---------------------------------------------------------------------------------------------------
+lcb_cb_full_sequence_l10_20                      n/a    n/a    n/a    n/a    n/a    n/a
+lcb_post_injection_only_l10_20                   n/a    n/a    n/a    n/a    n/a    n/a
+trip_cb_full_sequence_l10_20                     n/a    n/a    n/a    n/a    n/a    n/a
+trip_post_injection_only_l10_20                  n/a    n/a    n/a    n/a    n/a    n/a
+---------------------------------------------------------------------------------------------------
+
+Best benign_correct: lcb_cb_full_sequence_l10_20 (0%)
+Best harmful_resist: lcb_cb_full_sequence_l10_20 (0%)
+
+POST-INJECTION vs CB_FULL_SEQUENCE
+--------------------------------------------------
+Avg benign_correct — post_injection policies: 0%
+Avg benign_correct — cb_full_sequence:        0%
+Both still 0% — issue may be elsewhere (layers, loss, steps?)
+Avg harmful_resist — post_injection policies: 0%
+Avg harmful_resist — cb_full_sequence:        0%
+~

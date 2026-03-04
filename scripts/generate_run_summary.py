@@ -261,17 +261,33 @@ def count_gibberish(paired_path: Path) -> tuple:
     return gib, len(pairs)
 
 
-def format_eval_section(run_dir: Path) -> str:
-    """Format evaluation metrics."""
-    lines = []
-    lines.append("")
-    lines.append("4. EVALUATION METRICS")
-    lines.append("-" * 60)
-
+def _find_eval_dirs(run_dir: Path) -> list[tuple[str, Path]]:
+    """Find eval directories, supporting both old and new layouts."""
     eval_dir = run_dir / "eval"
     if not eval_dir.exists():
-        lines.append("  (no eval directory found)")
-        return "\n".join(lines)
+        return []
+
+    # Check for eval mode subdirectories first (new layout)
+    mode_dirs = []
+    for mode in ("full_trace", "next_tool_prediction"):
+        subdir = eval_dir / mode
+        if subdir.is_dir() and any(subdir.glob("*.json")):
+            mode_dirs.append((mode, subdir))
+
+    if mode_dirs:
+        return mode_dirs
+
+    # Fall back to old layout (JSONs directly in eval/)
+    if any(eval_dir.glob("*.json")):
+        return [("", eval_dir)]
+
+    return []
+
+
+def _format_eval_for_dir(eval_dir: Path, mode_label: str = "") -> list[str]:
+    """Format eval metrics for a single eval directory."""
+    lines = []
+    prefix = f"  [{mode_label}] " if mode_label else "  "
 
     # Fujitsu
     fujitsu = load_eval_json(eval_dir / "fujitsu_eval.json")
@@ -283,9 +299,10 @@ def format_eval_section(run_dir: Path) -> str:
         c = fujitsu.get("cb_model", {}).get("tool_flip_asr", {})
         delta = fujitsu.get("delta", {}).get("tool_flip_asr", "?")
 
-        lines.append("  FUJITSU:")
+        lines.append(f"{prefix}FUJITSU:")
         if b:
-            lines.append(f"    Baseline ASR:     {b.get('attack_success_rate', '?'):.1%}" if isinstance(b.get('attack_success_rate'), (int, float)) else f"    Baseline ASR:     {b.get('attack_success_rate', '?')}")
+            asr_val = b.get("attack_success_rate", "?")
+            lines.append(f"    Baseline ASR:     {asr_val:.1%}" if isinstance(asr_val, (int, float)) else f"    Baseline ASR:     {asr_val}")
         if c:
             asr = c.get("attack_success_rate", "?")
             correct = c.get("correct_tool_call_rate", c.get("correct_behavior_rate", "?"))
@@ -301,7 +318,7 @@ def format_eval_section(run_dir: Path) -> str:
             lines.append(f"    Delta (ASR):      {delta:+.1%}")
         lines.append(f"    Gibberish:        {gib_f}/{total_f}")
     else:
-        lines.append("  FUJITSU: (no eval data)")
+        lines.append(f"{prefix}FUJITSU: (no eval data)")
 
     # AgentDojo harmful
     agentdojo = load_eval_json(eval_dir / "agentdojo_eval.json")
@@ -310,10 +327,11 @@ def format_eval_section(run_dir: Path) -> str:
 
     if agentdojo:
         lines.append("")
-        lines.append("  AGENTDOJO (harmful):")
+        lines.append(f"{prefix}AGENTDOJO (harmful):")
         oc = agentdojo.get("output_comparison", {})
         if oc:
-            lines.append(f"    Diff Rate:        {oc.get('difference_rate', '?'):.1%}" if isinstance(oc.get("difference_rate"), (int, float)) else f"    Diff Rate:        {oc.get('difference_rate', '?')}")
+            dr = oc.get("difference_rate", "?")
+            lines.append(f"    Diff Rate:        {dr:.1%}" if isinstance(dr, (int, float)) else f"    Diff Rate:        {dr}")
         for key in ("baseline", "cb_model"):
             gc = agentdojo.get(key, {}).get("generation_comparison", {})
             if gc:
@@ -334,7 +352,7 @@ def format_eval_section(run_dir: Path) -> str:
                 lines.append(f"    {label}: {' '.join(parts)}")
         lines.append(f"    Gibberish:        {gib_a}/{total_a}")
     else:
-        lines.append("\n  AGENTDOJO (harmful): (no eval data)")
+        lines.append(f"\n{prefix}AGENTDOJO (harmful): (no eval data)")
 
     # AgentDojo benign
     benign = load_eval_json(eval_dir / "agentdojo_benign_eval.json")
@@ -343,7 +361,7 @@ def format_eval_section(run_dir: Path) -> str:
 
     if benign:
         lines.append("")
-        lines.append("  AGENTDOJO (benign):")
+        lines.append(f"{prefix}AGENTDOJO (benign):")
         for key in ("baseline", "cb_model"):
             gc = benign.get(key, {}).get("generation_comparison", {})
             if gc:
@@ -358,10 +376,31 @@ def format_eval_section(run_dir: Path) -> str:
                 lines.append(f"    {label}: {' '.join(parts)}")
         lines.append(f"    Gibberish:        {gib_b}/{total_b}")
     else:
-        lines.append("\n  AGENTDOJO (benign): (no eval data)")
+        lines.append(f"\n{prefix}AGENTDOJO (benign): (no eval data)")
 
-    # Checkpoint progression
-    ckpt_dir = eval_dir / "checkpoints"
+    return lines
+
+
+def format_eval_section(run_dir: Path) -> str:
+    """Format evaluation metrics."""
+    lines = []
+    lines.append("")
+    lines.append("4. EVALUATION METRICS")
+    lines.append("-" * 60)
+
+    eval_dirs = _find_eval_dirs(run_dir)
+    if not eval_dirs:
+        lines.append("  (no eval directory found)")
+        return "\n".join(lines)
+
+    for mode_label, eval_dir in eval_dirs:
+        if mode_label:
+            lines.append("")
+            lines.append(f"  --- Eval mode: {mode_label} ---")
+        lines.extend(_format_eval_for_dir(eval_dir, mode_label=""))
+
+    # Checkpoint progression (check old layout)
+    ckpt_dir = run_dir / "eval" / "checkpoints"
     if ckpt_dir.exists():
         def _ckpt_sort_key(name: str) -> int:
             m = re.search(r"(\d+)", name)
@@ -396,7 +435,25 @@ def format_examples_section(run_dir: Path, max_examples: int = 5) -> str:
     lines.append("5. EXAMPLE COMPARISONS")
     lines.append("-" * 60)
 
-    eval_dir = run_dir / "eval"
+    eval_dirs = _find_eval_dirs(run_dir)
+    if not eval_dirs:
+        lines.append("  (no paired output files found)")
+        return "\n".join(lines)
+
+    # Prefer next_tool_prediction examples if available, else use whatever we have
+    preferred = None
+    for mode_label, eval_dir in eval_dirs:
+        if mode_label == "next_tool_prediction":
+            preferred = (mode_label, eval_dir)
+            break
+    if preferred is None:
+        preferred = eval_dirs[0]
+
+    mode_label, eval_dir = preferred
+    if mode_label:
+        lines.append(f"  (using eval mode: {mode_label})")
+        lines.append("")
+
     shown = 0
 
     # Fujitsu examples
@@ -462,8 +519,14 @@ def format_examples_section(run_dir: Path, max_examples: int = 5) -> str:
                     lines.append(f"  {(p.get('cb_response') or '(empty)')[:300]}")
                     lines.append("")
 
-    if shown == 0 and not (eval_dir / "agentdojo_eval.paired_outputs.jsonl").exists():
-        lines.append("  (no paired output files found)")
+    if shown == 0:
+        found_any = any(
+            (ed / "fujitsu_eval.paired_outputs.jsonl").exists()
+            or (ed / "agentdojo_eval.paired_outputs.jsonl").exists()
+            for _, ed in eval_dirs
+        )
+        if not found_any:
+            lines.append("  (no paired output files found)")
 
     return "\n".join(lines)
 
