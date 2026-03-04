@@ -204,7 +204,7 @@ echo ""
 # Create Sweep Directory
 # =============================================================================
 SWEEP_ID="lmfix_$(date +%Y%m%d_%H%M%S)"
-SWEEP_DIR="$CB_SCRATCH/sweeps/$SWEEP_ID"
+export SWEEP_DIR="$CB_SCRATCH/sweeps/$SWEEP_ID"
 mkdir -p "$SWEEP_DIR"
 echo "Sweep directory: $SWEEP_DIR"
 echo ""
