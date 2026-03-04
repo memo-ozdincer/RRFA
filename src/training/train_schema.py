@@ -358,6 +358,8 @@ def _parse_args() -> argparse.Namespace:
     cb_group.add_argument("--pooling-mask-policy", type=str,
                           choices=["auto", "loss_mask", "asymmetric"],
                           help="Which mask to use for representation pooling")
+    cb_group.add_argument("--beta-kl", type=float,
+                          help="KL divergence coefficient for legacy_cb mode (default: 0.5 from config)")
 
     lora_group = parser.add_argument_group("LoRA")
     lora_group.add_argument("--lora-r", type=int, help="LoRA rank")
@@ -440,6 +442,7 @@ def _build_config(args: argparse.Namespace) -> CircuitBreakerConfig:
         "triplet_mix_cos_weight": "triplet_mix_cos_weight",
         "pooling_mode": "pooling_mode",
         "pooling_mask_policy": "pooling_mask_policy",
+        "beta_kl": "beta_kl",
         "wandb_project": "wandb_project",
         "wandb_run_name": "wandb_run_name",
         "logging_steps": "logging_steps",

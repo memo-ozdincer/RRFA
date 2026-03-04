@@ -1,0 +1,36 @@
+LOSSMASK FIX VALIDATION RESULTS
+================================================================================================
+Sweep: /scratch/memoozd/cb-scratch/sweeps/lmfix_20260303_180808
+
+LOSSMASK COVERAGE (pre-training diagnostics)
+--------------------------------------------------------------------------------
+Policy                               Total   Zero  Nonzero  Avg Cov           Range
+--------------------------------------------------------------------------------
+cb_full_sequence                       200      0      200     90%         72%-97%
+post_injection_only                    200    118       82     35%          5%-61%
+post_injection_tool_calls_only         200    131       69     25%          1%-50%
+
+Run                                            Fuj ASR  Fuj Cor   AD Res   AD Mal  BEN COR   BEN NT
+---------------------------------------------------------------------------------------------------
+cb_full_sequence_l10_20                           60%     40%     88%     12%      6%     16%
+cb_full_sequence_l20-31                           74%     26%     81%     19%      6%     10%
+post_injection_only_l10_20                        64%     30%     85%     15%      8%     30%
+post_injection_only_l20-31                        74%     26%     81%     19%      6%     10%
+post_injection_tool_calls_only_l10_20             64%     34%     83%     17%      8%     24%
+post_injection_tool_calls_only_l20-31             74%     26%     85%     15%      6%     12%
+---------------------------------------------------------------------------------------------------
+
+Best benign_correct: post_injection_only_l10_20 (8%)
+Best harmful_resist: cb_full_sequence_l10_20 (88%)
+
+POST-INJECTION vs CB_FULL_SEQUENCE
+--------------------------------------------------
+Avg benign_correct — post_injection policies: 7%
+Avg benign_correct — cb_full_sequence:        6%
+>>> post_injection FIX WORKS: +1% benign_correct <<<
+Avg harmful_resist — post_injection policies: 84%
+Avg harmful_resist — cb_full_sequence:        84%
+
+
+Written to: /scratch/memoozd/cb-scratch/sweeps/lmfix_20260303_180808/results_report.txt
+(cb_env) [memoozd@trig-login01 rrfa]$

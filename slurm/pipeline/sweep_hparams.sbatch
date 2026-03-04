@@ -146,6 +146,7 @@ POLICIES="${POLICIES:-$DEFAULT_POLICIES}"
 LIMIT_EVAL="${LIMIT_EVAL:-$DEFAULT_LIMIT_EVAL}"
 NUM_EXAMPLES="${NUM_EXAMPLES:-$DEFAULT_NUM_EXAMPLES}"
 SHOW_EXAMPLES="${SHOW_EXAMPLES:-true}"
+EVAL_MODE="${EVAL_MODE:-full_trace}"  # full_trace or next_tool_prediction
 
 # Training params (paper: batch=16, LR=1e-5, LoRA alpha=16)
 # Single-GPU: BATCH_SIZE=4 + GRAD_ACCUM=4 = effective batch 16 (matches paper)
@@ -722,6 +723,7 @@ RUNCFG
                         --output "$CKPT_EVAL_DIR/fujitsu_eval.json" \
                         --limit "$LIMIT_EVAL" \
                         --merge-adapter \
+                        --eval-mode "$EVAL_MODE" \
                         --dtype "$DTYPE" >> "$CKPT_EVAL_DIR/fujitsu.log" 2>&1
 
                     # AgentDojo harmful checkpoint eval
@@ -735,6 +737,7 @@ RUNCFG
                             --use-sample-context \
                             --limit "$LIMIT_EVAL" \
                             --merge-adapter \
+                            --eval-mode "$EVAL_MODE" \
                             --dtype "$DTYPE" >> "$CKPT_EVAL_DIR/agentdojo.log" 2>&1
                     fi
 
@@ -749,6 +752,7 @@ RUNCFG
                             --use-sample-context \
                             --limit "$LIMIT_EVAL" \
                             --merge-adapter \
+                            --eval-mode "$EVAL_MODE" \
                             --dtype "$DTYPE" >> "$CKPT_EVAL_DIR/agentdojo_benign.log" 2>&1
                     fi
 
@@ -797,6 +801,7 @@ if cb:
                         --output "$FUJITSU_OUTPUT" \
                         --limit "$LIMIT_EVAL" \
                         --merge-adapter \
+                        --eval-mode "$EVAL_MODE" \
                         --dtype "$DTYPE" >> "$RUN_DIR/eval/fujitsu.log" 2>&1
 
                     # Print compact Fujitsu summary from JSON
@@ -890,6 +895,7 @@ PYEOF
                             --use-sample-context \
                             --limit "$LIMIT_EVAL" \
                             --merge-adapter \
+                            --eval-mode "$EVAL_MODE" \
                             --dtype "$DTYPE" >> "$RUN_DIR/eval/agentdojo.log" 2>&1
 
                         # Print compact AgentDojo summary
@@ -972,6 +978,7 @@ PYEOF
                             --use-sample-context \
                             --limit "$LIMIT_EVAL" \
                             --merge-adapter \
+                            --eval-mode "$EVAL_MODE" \
                             --dtype "$DTYPE" >> "$RUN_DIR/eval/agentdojo_benign.log" 2>&1
 
                         # Print compact benign summary

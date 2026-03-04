@@ -1,0 +1,135 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs,hyperref,xcolor}
+\definecolor{good}{rgb}{0,0.5,0}
+\definecolor{bad}{rgb}{0.8,0,0}
+\newcommand{\good}[1]{\textcolor{good}{#1}}
+\newcommand{\bad}[1]{\textcolor{bad}{#1}}
+\title{RRFA Experiment Log}
+\author{Internal Notes}
+\date{March 2026 (ongoing)}
+\begin{document}
+\maketitle
+
+% ===================================================================
+\section{Sweep 1: Hyperparameter Grid (Feb 28, 2026)}
+% ===================================================================
+
+\textbf{Setup:} 5 pooling presets $\times$ 2 $\gamma_\mathrm{kl}$ $\times$ 1 loss mode (triplet\_full).
+Layers 20--31. 100 steps. Correct + legacy pooling.
+
+\textbf{Key results:}
+\begin{itemize}
+  \item Best config: \texttt{cdcos12} (correct pooling, $d_\mathrm{cos}$, margins 1.2/1.6, $\gamma_\mathrm{kl}=0.1$)
+  \item Fujitsu: ASR 60\%, correct 40\%
+  \item \bad{ALL configs: 0\% benign\_correct} --- model kills tool calling on benign traces
+  \item Legacy pooling runs (\texttt{leg\_*}) all failed/incomplete
+\end{itemize}
+
+\textbf{Root cause identified:} \texttt{post\_injection\_only} policy fell back to \texttt{cb\_full\_sequence} when no injection span detected, penalizing 72--90\% of benign tokens.
+
+% ===================================================================
+\section{Lossmask Fix + Verification (Mar 3, 2026)}
+% ===================================================================
+
+\textbf{Changes made:}
+\begin{enumerate}
+  \item Fixed \texttt{post\_injection\_only} fallback: returns all-zero mask (not \texttt{cb\_full\_sequence}) when no injection span detected
+  \item Added \texttt{post\_injection\_tool\_calls\_only}: masks only tool-call spans after injection ($\sim$25\% coverage vs $\sim$35\% for \texttt{post\_injection\_only} vs $\sim$90\% for \texttt{cb\_full\_sequence})
+  \item Identified stale data: \texttt{agentdojo\_traces.jsonl} (etl\_a\_v1, no injection detection) vs \texttt{agentdojo\_augmented.jsonl} (etl\_a\_v3, correct)
+\end{enumerate}
+
+\textbf{Local verification (7/7 non-torch tests pass):}
+\begin{itemize}
+  \item Benign traces: 0\% masked (\good{was 72--90\% before fix})
+  \item 150/150 traces differ from \texttt{cb\_full\_sequence} (was 0/150 before)
+\end{itemize}
+
+% ===================================================================
+\section{Sweep 2: Lossmask Fix Validation (Mar 3--4, 2026)}
+% ===================================================================
+
+\textbf{Setup:} 3 policies $\times$ 2 layer configs $=$ 6 runs. 150 steps, correct pooling, $d_\mathrm{cos}$ 1.2/1.6.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lcccccc}
+\toprule
+Run & Fuj ASR$\downarrow$ & Fuj Cor$\uparrow$ & AD Res$\uparrow$ & AD Mal$\downarrow$ & Ben Cor$\uparrow$ & Ben NT \\
+\midrule
+\texttt{cb\_full\_l10\_20}    & \good{60\%} & \good{40\%} & \good{88\%} & 12\% & 6\% & 16\% \\
+\texttt{cb\_full\_l20-31}     & 74\% & 26\% & 81\% & 19\% & 6\% & 10\% \\
+\texttt{pi\_only\_l10\_20}    & 64\% & 30\% & 85\% & 15\% & 8\% & 30\% \\
+\texttt{pi\_only\_l20-31}     & 74\% & 26\% & 81\% & 19\% & 6\% & 10\% \\
+\texttt{pi\_tc\_l10\_20}      & 64\% & 34\% & 83\% & 17\% & 8\% & 24\% \\
+\texttt{pi\_tc\_l20-31}       & 74\% & 26\% & 85\% & 15\% & 6\% & 12\% \\
+\bottomrule
+\end{tabular}
+\caption{Sweep 2 results. $\downarrow$ = lower is better, $\uparrow$ = higher is better.}
+\end{table}
+
+\textbf{Key findings:}
+\begin{enumerate}
+  \item \good{Layers 10,20 $\gg$ layers 20--31}: 14pt better Fujitsu ASR (60--64\% vs 74\%). \textbf{Validates original CB paper} (layers at 31\%/62\% depth) over our 20--31.
+  \item \good{Lossmask fix works}: 0\% $\to$ 6--8\% benign\_correct. Modest but real.
+  \item Policy differences marginal: $\pm$2\% benign, comparable harmful.
+  \item \good{No gibberish}: 0/50 in all 6 runs. 150 steps + correct pooling is stable.
+  \item \bad{Benign eval metric is broken}: baseline only gets 2--6\% correct\_tool. Root cause below.
+  \item \bad{l20-31 overtrained at 150 steps}: Triplet\_B crashes to 0.0 by step 90.
+\end{enumerate}
+
+\subsection{Benign Eval Metric Bug}
+\texttt{evaluate\_generation\_comparison()} feeds the \emph{complete} multi-turn trace and asks for one more turn. For finished tasks, the model correctly outputs text (``Is there anything else?'') but eval counts it as wrong because no reference tool was called.
+
+Evidence:
+\begin{itemize}
+  \item Baseline correct\_tool = 2--6\% (model itself barely ``matches'')
+  \item \texttt{get\_current\_year} dominates broken examples --- but this tool appears in \emph{zero} trace files. The baseline model hallucinates it.
+  \item ``Broken'' examples show CB correctly NOT hallucinating unnecessary tool calls
+\end{itemize}
+
+Fix: \texttt{next\_tool\_prediction} mode --- truncate trace before last tool-calling assistant message, check if model predicts correct next tool.
+
+\subsection{Training Dynamics: l10\_20 vs l20-31}
+\begin{itemize}
+  \item l10\_20 (\texttt{post\_injection}): Loss 0.52 $\to$ 0.26. Triplet\_B stays $\sim$0.11. Learning continues.
+  \item l20-31 (\texttt{post\_injection}): Loss 0.51 $\to$ 0.10. \bad{Triplet\_B crashes to 0.0 by step 90}. Benign reps converged to frozen (no gradient signal). 12 layers of LoRA disrupts intermediate computation.
+  \item Matches Latent Unlearning prediction: deeper layers have lower noise sensitivity.
+\end{itemize}
+
+% ===================================================================
+\section{Paper Insights Applied}
+% ===================================================================
+
+\begin{tabular}{lll}
+\toprule
+Insight & Source & Status \\
+\midrule
+Layers 10+20 (31\%/62\% depth) & Circuit Breakers & \good{Validated} \\
+Post-injection masking & Our fix + Instr.\ Hierarchy & \good{Validated} \\
+Tool-call-only masking & Hammer + AgentFlux & Inconclusive \\
+150 steps (not 1100) & Circuit Breakers & \good{Validated (stable)} \\
+ReLU(cos)+L2 loss & Circuit Breakers & Untested (legacy\_cb mode ready) \\
+Coeff schedule (retain$\uparrow$, reroute$\downarrow$) & Circuit Breakers & Untested (dual weighting ready) \\
+Forget/retain overlap & Latent Unlearning & \bad{Confirmed (identical tool format)} \\
+\bottomrule
+\end{tabular}
+
+% ===================================================================
+\section{Sweep 3: Eval Fix + Legacy CB (planned)}
+% ===================================================================
+
+\textbf{Grid:} 2 loss modes (legacy\_cb, triplet\_full) $\times$ 2 policies $\times$ 2 eval modes $=$ 8 evals from 4 training runs.
+
+\textbf{Goals:}
+\begin{itemize}
+  \item Compare \texttt{next\_tool\_prediction} vs \texttt{full\_trace} metrics
+  \item Test original CB loss (\texttt{legacy\_cb}) with dual coefficient schedule
+  \item LIMIT\_EVAL=100 for better statistics
+  \item Layers fixed at 10,20
+\end{itemize}
+
+\textbf{Results:} (to be filled after run)
+
+\end{document}

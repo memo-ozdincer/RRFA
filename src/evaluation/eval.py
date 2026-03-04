@@ -581,6 +581,7 @@ def _evaluate_model_on_samples(
     verbose: bool,
     use_sample_context: bool = False,
     merge_adapter: bool = False,
+    eval_mode: str = "full_trace",
 ) -> Dict[str, Any]:
     if device.startswith("cuda") and torch.cuda.is_available():
         try:
@@ -685,7 +686,8 @@ def _evaluate_model_on_samples(
         generation_comparison = evaluate_generation_comparison(
             model, tokenizer, eval_samples, actual_tools, actual_system_prompt,
             model_name="cb_model" if adapter_path else "baseline",
-            verbose=verbose
+            verbose=verbose,
+            eval_mode=eval_mode,
         )
         if verbose:
             logger.info(f"  Generation comparison produced {generation_comparison['total_samples']} results")
@@ -736,6 +738,7 @@ def _worker_eval(payload: Tuple[Any, ...]) -> Dict[str, Any]:
         verbose,
         use_sample_context,
         merge_adapter,
+        eval_mode,
     ) = payload
     return _evaluate_model_on_samples(
         model_path=model_path,
@@ -748,6 +751,7 @@ def _worker_eval(payload: Tuple[Any, ...]) -> Dict[str, Any]:
         verbose=verbose,
         use_sample_context=use_sample_context,
         merge_adapter=merge_adapter,
+        eval_mode=eval_mode,
     )
 
 
@@ -1973,6 +1977,7 @@ def evaluate_generation_comparison(
     system_prompt: str,
     model_name: str = "model",
     verbose: bool = True,
+    eval_mode: str = "full_trace",
 ) -> Dict[str, Any]:
     """
     Generation evaluation for datasets without tool_attack info (e.g. AgentDojo).
@@ -1980,6 +1985,14 @@ def evaluate_generation_comparison(
     Generates responses and extracts tool calls. Compares against reference
     tool calls from the original trace when available (assistant messages with
     tool_calls field).
+
+    eval_mode:
+    - "full_trace": Feed complete trace, reference_tools = all tools in trace.
+      Known issue: completed traces don't need another tool call, so baseline
+      only gets 2-6% correct_tool on benign.
+    - "next_tool_prediction": Truncate trace to BEFORE the last tool-calling
+      assistant message. reference_tools = tools in that truncated-off message.
+      Measures whether the model can predict the correct next tool call.
 
     Metrics (when reference trace is available):
     - benign_tool_match_rate: fraction of benign samples where CB calls same tool(s) as reference
@@ -2015,6 +2028,8 @@ def evaluate_generation_comparison(
     samples_with_embedded_tools = 0
     samples_with_inferred_tools = 0
 
+    skipped_ntp = 0  # Samples skipped in next_tool_prediction mode
+
     for sample in iterator:
         messages = sample.get("messages", [])
         if not messages:
@@ -2025,15 +2040,47 @@ def evaluate_generation_comparison(
         category = labels.get("category", "unknown")
         attack_succeeded = labels.get("attack_succeeded")
 
-        # Extract reference tool calls from the original trace's assistant messages
         reference_tools = set()
-        for msg in messages:
-            if msg.get("role") == "assistant":
-                for tc in msg.get("tool_calls") or []:
-                    fn = tc.get("function") or {}
-                    name = fn.get("name")
-                    if name:
-                        reference_tools.add(name)
+
+        # --- next_tool_prediction: truncate trace so model must predict next tool ---
+        if eval_mode == "next_tool_prediction":
+            # Find the LAST assistant message that has tool_calls
+            last_tc_idx = None
+            for i in range(len(messages) - 1, -1, -1):
+                if messages[i].get("role") == "assistant" and messages[i].get("tool_calls"):
+                    last_tc_idx = i
+                    break
+
+            if last_tc_idx is None:
+                skipped_ntp += 1
+                continue  # No tool-calling assistant turns — not evaluable
+
+            # Reference = tools in the message we're about to truncate off
+            reference_tools = set()
+            for tc in messages[last_tc_idx].get("tool_calls", []):
+                name = (tc.get("function") or {}).get("name")
+                if name:
+                    reference_tools.add(name)
+            if not reference_tools:
+                skipped_ntp += 1
+                continue
+
+            # Truncate to everything BEFORE this assistant message
+            messages = messages[:last_tc_idx]
+            if len(messages) < 2:
+                skipped_ntp += 1
+                continue  # Need at least system + user
+
+        # --- full_trace: extract reference from ALL assistant messages (original behavior) ---
+        if eval_mode != "next_tool_prediction":
+            reference_tools = set()
+            for msg in messages:
+                if msg.get("role") == "assistant":
+                    for tc in msg.get("tool_calls") or []:
+                        fn = tc.get("function") or {}
+                        name = fn.get("name")
+                        if name:
+                            reference_tools.add(name)
 
         sample_tools, tool_source = _resolve_tools_for_sample(sample, tools)
         tools_source_counts[tool_source] = tools_source_counts.get(tool_source, 0) + 1
@@ -2149,6 +2196,8 @@ def evaluate_generation_comparison(
         "tools_source_counts": tools_source_counts,
         "samples_with_embedded_tools": samples_with_embedded_tools,
         "samples_with_inferred_tools": samples_with_inferred_tools,
+        "eval_mode": eval_mode,
+        "skipped_ntp": skipped_ntp,
     }
 
     # Add reference-comparison metrics when available
@@ -2351,10 +2400,11 @@ def run_mvp_evaluation(
     use_sample_context: bool = False,
     merge_adapter: bool = False,
     llmail_retrieved_only: bool = True,
+    eval_mode: str = "full_trace",
 ) -> Dict[str, Any]:
     """
     Run full MVP evaluation suite.
-    
+
     Args:
         baseline_model_path: Path to baseline model (optional)
         cb_model_path: Path to CB base model
@@ -2365,6 +2415,7 @@ def run_mvp_evaluation(
         torch_dtype: Model dtype
         verbose: Print detailed results
         use_sample_context: If True, use system prompt/tools from samples (for AgentDojo)
+        eval_mode: "full_trace" (default) or "next_tool_prediction"
     
     Returns:
         Dict with all evaluation results
@@ -2409,6 +2460,7 @@ def run_mvp_evaluation(
         "use_sample_context": use_sample_context,
         "llmail_retrieved_only": llmail_retrieved_only,
         "llmail_filtered_out_not_retrieved": llmail_filtered_out_not_retrieved,
+        "eval_mode": eval_mode,
     }
     
     def _evaluate_with_workers(model_path: str, adapter_path: Optional[str]) -> Dict[str, Any]:
@@ -2424,6 +2476,7 @@ def run_mvp_evaluation(
                 verbose=verbose,
                 use_sample_context=use_sample_context,
                 merge_adapter=merge_adapter,
+                eval_mode=eval_mode,
             )
 
         if not torch.cuda.is_available():
@@ -2448,6 +2501,7 @@ def run_mvp_evaluation(
                     False,
                     use_sample_context,
                     merge_adapter,
+                    eval_mode,
                 )
             )
 
@@ -2886,6 +2940,17 @@ def main():
         default=True,
         help="If true, LLMail attack/usefulness eval uses only samples with email_retrieved=true (default: true).",
     )
+    parser.add_argument(
+        "--eval-mode",
+        type=str,
+        choices=["full_trace", "next_tool_prediction"],
+        default="full_trace",
+        help=(
+            "Eval mode for generation comparison. "
+            "full_trace: feed complete trace (original, but broken for benign on completed tasks). "
+            "next_tool_prediction: truncate to before last tool-calling turn, check if model predicts correct next tool."
+        ),
+    )
 
     args = parser.parse_args()
     
@@ -2965,6 +3030,7 @@ def main():
         use_sample_context=args.use_sample_context,
         merge_adapter=args.merge_adapter,
         llmail_retrieved_only=args.llmail_retrieved_only,
+        eval_mode=args.eval_mode,
     )
     
     # Clean up temp file

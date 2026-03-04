@@ -96,6 +96,7 @@ fi
 TOTAL_STEPS="${TOTAL_STEPS:-$DEFAULT_STEPS}"
 LIMIT_EVAL="${LIMIT_EVAL:-$DEFAULT_LIMIT_EVAL}"
 NUM_EXAMPLES="${NUM_EXAMPLES:-$DEFAULT_NUM_EXAMPLES}"
+EVAL_MODE="${EVAL_MODE:-full_trace}"  # full_trace or next_tool_prediction
 
 # Sweep dimensions: policies x layers
 POLICIES="${POLICIES:-post_injection_only,post_injection_tool_calls_only,cb_full_sequence}"
@@ -637,6 +638,7 @@ TRAINDIAG
         --output "$FUJITSU_OUTPUT" \
         --limit "$LIMIT_EVAL" \
         --merge-adapter \
+        --eval-mode "$EVAL_MODE" \
         --dtype "$DTYPE" >> "$RUN_DIR/eval/fujitsu.log" 2>&1
 
     if [[ -f "$FUJITSU_OUTPUT" ]]; then
@@ -667,6 +669,7 @@ if d:
             --use-sample-context \
             --limit "$LIMIT_EVAL" \
             --merge-adapter \
+            --eval-mode "$EVAL_MODE" \
             --dtype "$DTYPE" >> "$RUN_DIR/eval/agentdojo.log" 2>&1
 
         if [[ -f "$AD_HARMFUL_OUTPUT" ]]; then
@@ -693,6 +696,7 @@ if cb:
             --use-sample-context \
             --limit "$LIMIT_EVAL" \
             --merge-adapter \
+            --eval-mode "$EVAL_MODE" \
             --dtype "$DTYPE" >> "$RUN_DIR/eval/agentdojo_benign.log" 2>&1
 
         if [[ -f "$AD_BENIGN_OUTPUT" ]]; then

@@ -1775,7 +1775,7 @@ class CircuitBreakerTrainer:
                 harmful_frozen_reps,
                 self.config.cb_target_layers,
                 harmful_attention_mask,
-                loss_mask=harmful_pool_mask,
+                loss_mask=harmful_loss_mask,
                 return_metrics=True,
             )
             loss_retain = retain_loss(
@@ -1783,7 +1783,7 @@ class CircuitBreakerTrainer:
                 benign_frozen_reps,
                 self.config.cb_target_layers,
                 benign_attention_mask,
-                loss_mask=benign_pool_mask,
+                loss_mask=benign_loss_mask,
             )
             if beta_kl > 0:
                 if teacher_logits_benign is None:
