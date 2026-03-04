@@ -72,8 +72,8 @@ export TQDM_DISABLE=1
 # =============================================================================
 # Configuration — all overridable via env vars
 # =============================================================================
-TOTAL_STEPS="${TOTAL_STEPS:-50}"
-LIMIT_EVAL="${LIMIT_EVAL:-30}"
+TOTAL_STEPS="${TOTAL_STEPS:-100}"
+LIMIT_EVAL="${LIMIT_EVAL:-50}"
 NUM_EXAMPLES="${NUM_EXAMPLES:-3}"
 BASELINE_ONLY="${BASELINE_ONLY:-false}"
 
@@ -332,6 +332,40 @@ python "$REPO_DIR/scripts/split_agentdojo.py" \
     --lossmasks "$RUN_DIR/lossmasks/agentdojo_augmented.jsonl" \
     --output-dir "$SPLIT_DIR" \
     --legacy-harmful-naming 2>&1 | tail -3
+
+# =============================================================================
+# Save config
+# =============================================================================
+cat > "$RUN_DIR/run_config.json" << RUNCFG
+{
+  "loss_mode": "$LOSS_MODE",
+  "policy": "$POLICY",
+  "layers": "$LAYERS",
+  "layers_short": "${LAYERS//,/_}",
+  "total_steps": $TOTAL_STEPS,
+  "batch_size": $BATCH_SIZE,
+  "grad_accum": $GRAD_ACCUM,
+  "effective_batch": $(( BATCH_SIZE * GRAD_ACCUM )),
+  "learning_rate": "$LEARNING_RATE",
+  "loss_weighting": "$LOSS_WEIGHTING",
+  "gamma_kl": $GAMMA_KL,
+  "beta_kl": $BETA_KL,
+  "pooling_mode": "$POOLING_MODE",
+  "pooling_distance": "$POOLING_DISTANCE",
+  "pooling_margin_b": $POOLING_MARGIN_B,
+  "pooling_margin_h": $POOLING_MARGIN_H,
+  "pooling_policy": "$POOLING_POLICY",
+  "pooling_mask_policy": "$POOLING_MASK_POLICY",
+  "lora_r": $LORA_R,
+  "lora_alpha": $LORA_ALPHA,
+  "preset": "$PRESET",
+  "eval_mode": "$EVAL_MODE",
+  "model": "$TOKENIZER",
+  "run_name": "$RUN_TAG",
+  "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "job_id": "${SLURM_JOB_ID:-local}"
+}
+RUNCFG
 
 # =============================================================================
 # Training
