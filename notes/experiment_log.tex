@@ -205,26 +205,154 @@ Forget/retain overlap & Latent Unlearning & \bad{Confirmed (identical tool forma
 \end{tabular}
 
 % ===================================================================
-\section{Conclusions So Far}
+\section{Sweep 4: Reproduction (Mar 4, 2026, run 2)}
 % ===================================================================
 
-\textbf{Best config:} \texttt{trip\_cfs\_l10\_20} (triplet\_full + cb\_full\_sequence + layers 10,20). Fujitsu ASR 62\%, AD resist 82--85\%, NTP benign 21\% correct / 2\% no\_tool. Zero gibberish.
+\textbf{Grid:} Identical to Sweep 3. 4 training runs $\times$ 2 eval modes $=$ 8 evals.
+
+\subsection{Reproducibility: Excellent ($\pm$2pp)}
+
+\begin{tabular}{lcccccccc}
+\toprule
+Run & S3 ASR & S4 ASR & S3 Res & S4 Res & S3 BenC & S4 BenC & S3 NT & S4 NT \\
+\midrule
+\texttt{lcb\_cfs} & 86\% & 85\% & 79\% & 79\% & 21\% & 21\% & 0\% & 0\% \\
+\texttt{lcb\_pio} & 86\% & 85\% & 81\% & 81\% & 21\% & 21\% & 0\% & 0\% \\
+\texttt{trip\_cfs} & 63\% & 61\% & 82\% & 83\% & 21\% & 19\% & 2\% & 3\% \\
+\texttt{trip\_pio} & 62\% & 63\% & 80\% & 78\% & 20\% & 21\% & 14\% & 12\% \\
+\bottomrule
+\end{tabular}
+
+\subsection{Finding 5: Baseline NTP ceiling is 21\% (ANSWERED)}
+Baseline NTP benign: 20--21\% correct, 0\% no\_tool across all 4 runs. \textbf{This is the ceiling.} The remaining $\sim$79\% are wrong-tool predictions by the base model itself.
+
+CB model degradation: \texttt{trip\_cfs} $-$2pp correct, $+$3pp no\_tool. \texttt{trip\_pio} 0pp correct, $+$12pp no\_tool. \texttt{lcb} identical to baseline (learns nothing).
+
+\subsection{Finding 6: legacy\_cb gradient failure (deeper root cause)}
+Reroute component at every checkpoint:
+\begin{verbatim}
+[Step 0]   cos_sim=1.0000  grad_norm=0.0007  (cs=10, cr=0)
+[Step 50]  cos_sim=1.0000  grad_norm=3.6     (retain gradient)
+[Step 100] cos_sim=1.0000  grad_norm=2.5     (retain gradient)
+\end{verbatim}
+
+Even at step 0 with pure reroute (cs=10, cr=0), grad\_norm$\approx$0. \texttt{ReLU(cos\_sim)} provides near-zero gradient for LoRA-scale perturbations (rank 16 in 4096-dim). The loss surface is flat around cos\_sim$=$1.0 at LoRA scale. \textbf{Not just a schedule problem --- a loss/LoRA incompatibility.} Original CB paper uses full fine-tuning.
+
+\subsection{Finding 7: trip\_pio increases AD malicious rate}
+\begin{tabular}{lccc}
+\toprule
+Run & Baseline malicious & CB malicious & $\Delta$ \\
+\midrule
+\texttt{trip\_cfs} & 19\% & \good{17\%} & $-$2pp \\
+\texttt{trip\_pio} & 19\% & \bad{22\%} & $+$3pp \\
+\bottomrule
+\end{tabular}
+
+\texttt{trip\_pio} makes the model \emph{more} vulnerable to AD injection attacks while suppressing tool calls indiscriminately (12\% NTP no\_tool, 6\% Fuj no\_tool, 19\% AD no\_tool). Root cause: 97\% of benign data filtered (8793 $\to$ 239 samples). Model cannot learn to discriminate benign vs harmful tool calls.
+
+\subsection{Training dynamics detail}
+\begin{tabular}{lcccccc}
+\toprule
+Run & harmful & benign & Loss[150] & Trip\_B[150] & Trip\_H[150] & KL[150] \\
+\midrule
+\texttt{trip\_cfs} & 10399 & \good{8793} & 0.881 & 0.932 & 1.015 & 0.089 \\
+\texttt{trip\_pio} & 8603 & \bad{239} & 0.270 & 0.113 & 0.501 & 0.138 \\
+\texttt{lcb\_cfs} & 10399 & 8793 & 2.104 & --- & --- & 0.001 \\
+\texttt{lcb\_pio} & 8603 & 239 & 2.162 & --- & --- & 0.001 \\
+\bottomrule
+\end{tabular}
+
+\texttt{trip\_pio} epochs every $\sim$15 steps (239/16), sees each sample $\sim$10$\times$.
+
+% ===================================================================
+\section{Conclusions (Updated Mar 4)}
+% ===================================================================
+
+\textbf{Best config:} \texttt{trip\_cfs\_l10\_20} (triplet\_full + cb\_full\_sequence + layers 10,20). Fujitsu ASR 60--63\%, AD resist 82--83\%, NTP benign 19--21\% correct / 2--3\% no\_tool. Zero gibberish. \textbf{Reproduced across 2 independent runs.}
 
 \textbf{Settled decisions:}
 \begin{itemize}
   \item Layers: 10,20 (not 20--31)
   \item Steps: 150
   \item Pooling: correct mode, $d_\mathrm{cos}$, margins 1.2/1.6
-  \item Loss: triplet\_full (not legacy\_cb)
-  \item Policy: cb\_full\_sequence (post\_injection\_only hurts benign more than it helps)
+  \item Loss: triplet\_full (not legacy\_cb --- incompatible with LoRA)
+  \item Policy: cb\_full\_sequence (post\_injection\_only creates harmful tradeoff)
   \item Eval: next\_tool\_prediction mode for benign metrics
 \end{itemize}
 
-\textbf{Open questions:}
+\textbf{Answered questions:}
 \begin{itemize}
-  \item Is 21\% NTP benign correct the baseline ceiling? Need baseline-only NTP eval.
-  \item Can $\gamma_\mathrm{kl}$ increase (0.1 $\to$ 0.3--0.5) reduce ``text instead of tool'' failures?
-  \item 239 benign traces with injection spans --- mislabeled or correctly handled?
+  \item \good{21\% NTP benign correct IS the baseline ceiling.} CB degradation: $-$2pp correct, $+$3pp no\_tool.
+  \item \good{legacy\_cb fails due to loss function + LoRA incompatibility}, not just schedule.
+  \item \good{trip\_pio creates harmful tradeoff}: $+$3pp AD malicious, $+$12pp benign no\_tool.
+\end{itemize}
+
+\textbf{Remaining levers:}
+\begin{itemize}
+  \item $\gamma_\mathrm{kl}$ increase (0.1 $\to$ 0.3--0.5): reduce ``code gen instead of tool call'' failure mode
+  \item Restrict LoRA to layers 0--20 (original CB paper)
+  \item More steps: Trip\_H=1.015 at step 150, margin=1.6 --- rerouting hasn't fully converged
+  \item Training data diversity (AgentHarm, WebArena, etc.)
+\end{itemize}
+
+% ===================================================================
+\section{Paper Insights Applied (Final)}
+% ===================================================================
+
+\begin{tabular}{lll}
+\toprule
+Insight & Source & Status \\
+\midrule
+Layers 10+20 (31\%/62\% depth) & Circuit Breakers & \good{Validated (Sweeps 2--4)} \\
+Post-injection masking & Our fix + Instr.\ Hierarchy & \good{Validated but cb\_full\_seq better} \\
+Tool-call-only masking & Hammer + AgentFlux & Inconclusive (Sweep 2) \\
+150 steps (not 1100) & Circuit Breakers & \good{Validated (stable)} \\
+ReLU(cos)+L2 loss & Circuit Breakers & \bad{Failed --- LoRA gradient $\approx$0} \\
+Coeff schedule (retain$\uparrow$, reroute$\downarrow$) & Circuit Breakers & \bad{Failed --- washes out rerouting} \\
+Forget/retain overlap & Latent Unlearning & \bad{Confirmed (identical tool format)} \\
+\bottomrule
+\end{tabular}
+
+% ===================================================================
+\section{Sweep 5 Plan: Contrastive Training + Config Improvements}
+% ===================================================================
+
+\textbf{Goal:} Address the 3 root causes of remaining performance gaps:
+(1) forget/retain token overlap, (2) too-broad masking, (3) LoRA perturbation of final layers.
+
+\textbf{New capabilities implemented (Mar 4, 2026):}
+\begin{itemize}
+  \item \texttt{tool\_name\_weighted} lossmask: weight 1.0 on tool name, 0.3 on arguments (AgentFlux insight)
+  \item \texttt{injection\_aware} lossmask: weight 0.5 on injection span + 1.0 on post-injection assistant
+  \item Contrastive pair generation (\texttt{op\_contrastive}): harmful $\leftrightarrow$ benign pair mapping
+  \item \texttt{ContrastiveSchemaDataset}: matched (harmful, counterfactual\_benign) training
+  \item \texttt{--lora-target-layers 0-20}: restrict LoRA to first 21 layers
+\end{itemize}
+
+\textbf{Planned grid (6 runs):}
+
+\begin{tabular}{clllll}
+\toprule
+\# & LoRA Layers & $\gamma_\mathrm{kl}$ & Steps & Data & Purpose \\
+\midrule
+1 & 0--31 & 0.1 & 150 & standard & reproduction baseline \\
+2 & 0--20 & 0.1 & 150 & standard & isolate LoRA restriction \\
+3 & 0--20 & 0.3 & 150 & standard & + gamma increase \\
+4 & 0--20 & 0.3 & 300 & standard & + more steps \\
+5 & 0--20 & 0.3 & 300 & contrastive & + contrastive pairs \\
+6 & 0--20 & 0.3 & 300 & contrastive+inj\_aware & + injection\_aware mask \\
+\bottomrule
+\end{tabular}
+
+All runs use: triplet\_full, cb\_full\_sequence, l10\_20, dual, correct pooling, NTP eval.
+
+\textbf{Hypotheses:}
+\begin{itemize}
+  \item LoRA 0--20 reduces code-gen failure mode (preserves final-layer tool-call generation)
+  \item $\gamma_\mathrm{kl}=0.3$ reduces no\_tool rate (stronger generation quality anchor)
+  \item 300 steps allows Trip\_H to converge below margin (currently 1.015 at 150, margin=1.6)
+  \item Contrastive pairs address forget/retain overlap (BIPIA: near-100\% injection resistance)
+  \item injection\_aware mask teaches detection, not just resistance
 \end{itemize}
 
 \end{document}

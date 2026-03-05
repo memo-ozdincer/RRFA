@@ -363,6 +363,43 @@ def op_transplant(
     return new_traces
 
 
+# ── Operation: contrastive ───────────────────────────────────────────────
+
+
+def op_contrastive(traces: List[Dict], stats: Dict[str, int]) -> List[Dict]:
+    """Build contrastive pair mapping: harmful <-> benign (removal) traces.
+
+    For each harmful trace that has a corresponding removal-provenance benign
+    trace, create a mapping record linking both. The training pipeline uses
+    these pairs to provide counterfactual signal: "when you see injection,
+    still call the tool you would have called without it."
+    """
+    # Index removal traces by parent_trace_id
+    removal_by_parent: Dict[str, str] = {}
+    for t in traces:
+        sf = (t.get("raw_metadata") or {}).get("source_fields") or {}
+        if sf.get("augmentation_provenance") == "removal":
+            parent_ids = (t.get("links") or {}).get("parent_trace_ids", [])
+            for pid in parent_ids:
+                removal_by_parent[pid] = t["id"]
+
+    pairs = []
+    for t in traces:
+        cat = (t.get("labels") or {}).get("category", "")
+        if cat not in ("harmful", "resisted"):
+            continue
+        tid = t.get("id", "")
+        if tid in removal_by_parent:
+            pairs.append({
+                "harmful_trace_id": tid,
+                "benign_trace_id": removal_by_parent[tid],
+                "pair_type": "injection_removal",
+            })
+
+    stats["contrastive_pairs"] = len(pairs)
+    return pairs
+
+
 # ── Operation: taxonomy ──────────────────────────────────────────────────
 
 
@@ -441,6 +478,10 @@ def main():
         "--max-transplant", type=int, default=None,
         help="Cap on number of transplant traces (default: no cap)",
     )
+    parser.add_argument(
+        "--contrastive-output", type=Path, default=None,
+        help="Output path for contrastive pair mapping JSONL (used by contrastive operation)",
+    )
 
     args = parser.parse_args()
     logging.basicConfig(
@@ -505,6 +546,21 @@ def main():
             transplant_traces = transplant_traces[:args.max_transplant]
             print(f"    Capped transplant to {args.max_transplant}")
         print(f"    Created: {stats['transplant_created']} harmful traces from injection transplant")
+
+    # Step 4b: Contrastive pair mapping (must run after removal)
+    if "contrastive" in ops:
+        combined_for_pairs = traces + removal_traces + transplant_traces
+        print(">>> Running contrastive pair mapping...")
+        contrastive_pairs = op_contrastive(combined_for_pairs, stats)
+        print(f"    Created: {stats['contrastive_pairs']} contrastive pairs")
+        if contrastive_pairs and args.contrastive_output:
+            args.contrastive_output.parent.mkdir(parents=True, exist_ok=True)
+            with open(args.contrastive_output, "w") as f:
+                for pair in contrastive_pairs:
+                    f.write(json.dumps(pair, ensure_ascii=False) + "\n")
+            print(f"    Written to: {args.contrastive_output}")
+        elif contrastive_pairs and not args.contrastive_output:
+            print("    WARNING: --contrastive-output not specified, pairs not written")
 
     # Combine all traces
     all_traces = traces + removal_traces + transplant_traces

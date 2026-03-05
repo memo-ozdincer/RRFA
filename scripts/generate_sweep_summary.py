@@ -112,32 +112,38 @@ def parse_run_name(name: str) -> dict:
     return result
 
 
-def collect_run_metrics(run_dir: Path) -> dict:
-    """Collect key metrics for a single run."""
-    info = parse_run_name(run_dir.name)
-    info["run_name"] = run_dir.name
-    info["status"] = "unknown"
-
-    # Try to load run_config.json for accurate config
-    config_path = run_dir / "run_config.json"
-    if config_path.exists():
-        with open(config_path) as f:
-            config = json.load(f)
-        info["preset"] = config.get("preset", info["preset"])
-        info["alpha"] = str(config.get("alpha", info["alpha"]))
-        info["gamma_kl"] = str(config.get("triplet_gamma_kl", info["gamma_kl"]))
-        info["loss_mode"] = config.get("loss_mode", info.get("loss_mode", "triplet_full"))
-        info["layers"] = config.get("layers", info["layers"])
-        info["policy"] = config.get("policy", info["policy"])
-
+def _find_eval_dirs(run_dir: Path) -> list[tuple[str, Path]]:
+    """Find eval directories, supporting both old (eval/) and new (eval/{mode}/) layouts."""
     eval_dir = run_dir / "eval"
+    if not eval_dir.exists():
+        return []
+
+    # Check for eval mode subdirectories first (new layout)
+    mode_dirs = []
+    for mode in ("full_trace", "next_tool_prediction"):
+        subdir = eval_dir / mode
+        if subdir.is_dir() and any(subdir.glob("*.json")):
+            mode_dirs.append((mode, subdir))
+
+    if mode_dirs:
+        return mode_dirs
+
+    # Fall back to old layout (JSONs directly in eval/)
+    if any(eval_dir.glob("*.json")):
+        return [("", eval_dir)]
+
+    return []
+
+
+def _collect_eval_metrics(eval_dir: Path) -> dict:
+    """Extract metrics from a single eval directory."""
+    info = {}
 
     # Fujitsu
     fujitsu = load_eval_json(eval_dir / "fujitsu_eval.json")
     gib_f, total_f = count_gibberish(eval_dir / "fujitsu_eval.paired_outputs.jsonl")
 
     if fujitsu:
-        info["status"] = "success"
         b = fujitsu.get("baseline", {}).get("tool_flip_asr", {})
         c = fujitsu.get("cb_model", {}).get("tool_flip_asr", {})
         info["fuj_baseline_asr"] = b.get("attack_success_rate", "?")
@@ -148,7 +154,7 @@ def collect_run_metrics(run_dir: Path) -> dict:
         delta = fujitsu.get("delta", {}).get("tool_flip_asr", "?")
         info["fuj_delta"] = delta
 
-    # AgentDojo
+    # AgentDojo harmful
     agentdojo = load_eval_json(eval_dir / "agentdojo_eval.json")
     gib_a, total_a = count_gibberish(eval_dir / "agentdojo_eval.paired_outputs.jsonl")
 
@@ -164,6 +170,51 @@ def collect_run_metrics(run_dir: Path) -> dict:
         gc = benign.get("cb_model", {}).get("generation_comparison", {})
         info["ad_benign_correct"] = gc.get("correct_tool_call_rate", "?")
         info["ad_benign_no_tool"] = gc.get("no_tool_call_rate", "?")
+
+    return info
+
+
+def collect_run_metrics(run_dir: Path) -> dict:
+    """Collect key metrics for a single run."""
+    info = parse_run_name(run_dir.name)
+    info["run_name"] = run_dir.name
+    info["status"] = "unknown"
+
+    # Try to load run_config.json for accurate config
+    config_path = run_dir / "run_config.json"
+    if config_path.exists():
+        with open(config_path) as f:
+            config = json.load(f)
+        info["preset"] = config.get("preset", info["preset"])
+        info["alpha"] = str(config.get("alpha", info["alpha"]))
+        info["gamma_kl"] = str(config.get("gamma_kl", info["gamma_kl"]))
+        info["loss_mode"] = config.get("loss_mode", info.get("loss_mode", "triplet_full"))
+        info["layers"] = config.get("layers", info["layers"])
+        info["policy"] = config.get("policy", info["policy"])
+
+    # Find eval directories (supports old and new layouts)
+    eval_dirs = _find_eval_dirs(run_dir)
+
+    if eval_dirs:
+        info["status"] = "success"
+        # Prefer next_tool_prediction for overview metrics, fall back to first available
+        preferred = None
+        for mode_label, eval_dir in eval_dirs:
+            if mode_label == "next_tool_prediction":
+                preferred = (mode_label, eval_dir)
+                break
+        if preferred is None:
+            preferred = eval_dirs[0]
+
+        eval_metrics = _collect_eval_metrics(preferred[1])
+        info.update(eval_metrics)
+        if preferred[0]:
+            info["eval_mode_used"] = preferred[0]
+
+        # Collect all eval modes for detailed view
+        info["eval_modes"] = {}
+        for mode_label, eval_dir in eval_dirs:
+            info["eval_modes"][mode_label or "default"] = _collect_eval_metrics(eval_dir)
 
     return info
 

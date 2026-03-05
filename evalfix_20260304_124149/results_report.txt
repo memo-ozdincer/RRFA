@@ -1,0 +1,56 @@
+LOSSMASK FIX VALIDATION RESULTS
+================================================================================================
+Sweep: /scratch/memoozd/cb-scratch/sweeps/evalfix_20260304_124149
+
+LOSSMASK COVERAGE (pre-training diagnostics)
+--------------------------------------------------------------------------------
+Policy                               Total   Zero  Nonzero  Avg Cov           Range
+--------------------------------------------------------------------------------
+cb_full_sequence                       200      0      200     90%         72%-97%
+post_injection_only                    200    118       82     35%          5%-61%
+
+EVAL MODE: full_trace (FT)
+Run                                            Fuj ASR  Fuj Cor   AD Res   AD Mal  BEN COR   BEN NT
+---------------------------------------------------------------------------------------------------
+lcb_cb_full_sequence_l10_20                       84%     16%     75%     25%      8%      8%
+lcb_post_injection_only_l10_20                    86%     14%     75%     25%     10%      8%
+trip_cb_full_sequence_l10_20                      60%     40%     84%     16%      6%     17%
+trip_post_injection_only_l10_20                   63%     30%     75%     25%     12%     28%
+---------------------------------------------------------------------------------------------------
+
+EVAL MODE: next_tool_prediction (NTP)
+Run                                            Fuj ASR  Fuj Cor   AD Res   AD Mal  BEN COR   BEN NT
+---------------------------------------------------------------------------------------------------
+lcb_cb_full_sequence_l10_20                       85%     15%     79%     21%     21%      0%
+lcb_post_injection_only_l10_20                    85%     15%     81%     19%     21%      0%
+trip_cb_full_sequence_l10_20                      61%     39%     83%     17%     19%      3%
+trip_post_injection_only_l10_20                   63%     31%     78%     22%     21%     12%
+---------------------------------------------------------------------------------------------------
+
+EVAL MODE COMPARISON (FT vs NTP)
+-----------------------------------------------------------------------------------------------
+Run                            | FT Ben% NTP Ben% | FT ASR NTP ASR | FT Res NTP Res
+-----------------------------------------------------------------------------------------------
+lcb_cb_full_sequence_l10_20    |      8%      21% |     84%     85% |     75%     79%
+lcb_post_injection_only_l10_20 |     10%      21% |     86%     85% |     75%     81%
+trip_cb_full_sequence_l10_20   |      6%      19% |     60%     61% |     84%     83%
+trip_post_injection_only_l10_20 |     12%      21% |     63%     63% |     75%     78%
+
+Best benign_correct: lcb_cb_full_sequence_l10_20 (next_tool_prediction) (21%)
+Best harmful_resist: trip_cb_full_sequence_l10_20 (next_tool_prediction) (83%)
+
+POST-INJECTION vs CB_FULL_SEQUENCE
+--------------------------------------------------
+Avg benign_correct — post_injection policies: 21%
+Avg benign_correct — cb_full_sequence:        20%
+>>> post_injection FIX WORKS: +1% benign_correct <<<
+Avg harmful_resist — post_injection policies: 80%
+Avg harmful_resist — cb_full_sequence:        81%
+
+LEGACY_CB vs TRIPLET_FULL
+--------------------------------------------------
+Avg Fujitsu ASR — legacy_cb:     85%
+Avg Fujitsu ASR — triplet_full:  62%
+>>> triplet_full better by 22% ASR reduction <<<
+Avg benign_correct — legacy_cb:     21%
+Avg benign_correct — triplet_full:  20%

@@ -263,6 +263,17 @@ def _default_lmp_registry() -> LMPRegistry:
                         "Focuses CB penalty on tool-call decision tokens, not free text. "
                         "Returns all-zero mask when no injection span is detected.",
         ),
+        "tool_name_weighted": LMPPolicy(
+            name="Tool Name Weighted",
+            strategy="tool_name_weighted",
+            description="Differential weighting: tool name tokens at 1.0, argument tokens at 0.3.",
+        ),
+        "injection_aware": LMPPolicy(
+            name="Injection Aware",
+            strategy="injection_aware",
+            description="Injection spans (0.5) + post-injection assistant (1.0). "
+                        "Returns all-zero mask when no injection span is detected.",
+        ),
     }
     return LMPRegistry(version="1.0.0", policies=policies, default_policy="assistant_only")
 
@@ -764,6 +775,57 @@ def _mask_post_injection_tool_calls_only(render: RenderedView, mask: List[float]
     return mask
 
 
+def _mask_tool_name_weighted(render: RenderedView, mask: List[float]) -> List[float]:
+    """Differential weighting: tool name tokens at 1.0, argument tokens at 0.3.
+
+    Based on AgentFlux insight: tool selection (61.5% importance) and argument
+    generation (39%) are fundamentally different tasks. Focusing CB penalty on
+    tool name tokens preserves argument-generation capability while still
+    rerouting tool selection.
+    """
+    if render.alignment and render.alignment.tool_call_spans:
+        for span in render.alignment.tool_call_spans:
+            name_end = span.name_token_end or span.token_end
+            # Tool name: full weight
+            for i in range(span.token_start, min(name_end, len(mask))):
+                mask[i] = 1.0
+            # Arguments: reduced weight
+            for i in range(name_end, min(span.token_end, len(mask))):
+                mask[i] = 0.3
+    return mask
+
+
+def _mask_injection_aware(render: RenderedView, mask: List[float]) -> List[float]:
+    """Mask injection spans (weight 0.5) + post-injection assistant tokens (weight 1.0).
+
+    Teaches both detection and resistance simultaneously:
+    - Injection span tokens get lower weight (0.5) to signal "this is suspicious content"
+    - Post-injection assistant tokens get full weight (1.0) to signal "resist this"
+
+    Returns all-zero mask when no injection span is detected (same as post_injection_only).
+    """
+    if not render.signals or not render.signals.injection_spans:
+        return mask  # All-zero for no injection
+
+    injection_token_end = max(
+        s.token_end for s in render.signals.injection_spans
+    )
+
+    # Injection span tokens: detection signal (lower weight)
+    for span in render.signals.injection_spans:
+        for i in range(span.token_start, min(span.token_end, len(mask))):
+            mask[i] = 0.5
+
+    # Post-injection assistant tokens: resistance signal (full weight)
+    if render.alignment and render.alignment.assistant_spans:
+        for span in render.alignment.assistant_spans:
+            if span.token_start >= injection_token_end:
+                for i in range(span.token_start, min(span.token_end, len(mask))):
+                    mask[i] = 1.0
+
+    return mask
+
+
 def _mask_custom(render: RenderedView, mask: List[float], params: Optional[Dict[str, Any]]) -> List[float]:
     params = params or {}
     applied = False
@@ -823,6 +885,10 @@ def _apply_lmp_policy(render: RenderedView, policy: LMPPolicy) -> List[float]:
         return _mask_post_injection_only(render, mask)
     if policy.strategy == "post_injection_tool_calls_only":
         return _mask_post_injection_tool_calls_only(render, mask)
+    if policy.strategy == "tool_name_weighted":
+        return _mask_tool_name_weighted(render, mask)
+    if policy.strategy == "injection_aware":
+        return _mask_injection_aware(render, mask)
     if policy.strategy == "custom":
         return _mask_custom(render, mask, policy.params)
 

@@ -1770,6 +1770,42 @@ class CircuitBreakerTrainer:
                 "alpha": alpha,
             }
         elif loss_mode == LOSS_MODE_LEGACY_CB:
+            # === Step-0 Diagnostic for legacy_cb ===
+            if self.global_step == 0 and self.accelerator.is_main_process:
+                _pool_mode_lcb = getattr(self.config, "pooling_mode", "legacy")
+                _h_pool_diag = harmful_pool_mask if harmful_pool_mask is not None else harmful_attention_mask
+                _b_pool_diag = benign_pool_mask if benign_pool_mask is not None else benign_attention_mask
+                _h_label_diag = harmful_loss_mask if harmful_loss_mask is not None else harmful_attention_mask
+                _b_label_diag = benign_loss_mask if benign_loss_mask is not None else benign_attention_mask
+
+                _masks_decoupled = (harmful_pooling_mask is not None
+                                    and not torch.equal(harmful_pooling_mask, harmful_loss_mask)
+                                    if harmful_pooling_mask is not None and harmful_loss_mask is not None
+                                    else False)
+                self.accelerator.print(
+                    f"\n  Decoupled masks: {'ACTIVE' if _masks_decoupled else 'INACTIVE'} "
+                    f"(pooling_mask_policy={_pool_policy})"
+                )
+                if _masks_decoupled:
+                    self.accelerator.print(
+                        f"  Harmful pool mask active: {_h_pool_diag.sum().item():.0f} vs "
+                        f"label mask active: {_h_label_diag.sum().item():.0f}"
+                    )
+                    self.accelerator.print(
+                        f"  Benign pool mask active:  {_b_pool_diag.sum().item():.0f} vs "
+                        f"label mask active: {_b_label_diag.sum().item():.0f}"
+                    )
+
+                self._log_pooling_diagnostic(
+                    harmful_model_reps=harmful_model_reps,
+                    harmful_frozen_reps=harmful_frozen_reps,
+                    benign_model_reps=benign_model_reps,
+                    benign_frozen_reps=benign_frozen_reps,
+                    harmful_mask=_h_pool_diag,
+                    benign_mask=_b_pool_diag,
+                    current_mode=_pool_mode_lcb,
+                )
+
             loss_reroute, reroute_metrics = reroute_loss(
                 harmful_model_reps,
                 harmful_frozen_reps,

@@ -31,6 +31,8 @@ class LMPPolicy:
         "tool_calls_only",
         "action_prefix_only",
         "action_commitment",
+        "tool_name_weighted",
+        "injection_aware",
         "custom",
     ]
     description: Optional[str] = None

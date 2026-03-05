@@ -210,6 +210,127 @@ class SchemaDataset(Dataset):
         }
 
 
+class ContrastiveSchemaDataset(Dataset):
+    """Dataset serving matched (harmful, counterfactual_benign, random_benign) triplets.
+
+    Uses a contrastive pair mapping (from augment_agentdojo.py --operations contrastive)
+    to pair each harmful trace with its injection-removed benign counterpart. This gives
+    the model a causal signal: "when you see injection, still call the original tool."
+
+    The __getitem__ returns the same dict structure as SchemaDataset, but the benign
+    sample is the COUNTERFACTUAL (matched context without injection), not a random
+    benign sample. This is critical for addressing the forget/retain overlap problem.
+    """
+
+    def __init__(
+        self,
+        harmful_samples: List[Dict[str, Any]],
+        benign_samples: List[Dict[str, Any]],
+        pair_mapping: Dict[str, str],
+        max_length: int = 2048,
+        pad_token_id: int = 0,
+    ):
+        self.max_length = max_length
+        self.pad_token_id = pad_token_id
+        self.benign_samples = benign_samples
+
+        # Index samples by trace_id
+        harmful_by_id = {}
+        for s in harmful_samples:
+            tid = s.get("trace_id")
+            if tid:
+                harmful_by_id[tid] = s
+
+        benign_by_id = {}
+        for s in benign_samples:
+            tid = s.get("trace_id")
+            if tid:
+                benign_by_id[tid] = s
+
+        # Build valid pairs (both sides must have rendered data)
+        self.pairs: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
+        for h_id, b_id in pair_mapping.items():
+            if h_id in harmful_by_id and b_id in benign_by_id:
+                self.pairs.append((harmful_by_id[h_id], benign_by_id[b_id]))
+
+        # Unpaired harmful samples (no counterfactual available) — fall back to random benign
+        self.unpaired_harmful: List[Dict[str, Any]] = []
+        paired_h_ids = set(pair_mapping.keys())
+        for s in harmful_samples:
+            tid = s.get("trace_id")
+            if tid and tid not in paired_h_ids:
+                self.unpaired_harmful.append(s)
+
+        self.num_paired = len(self.pairs)
+        self.total = self.num_paired + len(self.unpaired_harmful)
+
+        if self.total == 0:
+            raise ValueError("No paired or unpaired harmful data available")
+
+        logger.info(
+            "ContrastiveSchemaDataset: paired=%d unpaired_harmful=%d benign_pool=%d",
+            self.num_paired, len(self.unpaired_harmful), len(benign_samples),
+        )
+
+    def __len__(self) -> int:
+        return self.total
+
+    def _prepare_sample(self, sample: Dict[str, Any]) -> Dict[str, torch.Tensor]:
+        input_ids = sample["input_ids"][: self.max_length]
+        attention_mask = sample["attention_mask"][: self.max_length]
+        loss_mask = sample["loss_mask"][: self.max_length]
+
+        def _pad(values: List[Any], value: Any) -> List[Any]:
+            if len(values) < self.max_length:
+                return values + [value] * (self.max_length - len(values))
+            return values[:self.max_length]
+
+        input_ids = _pad(input_ids, self.pad_token_id)
+        attention_mask = _pad(attention_mask, 0)
+        loss_mask = _pad(loss_mask, 0.0)
+
+        result = {
+            "input_ids": torch.tensor(input_ids, dtype=torch.long),
+            "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
+            "loss_mask": torch.tensor(loss_mask, dtype=torch.float),
+            "sample_weight": torch.tensor(sample.get("sample_weight", 1.0), dtype=torch.float),
+        }
+
+        pooling_mask_raw = sample.get("pooling_mask")
+        if pooling_mask_raw is not None:
+            pooling_mask = pooling_mask_raw[: self.max_length]
+            pooling_mask = _pad(pooling_mask, 0.0)
+            result["pooling_mask"] = torch.tensor(pooling_mask, dtype=torch.float)
+
+        return result
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        if idx < self.num_paired:
+            harmful_sample, counterfactual = self.pairs[idx]
+            benign = self._prepare_sample(counterfactual)
+        else:
+            # Unpaired harmful — use random benign
+            unpaired_idx = (idx - self.num_paired) % len(self.unpaired_harmful)
+            harmful_sample = self.unpaired_harmful[unpaired_idx]
+            rand_benign = self.benign_samples[idx % len(self.benign_samples)]
+            benign = self._prepare_sample(rand_benign)
+
+        harmful = self._prepare_sample(harmful_sample)
+
+        return {
+            "harmful_input_ids": harmful["input_ids"],
+            "harmful_attention_mask": harmful["attention_mask"],
+            "harmful_loss_mask": harmful["loss_mask"],
+            "harmful_sample_weight": harmful["sample_weight"],
+            "harmful_pooling_mask": harmful.get("pooling_mask", harmful["loss_mask"]),
+            "benign_input_ids": benign["input_ids"],
+            "benign_attention_mask": benign["attention_mask"],
+            "benign_loss_mask": benign["loss_mask"],
+            "benign_sample_weight": benign["sample_weight"],
+            "benign_pooling_mask": benign.get("pooling_mask", benign["loss_mask"]),
+        }
+
+
 def _resolve_training_tokenizer(config: CircuitBreakerConfig) -> AutoTokenizer:
     hf_token = resolve_hf_token()
     offline_mode = os.environ.get("HF_HUB_OFFLINE", "0") == "1"
@@ -231,20 +352,43 @@ def _resolve_training_tokenizer(config: CircuitBreakerConfig) -> AutoTokenizer:
     return tokenizer
 
 
+def _load_contrastive_pairs(path: Path) -> Dict[str, str]:
+    """Load contrastive pair mapping from JSONL."""
+    pairs: Dict[str, str] = {}
+    with open(path) as f:
+        for line in f:
+            if line.strip():
+                rec = json.loads(line)
+                pairs[rec["harmful_trace_id"]] = rec["benign_trace_id"]
+    logger.info("Loaded %d contrastive pairs from %s", len(pairs), path)
+    return pairs
+
+
 def run_training(
     config: CircuitBreakerConfig,
     harmful_samples: List[Dict[str, Any]],
     benign_samples: List[Dict[str, Any]],
+    contrastive_pairs_path: Optional[Path] = None,
 ) -> None:
     """Build schema dataloader and run the shared trainer core."""
     tokenizer = _resolve_training_tokenizer(config)
 
-    dataset = SchemaDataset(
-        harmful_samples=harmful_samples,
-        benign_samples=benign_samples,
-        max_length=config.max_seq_length,
-        pad_token_id=tokenizer.pad_token_id,
-    )
+    if contrastive_pairs_path and contrastive_pairs_path.exists():
+        pair_mapping = _load_contrastive_pairs(contrastive_pairs_path)
+        dataset = ContrastiveSchemaDataset(
+            harmful_samples=harmful_samples,
+            benign_samples=benign_samples,
+            pair_mapping=pair_mapping,
+            max_length=config.max_seq_length,
+            pad_token_id=tokenizer.pad_token_id,
+        )
+    else:
+        dataset = SchemaDataset(
+            harmful_samples=harmful_samples,
+            benign_samples=benign_samples,
+            max_length=config.max_seq_length,
+            pad_token_id=tokenizer.pad_token_id,
+        )
 
     dataloader = DataLoader(
         dataset,
@@ -292,6 +436,9 @@ def _parse_args() -> argparse.Namespace:
     mode_group.add_argument("--harmful-lossmasks", type=Path, nargs="+", help="Harmful lossmasks JSONL")
     mode_group.add_argument("--benign-renders", type=Path, nargs="+", help="Benign renders JSONL")
     mode_group.add_argument("--benign-lossmasks", type=Path, nargs="+", help="Benign lossmasks JSONL")
+    mode_group.add_argument("--contrastive-pairs", type=Path, default=None,
+                            help="Contrastive pair mapping JSONL (from augment_agentdojo.py). "
+                                 "Enables ContrastiveSchemaDataset for matched harmful/benign training.")
 
     model_group = parser.add_argument_group("Model")
     model_group.add_argument("--preset", type=str, default="llama-3.1-8b-instruct", help="Config preset")
@@ -365,6 +512,8 @@ def _parse_args() -> argparse.Namespace:
     lora_group.add_argument("--lora-r", type=int, help="LoRA rank")
     lora_group.add_argument("--lora-alpha", type=int, help="LoRA alpha")
     lora_group.add_argument("--lora-dropout", type=float, help="LoRA dropout")
+    lora_group.add_argument("--lora-target-layers", type=str, default=None,
+                            help="LoRA target layers: range '0-20' or comma-separated '0,5,10,15,20'")
 
     log_group = parser.add_argument_group("Logging")
     log_group.add_argument("--wandb-project", type=str, help="W&B project")
@@ -465,8 +614,23 @@ def _build_config(args: argparse.Namespace) -> CircuitBreakerConfig:
         config.lora.alpha = args.lora_alpha
     if args.lora_dropout is not None:
         config.lora.dropout = args.lora_dropout
+    if args.lora_target_layers is not None:
+        config.lora.target_layers = _parse_layer_spec(args.lora_target_layers)
 
     return config
+
+
+def _parse_layer_spec(spec: str) -> List[int]:
+    """Parse layer specification: '0-20' or '0,5,10,15,20' or '0-20,25'."""
+    layers: List[int] = []
+    for part in spec.split(","):
+        part = part.strip()
+        if "-" in part:
+            start, end = part.split("-", 1)
+            layers.extend(range(int(start), int(end) + 1))
+        else:
+            layers.append(int(part))
+    return sorted(set(layers))
 
 
 def main() -> None:
@@ -487,7 +651,8 @@ def main() -> None:
     logger.info("  output_dir=%s", config.output_dir)
     logger.info("  harmful=%d benign=%d", len(harmful_samples), len(benign_samples))
 
-    run_training(config, harmful_samples, benign_samples)
+    run_training(config, harmful_samples, benign_samples,
+                 contrastive_pairs_path=args.contrastive_pairs)
 
 
 if __name__ == "__main__":

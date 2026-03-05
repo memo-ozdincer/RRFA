@@ -62,6 +62,18 @@
       "description": "Loss only on tool-call spans after the injection point. Focuses CB penalty on tool-call decision tokens (name + arguments), preserving free-text generation capability. Returns all-zero mask when no injection span is detected.",
       "compatible_with": ["harmful"]
     },
+    "tool_name_weighted": {
+      "name": "Tool Name Weighted",
+      "strategy": "tool_name_weighted",
+      "description": "Differential weighting: tool name tokens at 1.0, argument tokens at 0.3. Based on AgentFlux insight that tool selection (61.5%) and argument generation (39%) are different tasks.",
+      "compatible_with": ["harmful"]
+    },
+    "injection_aware": {
+      "name": "Injection Aware",
+      "strategy": "injection_aware",
+      "description": "Masks injection spans (weight 0.5) and post-injection assistant tokens (weight 1.0). Teaches both detection and resistance. Returns all-zero mask when no injection span is detected.",
+      "compatible_with": ["harmful"]
+    },
     "custom": {
       "name": "Custom",
       "strategy": "custom",
