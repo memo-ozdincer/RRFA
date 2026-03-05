@@ -404,4 +404,178 @@ All runs use: injection\_aware, contrastive pairs, $\gamma_\mathrm{kl}=0.3$, tri
   \item Layers 5,10,15,20 provides earlier-layer intervention for hard cases
 \end{itemize}
 
+% ===================================================================
+\section{Data Augmentation: LLM-Based Trace Completion (Mar 5, 2026)}
+% ===================================================================
+
+\subsection{Problem: Skeletons Can't Drive Representation Rerouting}
+
+The Fujitsu B4 dataset (13{,}246 traces) consists entirely of \textbf{skeletons}:
+system + user messages only, with \emph{no} assistant response.
+Under \texttt{injection\_aware} masking, a skeleton produces:
+
+\begin{center}
+\begin{tabular}{lcl}
+\toprule
+Token region & Weight & Role \\
+\midrule
+System prompt & 0.0 & (always masked) \\
+User query (pre-injection) & 0.0 & (trusted input) \\
+Injection span & 0.5 & detection signal \\
+\bad{Post-injection assistant} & \bad{absent} & \bad{no resistance signal} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Without a post-injection assistant response (the 1.0-weighted tokens that teach
+\emph{resistance}), the CB loss receives only the weak 0.5 detection signal from
+the injection span itself. The model learns to detect injections but never
+learns what to do about them. This explains why skeleton-only training with
+\texttt{--skeleton-policy cb\_full\_sequence} works at all --- it masks the entire
+user message uniformly rather than relying on the absent assistant response.
+
+\subsection{Solution: LLM-Based Skeleton Completion}
+
+We complete each skeleton into a full 5-message multi-turn trace using
+vLLM inference with \textbf{the same Llama-3.1-8B-Instruct model we train on}.
+This ensures the completions are in the model's native token distribution,
+maximizing representation quality for circuit-breaking.
+
+\medskip
+\noindent\textbf{Canonical completed trace structure:}
+
+\begin{center}
+\small
+\begin{tabular}{clcc}
+\toprule
+Msg\# & Role & injection\_aware & cb\_full (pool) \\
+\midrule
+0 & \texttt{system}: B4 system prompt & 0.0 & 0.0 \\
+1 & \texttt{user}: query + injection & \textbf{0.5} (injection span) & 1.0 \\
+2 & \texttt{assistant}: tool call (wrong tool) & \good{\textbf{1.0}} & 1.0 \\
+3 & \texttt{tool}: simulated output & 0.0 & 1.0 \\
+4 & \texttt{assistant}: follow-up response & \good{\textbf{1.0}} & 1.0 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Each skeleton produces \textbf{two} completed traces:
+
+\begin{enumerate}
+  \item \textbf{Harmful} (attacked): User message \emph{with} injection $\to$
+        model calls wrong tool (\texttt{search\_web} instead of
+        \texttt{retrieve\_multimodal\_docs}). The 1.0-weighted assistant tokens
+        carry the resistance signal. \emph{Injection span preserved.}
+  \item \textbf{Benign} (correct): User message \emph{without} injection
+        (clean query only) $\to$ model calls correct tool.
+        Injection\_aware mask is \textbf{all-zero} (retain set, no CB penalty).
+\end{enumerate}
+
+This contrastive pair structure directly implements the BIPIA insight:
+given injected input vs.\ clean input, the correct tool call should be
+identical. The harmful trace teaches detection + resistance; the benign
+counterpart anchors correct behavior.
+
+\subsection{Full Augmentation Pipeline}
+
+Five operations, run sequentially via \texttt{scripts/augment\_llm.py}:
+
+\begin{center}
+\small
+\begin{tabular}{lccl}
+\toprule
+Operation & Input & Output & Purpose \\
+\midrule
+\texttt{complete\_fujitsu} & 13{,}246 skel. & 26{,}492 & Harmful+benign contrastive pairs \\
+\texttt{canonicalize\_ad} & 4{,}369 AD & 4{,}369 & Strip \texttt{<thinking>} (save 22\% tokens) \\
+\texttt{upsample\_minority} & 745 Comment & 3{,}000 & Fix 5.6\%$\to$20\% direction imbalance \\
+\texttt{complete\_fujitsu} & 2{,}255 new skel. & 4{,}510 & Complete the upsampled minority \\
+\texttt{cross\_pollinate} & both sets & 1{,}000 & Injection pattern diversity \\
+\midrule
+& & \textbf{$\sim$36{,}371} & \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Why This Should Work (Literature-Informed)}
+
+\begin{enumerate}
+  \item \textbf{Circuit Breakers}: Rerouting at layers 10+20 requires
+        clear ``injection present $\to$ wrong action taken'' signal in the
+        representation. Completed traces provide exactly this: the tool call
+        decision token is \emph{after} the injection, in the 1.0-weighted region.
+
+  \item \textbf{Latent Unlearning}: Harmful/benign tool calls share identical
+        JSON format (\texttt{\{``name'': ``...'', ``parameters'': \{...\}\}}).
+        The injection\_aware mask zeros out this shared format, focusing loss
+        only on the differing tool \emph{name} tokens. This avoids the
+        forget/retain n-gram overlap that kills unlearning.
+
+  \item \textbf{BIPIA contrastive}: Each skeleton yields a matched pair:
+        (injected $\to$ wrong tool) vs.\ (clean $\to$ correct tool). The
+        \emph{only} difference is the injection in the user message.
+        Contrastive training isolates the causal effect of the injection.
+
+  \item \textbf{StruQ structural separation}: The completed trace has
+        clear channel boundaries: system (trusted), user (partially trusted),
+        injection (untrusted), assistant (decision point). The mask weights
+        directly encode these trust levels (0.0 / 0.5 / 1.0).
+
+  \item \textbf{Same-model completions}: Using vLLM with the same
+        Llama-3.1-8B-Instruct we train on means the tool call tokens are in
+        the model's own distribution. The representations at layers 10+20
+        are native, not cross-model artifacts. This should make rerouting
+        more effective than training on Claude/GPT-generated traces.
+\end{enumerate}
+
+\subsection{Local Verification Results}
+
+Tested 200 completed traces through the full ETL\_B pipeline with the
+Llama-3.1-8B tokenizer:
+
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+Category & Avg tokens & injection\_aware \% & Errors \\
+\midrule
+Harmful & 290 & 37.8\% (26.6 @ 0.5 + 83.1 @ 1.0) & 0/100 \\
+Benign & 253 & \good{0.0\%} (all-zero) & 0/100 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Decoupled masking confirmed:
+\begin{itemize}
+  \item Pool mask (\texttt{cb\_full\_sequence}): 284/304 tokens (93.4\%)
+  \item Loss mask (\texttt{injection\_aware}): 104/304 tokens (34.2\%)
+  \item Ratio: 0.37 (focused gradient flow within broad representation pooling)
+\end{itemize}
+
+\noindent AgentDojo canonicalization: 22.2\% token reduction from removing
+\texttt{<thinking>} blocks. Same injection\_aware mask counts, higher density.
+
+\subsection{Cluster Execution Plan}
+
+\textbf{Phase 1:} Small batch (100 traces per dataset) with rich diagnostics.
+
+\texttt{sbatch slurm/pipeline/run\_llm\_augmentation\_pilot.sbatch}
+
+Produces JSON diagnostic report + sample trace printouts for manual review
+before full-scale run.
+
+\medskip
+\textbf{Phase 2:} Full augmentation (all 13{,}246 skeletons).
+
+\texttt{sbatch slurm/pipeline/run\_llm\_augmentation.sbatch}
+
+Expected output: $\sim$36{,}371 traces with full render/lossmask ETL.
+
+\medskip
+\textbf{Phase 3:} Training sweep with augmented data (Sweep 6+).
+
+Same hyperparameters as Sweep 5 best (injection\_aware, LoRA 0--20,
+$\gamma_\mathrm{kl}=0.3$, 300 steps, contrastive pairs), but with completed
+traces instead of skeletons. Expected to improve Fujitsu ASR beyond
+the current 33.7\% by providing actual post-injection resistance signal.
+
 \end{document}
