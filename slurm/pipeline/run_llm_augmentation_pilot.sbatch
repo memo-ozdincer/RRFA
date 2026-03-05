@@ -3,7 +3,6 @@
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=80G
 #SBATCH --time=01:00:00
 #SBATCH --output=/scratch/memoozd/cb-scratch/logs/%x_%j.out
 #SBATCH --error=/scratch/memoozd/cb-scratch/logs/%x_%j.err
@@ -171,14 +170,14 @@ python scripts/augment_llm.py \
 
 echo ""
 echo "============================================================"
-echo "STEP 3: Upsample Minority (target=50 for pilot)"
+echo "STEP 3: Upsample Minority (target=800 for pilot, existing=745)"
 echo "============================================================"
 
 python scripts/augment_llm.py \
     --operation upsample_minority \
     --input data/traces/fujitsu_b4_traces.jsonl \
     --output "$TRACES_OUT/minority_skeletons.jsonl" \
-    --minority-target 50 \
+    --minority-target 800 \
     --seed $SEED \
     --verbose \
     2>&1 | tee "$DIAG_OUT/step3_upsample.log"
@@ -190,16 +189,21 @@ echo "============================================================"
 echo "STEP 3b: Complete Minority Skeletons"
 echo "============================================================"
 
-python scripts/augment_llm.py \
-    --operation complete_fujitsu \
-    --input "$TRACES_OUT/minority_skeletons.jsonl" \
-    --output "$TRACES_OUT/minority_completed.jsonl" \
-    --vllm-url "$VLLM_URL" \
-    --model "$MODEL" \
-    --batch-size $BATCH_SIZE \
-    --seed $SEED \
-    --verbose \
-    2>&1 | tee "$DIAG_OUT/step3b_complete_minority.log"
+if [[ -s "$TRACES_OUT/minority_skeletons.jsonl" ]]; then
+    python scripts/augment_llm.py \
+        --operation complete_fujitsu \
+        --input "$TRACES_OUT/minority_skeletons.jsonl" \
+        --output "$TRACES_OUT/minority_completed.jsonl" \
+        --vllm-url "$VLLM_URL" \
+        --model "$MODEL" \
+        --batch-size $BATCH_SIZE \
+        --seed $SEED \
+        --verbose \
+        2>&1 | tee "$DIAG_OUT/step3b_complete_minority.log"
+else
+    echo "No minority skeletons to complete (target already met)"
+    touch "$TRACES_OUT/minority_completed.jsonl"
+fi
 
 # ── STEP 4: Cross-Pollinate ──────────────────────────────────────────
 

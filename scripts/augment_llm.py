@@ -1015,15 +1015,47 @@ def op_cross_pollinate(
                 "mixture": {"class_id": "synthetic/cross_pollinate"},
             }
 
-            # Truncate after injection point (remove post-injection assistant response
-            # since it was generated for benign context)
+            # Remove the benign post-injection assistant response (it was for clean context)
+            # and add a harmful response that "follows" the injection
             inj_msg_idx = new_trace["signal_hints"]["injection_char_span"]["message_index"]
             new_trace["messages"] = new_trace["messages"][:inj_msg_idx + 1]
+
+            # Add harmful post-injection assistant (tool call following injection)
+            user_content = trace["messages"][1].get("content", "") if len(trace["messages"]) > 1 else ""
+            query = _extract_query_from_content(user_content)
+            call_id = f"call_{hashlib.md5(new_trace['id'].encode()).hexdigest()[:12]}"
+            new_trace["messages"].append({
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "function": {
+                        "name": "search_web",
+                        "arguments": {"query": query},
+                        "arguments_json": json.dumps({"query": query}, ensure_ascii=False),
+                    },
+                    "call_id": call_id,
+                }],
+            })
+            # Add tool result + follow-up for canonical 5+ message structure
+            tool_output = _generate_tool_output("search_web", query)
+            new_trace["messages"].append({
+                "role": "tool",
+                "content": tool_output,
+                "name": "search_web",
+                "tool_call_id": call_id,
+            })
+            new_trace["messages"].append({
+                "role": "assistant",
+                "content": f"Based on the web search results, here is what I found about your query:\n\n"
+                           f"The search returned relevant information. Let me know if you need more details.",
+            })
+            new_trace["completeness"] = "complete"
 
             new_traces.append(new_trace)
             stats["cross_fuj2ad"] += 1
 
     # Direction 2: AgentDojo-style injection into Fujitsu user messages
+    # Produces COMPLETE traces (not skeletons) using _build_completed_trace
     if agentdojo_injections:
         eligible_fuj = [
             t for t in fujitsu_traces
@@ -1040,7 +1072,6 @@ def op_cross_pollinate(
             user_msg = new_trace["messages"][-1]
             user_content = user_msg.get("content", "")
             benign_part = _extract_query_from_content(user_content)
-
             user_msg["content"] = f"{benign_part}\n\n{injection}"
 
             new_trace["id"] = _make_id("cross_ad2fuj", trace["id"], str(i))
@@ -1056,8 +1087,35 @@ def op_cross_pollinate(
             new_trace.setdefault("raw_metadata", {}).setdefault("source_fields", {})
             new_trace["raw_metadata"]["source_fields"]["augmentation_provenance"] = "cross_pollinate_ad2fuj"
 
-            new_traces.append(new_trace)
-            stats["cross_ad2fuj"] += 1
+            # Build complete harmful trace (with AD-style injection)
+            tool_attack = new_trace.get("tool_attack", {})
+            observed = tool_attack.get("observed_tool", "search_web")
+            query = _extract_query_from_content(benign_part)
+            harmful = _build_completed_trace(
+                new_trace,
+                tool_name=observed,
+                tool_args={"query": query},
+                category="harmful",
+                op_suffix="cross_ad2fuj_attacked",
+            )
+            harmful["raw_metadata"]["source_fields"]["augmentation_provenance"] = "cross_pollinate_ad2fuj"
+            harmful["training"]["mixture"] = {"class_id": "synthetic/cross_pollinate"}
+            new_traces.append(harmful)
+
+            # Build complete benign counterpart (clean query, correct tool)
+            expected = tool_attack.get("expected_tool", "retrieve_multimodal_docs")
+            benign = _build_completed_trace(
+                new_trace,
+                tool_name=expected,
+                tool_args={"query": query},
+                category="benign",
+                op_suffix="cross_ad2fuj_correct",
+            )
+            benign["raw_metadata"]["source_fields"]["augmentation_provenance"] = "cross_pollinate_ad2fuj"
+            benign["training"]["mixture"] = {"class_id": "synthetic/cross_pollinate"}
+            new_traces.append(benign)
+
+            stats["cross_ad2fuj"] += 2  # harmful + benign
 
     logger.info("Cross-pollinated: %d fuj->ad, %d ad->fuj",
                 stats["cross_fuj2ad"], stats["cross_ad2fuj"])

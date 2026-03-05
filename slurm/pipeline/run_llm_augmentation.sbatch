@@ -3,7 +3,6 @@
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=80G
 #SBATCH --time=04:00:00
 #SBATCH --output=/scratch/memoozd/cb-scratch/logs/%x_%j.out
 #SBATCH --error=/scratch/memoozd/cb-scratch/logs/%x_%j.err
@@ -180,14 +179,19 @@ echo "============================================================"
 echo "STEP 5: Complete Minority Skeletons"
 echo "============================================================"
 
-python scripts/augment_llm.py \
-    --operation complete_fujitsu \
-    --input "$OUT/minority_upsampled.jsonl" \
-    --output "$OUT/minority_completed.jsonl" \
-    --vllm-url "$VLLM_URL" \
-    --model "$MODEL" \
-    --batch-size "$BATCH_SIZE" \
-    --seed "$SEED"
+if [[ -s "$OUT/minority_upsampled.jsonl" ]]; then
+    python scripts/augment_llm.py \
+        --operation complete_fujitsu \
+        --input "$OUT/minority_upsampled.jsonl" \
+        --output "$OUT/minority_completed.jsonl" \
+        --vllm-url "$VLLM_URL" \
+        --model "$MODEL" \
+        --batch-size "$BATCH_SIZE" \
+        --seed "$SEED"
+else
+    echo "No minority skeletons to complete (target already met)"
+    touch "$OUT/minority_completed.jsonl"
+fi
 
 echo ""
 echo "============================================================"
