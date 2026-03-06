@@ -1,4 +1,4 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.27 (TeX Live 2025) (preloaded format=pdflatex 2025.3.8)  5 MAR 2026 13:31
+This is pdfTeX, Version 3.141592653-2.6-1.40.27 (TeX Live 2025) (preloaded format=pdflatex 2025.3.8)  5 MAR 2026 16:50
 entering extended mode
  restricted \write18 enabled.
  %&-line parsing enabled.
@@ -412,20 +412,116 @@ Overfull \hbox (16.132pt too wide) in paragraph at lines 386--396
 
 
 [8]
-LaTeX Font Info:    Trying to load font information for OMS+cmtt on input line 
-509.
-LaTeX Font Info:    No file OMScmtt.fd. on input line 509.
-
-
-LaTeX Font Warning: Font shape `OMS/cmtt/m/n' undefined
-(Font)              using `OMS/cmsy/m/n' instead
-(Font)              for symbol `textbraceleft' on input line 509.
+Overfull \hbox (22.75072pt too wide) in paragraph at lines 512--515
+\OT1/cmr/m/n/10.95 This di-ver-si-fies the in-jec-tion pat-tern dis-tri-bu-tion
+ --- the model sees both \OT1/cmtt/m/n/10.95 <!--...--> \OT1/cmr/m/n/10.95 and 
+\OT1/cmtt/m/n/10.95 <INFORMATION>
+ []
 
 
 
 [9]
+LaTeX Font Info:    Trying to load font information for OMS+cmtt on input line 
+525.
+LaTeX Font Info:    No file OMScmtt.fd. on input line 525.
 
-[10] (./experiment_log.aux)
+
+LaTeX Font Warning: Font shape `OMS/cmtt/m/n' undefined
+(Font)              using `OMS/cmsy/m/n' instead
+(Font)              for symbol `textbraceleft' on input line 525.
+
+
+
+[10]
+Overfull \hbox (0.9645pt too wide) in paragraph at lines 612--612
+[]\OT1/cmr/bx/n/14.4 Trace For-mat Anal-y-sis: What Is Op-ti-mal for Circuit-Br
+eaking? 
+ []
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 629--629
+[]\OT1/cmr/m/n/10 Circuit Break-ers
+ []
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 629--629
+[]\OT1/cmr/m/n/10 All to-kens
+ []
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 630--630
+[]\OT1/cmr/m/n/10 SFT on re-
+ []
+
+
+Overfull \hbox (56.36034pt too wide) in paragraph at lines 630--631
+[]\OT1/cmr/m/n/10 System$\OMS/cmsy/m/n/10 !$\OT1/cmr/m/n/10 user$\OMS/cmsy/m/n/
+10 !$\OT1/cmr/m/n/10 asst(tool[]call)$\OMS/cmsy/m/n/10 !$\OT1/cmr/m/n/10 tool(+
+inj)$\OMS/cmsy/m/n/10 !$\OT1/cmr/m/n/10 asst.
+ []
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 631--631
+[]\OT1/cmr/m/n/10 NTP on re-
+ []
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 632--632
+[]\OT1/cmr/m/n/10 NTP on re-
+ []
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 633--633
+[]\OT1/cmr/m/n/10 MSE on \OT1/cmr/m/it/10 av-
+ []
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 633--633
+\OT1/cmr/m/it/10 er-aged \OT1/cmr/m/n/10 hid-den
+ []
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 634--634
+[]\OT1/cmr/m/n/10 Separate tool-
+ []
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 637--637
+[]\OT1/cmr/m/n/10 NTP on re-
+ []
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 637--638
+[]\OT1/cmr/m/n/10 Multi-turn with nested types.
+ []
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 638--638
+[]\OT1/cmr/m/n/10 Full-seq vs.
+ []
+
+
+
+[11]
+
+[12]
+
+[13]
+LaTeX Font Info:    Font shape `OT1/cmtt/bx/n' in size <10.95> not available
+(Font)              Font shape `OT1/cmtt/m/n' tried instead on input line 807.
+
+Underfull \hbox (badness 10000) in paragraph at lines 824--824
+[]\OT1/cmr/m/n/10 Separate tool-selection
+ []
+
+
+Underfull \hbox (badness 1142) in paragraph at lines 825--825
+[]\OT1/cmr/m/n/10 Raw text / flat for-mat
+ []
+
+
+
+[14] (./experiment_log.aux)
  ***********
 LaTeX2e <2024-11-01> patch level 2
 L3 programming layer <2025-01-18>
@@ -440,17 +536,17 @@ Package rerunfilecheck Warning: File `experiment_log.out' has changed.
 (rerunfilecheck)                or use package `bookmark'.
 
 Package rerunfilecheck Info: Checksums for `experiment_log.out':
-(rerunfilecheck)             Before: 975F727162D73ADF47F1CE72CA315849;5898
-(rerunfilecheck)             After:  9FDCFEB56A8D2111E781B2C8303514C5;7735.
+(rerunfilecheck)             Before: 9FDCFEB56A8D2111E781B2C8303514C5;7735
+(rerunfilecheck)             After:  C43704B95C47546C949B232658BCC6B4;8876.
  ) 
 Here is how much of TeX's memory you used:
- 9222 strings out of 473190
- 142163 string characters out of 5715801
- 561107 words of memory out of 5000000
- 32337 multiletter control sequences out of 15000+600000
- 565339 words of font info for 58 fonts, out of 8000000 for 9000
+ 9250 strings out of 473190
+ 142489 string characters out of 5715801
+ 561117 words of memory out of 5000000
+ 32346 multiletter control sequences out of 15000+600000
+ 565685 words of font info for 59 fonts, out of 8000000 for 9000
  1141 hyphenation exceptions out of 8191
- 75i,9n,79p,482b,536s stack positions out of 10000i,1000n,20000p,200000b,200000s
+ 75i,9n,79p,482b,584s stack positions out of 10000i,1000n,20000p,200000b,200000s
 </usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmbx10.pfb
 ></usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmbx12.pfb>
 </usr/local/texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi10.pfb><
@@ -463,10 +559,10 @@ texlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy10.pfb></usr/local/t
 exlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmti10.pfb></usr/local/te
 xlive/2025/texmf-dist/fonts/type1/public/amsfonts/cm/cmtt10.pfb></usr/local/tex
 live/2025/texmf-dist/fonts/type1/public/cm-super/sfrm1095.pfb>
-Output written on experiment_log.pdf (10 pages, 202974 bytes).
+Output written on experiment_log.pdf (14 pages, 221187 bytes).
 PDF statistics:
- 254 PDF objects out of 1000 (max. 8388607)
- 215 compressed objects within 3 object streams
- 67 named destinations out of 1000 (max. 500000)
- 185 words of extra memory for PDF output out of 10000 (max. 10000000)
+ 311 PDF objects out of 1000 (max. 8388607)
+ 268 compressed objects within 3 object streams
+ 86 named destinations out of 1000 (max. 500000)
+ 241 words of extra memory for PDF output out of 10000 (max. 10000000)
 

@@ -490,12 +490,28 @@ Operation & Input & Output & Purpose \\
 \texttt{canonicalize\_ad} & 4{,}369 AD & 4{,}369 & Strip \texttt{<thinking>} (save 22\% tokens) \\
 \texttt{upsample\_minority} & 745 Comment & 3{,}000 & Fix 5.6\%$\to$20\% direction imbalance \\
 \texttt{complete\_fujitsu} & 2{,}255 new skel. & 4{,}510 & Complete the upsampled minority \\
-\texttt{cross\_pollinate} & both sets & 1{,}000 & Injection pattern diversity \\
+\texttt{cross\_pollinate} & both sets & 1{,}500 & Injection pattern diversity \\
 \midrule
-& & \textbf{$\sim$36{,}371} & \\
+& & \textbf{$\sim$36{,}871} & \\
 \bottomrule
 \end{tabular}
 \end{center}
+
+\noindent \textbf{Cross-pollination details:} Two directions, both producing
+\emph{complete} traces (not skeletons):
+
+\begin{itemize}
+  \item \textbf{fuj$\to$ad} (500 traces): Fujitsu HTML-comment injections inserted
+        into benign AgentDojo tool outputs. Post-injection assistant response added
+        (wrong tool call following the injection directive).
+  \item \textbf{ad$\to$fuj} (1{,}000 traces): AgentDojo \texttt{<INFORMATION>} tags
+        replace HTML comments in Fujitsu user messages. Completed via
+        \texttt{\_build\_completed\_trace} into harmful+benign contrastive pairs.
+\end{itemize}
+
+\noindent This diversifies the injection pattern distribution --- the model sees
+both \texttt{<!--...-->} and \texttt{<INFORMATION>} styles in both Fujitsu and
+AgentDojo contexts, preventing overfitting to specific injection markers.
 
 \subsection{Why This Should Work (Literature-Informed)}
 
@@ -530,29 +546,42 @@ Operation & Input & Output & Purpose \\
 
 \subsection{Local Verification Results}
 
-Tested 200 completed traces through the full ETL\_B pipeline with the
-Llama-3.1-8B tokenizer:
+Full pilot pipeline (dry-run mode, 470 traces) through the complete
+ETL\_B pipeline with the Llama-3.1-8B tokenizer:
 
 \begin{center}
-\begin{tabular}{lccc}
+\small
+\begin{tabular}{lrccc}
 \toprule
-Category & Avg tokens & injection\_aware \% & Errors \\
+Category / Provenance & N & AvgTok & Avg w=0.5 & Avg w=1.0 \\
 \midrule
-Harmful & 290 & 37.8\% (26.6 @ 0.5 + 83.1 @ 1.0) & 0/100 \\
-Benign & 253 & \good{0.0\%} (all-zero) & 0/100 \\
+\textbf{Harmful:} & & & & \\
+\quad llm\_completion\_attacked & 155 & 316 & 27.0 & 83.1 \\
+\quad cross\_pollinate\_ad2fuj & 20 & 383 & 115.3 & 81.5 \\
+\quad cross\_pollinate\_fuj2ad & 20 & 1{,}115 & 23.7 & 111.8 \\
+\quad original (AgentDojo) & 25 & 962 & 98.2 & 289.3 \\
+\midrule
+\textbf{Benign:} & & & & \\
+\quad llm\_completion\_correct & 155 & 288 & \good{0.0} & \good{0.0} \\
+\quad cross\_pollinate\_ad2fuj & 20 & 246 & \good{0.0} & \good{0.0} \\
+\quad original (AgentDojo) & 57 & 897 & \good{0.0} & \good{0.0} \\
+\midrule
+\textbf{Resisted} (AD) & 18 & 944 & 88.3 & 397.8 \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-\noindent Decoupled masking confirmed:
+\noindent Key validation results:
 \begin{itemize}
-  \item Pool mask (\texttt{cb\_full\_sequence}): 284/304 tokens (93.4\%)
-  \item Loss mask (\texttt{injection\_aware}): 104/304 tokens (34.2\%)
-  \item Ratio: 0.37 (focused gradient flow within broad representation pooling)
+  \item \textbf{All 232 benign traces: 100\% all-zero masks} --- no false positives.
+  \item \textbf{All harmful completed traces have non-zero 1.0 weights} ---
+        the resistance signal that was entirely absent in skeletons.
+  \item \textbf{Cross-pollinated traces work in both directions}: fuj$\to$ad
+        and ad$\to$fuj both produce proper decoupled pool/loss masks.
+  \item \textbf{0 skeleton traces in final output} --- all 470 traces are complete.
+  \item AgentDojo canonicalization: 22.2\% token reduction from removing
+        \texttt{<thinking>} blocks. Same injection\_aware mask counts, higher density.
 \end{itemize}
-
-\noindent AgentDojo canonicalization: 22.2\% token reduction from removing
-\texttt{<thinking>} blocks. Same injection\_aware mask counts, higher density.
 
 \subsection{Cluster Execution Plan}
 
@@ -568,7 +597,7 @@ before full-scale run.
 
 \texttt{sbatch slurm/pipeline/run\_llm\_augmentation.sbatch}
 
-Expected output: $\sim$36{,}371 traces with full render/lossmask ETL.
+Expected output: $\sim$36{,}871 traces with full render/lossmask ETL.
 
 \medskip
 \textbf{Phase 3:} Training sweep with augmented data (Sweep 6+).
@@ -577,5 +606,322 @@ Same hyperparameters as Sweep 5 best (injection\_aware, LoRA 0--20,
 $\gamma_\mathrm{kl}=0.3$, 300 steps, contrastive pairs), but with completed
 traces instead of skeletons. Expected to improve Fujitsu ASR beyond
 the current 33.7\% by providing actual post-injection resistance signal.
+
+
+% ===================================================================
+\section{Trace Format Analysis: What Is Optimal for Circuit-Breaking?}
+% ===================================================================
+
+We survey all 10 reference papers to determine the most effective training
+data format for representation rerouting on agentic tool-calling traces.
+This is a first-principles analysis: what format makes the harmful/benign
+separation \emph{easiest} to learn at the representation level, while
+remaining deployment-compatible for real agents?
+
+\subsection{How Each Paper Formats Training Data}
+
+\begin{center}
+\small
+\begin{tabular}{p{3cm}p{1.5cm}p{2.5cm}p{5.5cm}}
+\toprule
+Paper & Turns & Loss target & Format \\
+\midrule
+Circuit Breakers (Zou) & 1 & All tokens (user+asst) & Chat template; 50\% have empty user prompt. 512+512 fixed. \\
+Instruction Hierarchy (OpenAI) & Multi & SFT on response & System$\to$user$\to$asst(tool\_call)$\to$tool(+inj)$\to$asst. Context distillation. \\
+BIPIA (Microsoft) & 1 & NTP on response & \texttt{<data>}...\texttt{</data>} boundary tokens around external content. \\
+StruQ (Berkeley) & 1 & NTP on response & 5 reserved tokens: \texttt{[MARK]}, \texttt{[INST]}, \texttt{[INPT]}, \texttt{[RESP]}, \texttt{[COLN]}. \\
+Latent Unlearning & N/A & MSE on \emph{averaged} hidden states & Raw text passages. Forget set vs.\ retain set from different domains. \\
+AgentFlux & Multi & Separate tool-name vs.\ argument masks & Multi-turn trajectories. Two LoRA adapters with different loss masks. \\
+Hammer & 1 & NTP on JSON output & Custom \texttt{[BEGIN OF ...]} delimiters. Function names masked to random strings. \\
+TinyAgent & 1 & NTP on plan & LLMCompiler plan format. Tool schemas in prompt, RAG-selected. \\
+ToolACE & Multi & NTP on response & Multi-turn with nested types. Complexity-guided generation. \\
+Prompt Masking & Multi & Full-seq vs.\ completion-only & Agent trajectories. Full-sequence +3pp (p=0.10). \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Six Key Findings}
+
+\paragraph{1. CB paper uses ALL tokens for rerouting, not just assistant.}
+Zou et al.\ compute their ReLU(cos\_sim) loss over \emph{every} non-padding
+token, including the user prompt. The attention mask IS the loss mask.
+Quote: ``For enhanced robustness, we apply the circuit-breaking loss to both
+the user and assistant text within the circuit breaker set.'' Furthermore,
+50\% of Llama-3 samples have an \textbf{empty user prompt}---only the harmful
+assistant text---to teach rerouting even without a harmful prompt preceding it.
+
+\medskip\noindent
+\textbf{Implication for us:} Our \texttt{injection\_aware} policy uses
+\emph{differential} weights (0.0/0.5/1.0) rather than binary all-or-nothing.
+This is strictly more expressive than the original CB approach. The original
+CB paper never had to distinguish injection from legitimate content because
+their use case was text-only harmful completions, not agentic injection.
+Our 33.7\% ASR result (vs.\ 61\% with \texttt{cb\_full\_sequence}) validates
+that token-level granularity matters for the agentic setting.
+
+\paragraph{2. Structural position is what models learn for injection defense.}
+Three independent papers converge on this:
+\begin{itemize}
+  \item \textbf{Instruction Hierarchy}: Models learn that tool-output content
+        is lowest privilege. Training on injection \emph{in the tool output
+        position} generalizes to unseen tools and attack types.
+  \item \textbf{BIPIA}: ``Removal of boundary awareness has a greater impact
+        on ASR than removal of explicit reminder.'' The \texttt{<data>}/\texttt{</data>}
+        tokens matter more than ``don't follow injected instructions.''
+  \item \textbf{StruQ}: Reserved tokens for channel boundaries ($<$2\% ASR
+        on manual attacks). Front-end filters ensure untrusted data cannot
+        contain delimiter strings.
+\end{itemize}
+
+\noindent\textbf{Implication for us:} The Llama 3.1 chat template
+\emph{already encodes} a natural privilege hierarchy through its role headers:
+\texttt{<|start\_header\_id|>system<|end\_header\_id|>} (highest) $>$
+\texttt{user} $>$ \texttt{tool} (lowest) $>$
+\texttt{assistant} (model's decision).
+We do not need custom boundary tokens (BIPIA) or reserved delimiters (StruQ).
+The native template is the boundary marker. This is optimal because:
+(a)~the model already has pre-trained awareness of these headers from
+instruction tuning, and (b)~at inference time the agent framework sends
+messages in exactly this format---zero distribution shift.
+
+\paragraph{3. Forget/retain sets must be representationally distinct.}
+Latent Unlearning's critical finding: when forget and retain distributions
+share $>$20\% unigram overlap, representation-level unlearning \emph{fails
+entirely}. Our harmful and benign tool calls share \emph{identical} JSON
+format (\texttt{\{``name'': ``search\_web'', ``parameters'': ...\}}).
+
+\medskip\noindent
+\textbf{Implication:} This is exactly why \texttt{injection\_aware} works
+and \texttt{cb\_full\_sequence} is suboptimal. \texttt{cb\_full\_sequence}
+puts weight 1.0 on both the injection text AND the shared-format tool call
+JSON. The model cannot separate ``harmful tool call'' from ``benign tool call''
+when the surface tokens are nearly identical. \texttt{injection\_aware}
+solves this by putting 0.5 weight on the injection span (which is
+representationally distinct---HTML comments vs.\ clean queries) and 1.0
+weight on post-injection assistant tokens (where the \emph{decision} diverges,
+not the format).
+
+\paragraph{4. Tool selection and argument generation are separate tasks.}
+AgentFlux's DualTune finding: separating tool-name loss from argument loss
+yields +22.5pp over joint fine-tuning. Hammer's finding: masking function
+names to random strings forces description-based reasoning and improves
+cross-benchmark generalization.
+
+\medskip\noindent
+\textbf{Implication:} For circuit-breaking, we primarily care about the
+tool \emph{selection} decision (calling \texttt{search\_web} instead of
+\texttt{retrieve\_multimodal\_docs}), not the arguments. Our
+\texttt{tool\_name\_weighted} policy (implemented but untested in sweep)
+captures exactly this insight: weight 1.0 on tool name tokens, 0.3 on
+arguments. This could be combined with \texttt{injection\_aware} in future.
+
+\paragraph{5. Multi-turn agentic format is necessary for deployment.}
+The Instruction Hierarchy paper showed that training on injection in the
+tool-output position of a multi-turn trace \emph{generalizes} to unseen
+tools. Single-turn format (CB paper's default) loses the critical
+\texttt{tool}$\to$\texttt{assistant} causal chain that makes agent injection
+dangerous. At inference, the agent framework sends multi-turn messages;
+training on the same format eliminates distribution shift.
+
+\paragraph{6. Full-sequence loss is directionally better for agents.}
+The prompt masking blog found +3pp pass rate when computing loss over the
+full sequence (including prior tool-observation pairs) vs.\ completion-only.
+Not statistically significant (p=0.10), but directionally consistent with
+the CB paper's choice to apply loss to all tokens. Our \texttt{injection\_aware}
+is a middle ground: it zeros out system/tool tokens but includes user
+(injection) and assistant tokens---more selective than full-sequence, more
+inclusive than completion-only.
+
+\subsection{Conclusion: The Native Llama 3.1 Agentic Format Is Optimal}
+
+No paper proposes a format that dominates for all three of our requirements
+(representation rerouting + injection defense + tool-calling preservation).
+Synthesizing the evidence, the optimal format is:
+
+\begin{center}
+\fbox{\parbox{0.92\textwidth}{
+\textbf{Format:} Native Llama 3.1 multi-turn chat template with
+\texttt{<|python\_tag|>} tool calls. \\
+\textbf{Loss:} \texttt{injection\_aware} (0.5 on injection, 1.0 on
+post-injection assistant, 0.0 elsewhere). \\
+\textbf{Pool:} \texttt{cb\_full\_sequence} (broad representation sampling). \\
+\textbf{Turns:} 5 messages (system $\to$ user $\to$ assistant[tool\_call]
+$\to$ tool $\to$ assistant[follow-up]).
+}}
+\end{center}
+
+\noindent
+The exact rendered format for a harmful completed trace:
+
+\begin{verbatim}
+<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+                                                     w=0.0
+{system prompt with tool schemas}<|eot_id|>
+                                                     w=0.0
+<|start_header_id|>user<|end_header_id|>
+                                                     w=0.0
+{clean query}                                        w=0.0
+{injection text}                                     w=0.5
+<|eot_id|>
+<|start_header_id|>assistant<|end_header_id|>
+                                                     w=1.0
+<|python_tag|>{"name":"search_web","parameters":{..}}
+                                                     w=1.0
+<|eom_id|>
+<|start_header_id|>tool<|end_header_id|>
+                                                     w=0.0
+{tool output}<|eot_id|>
+                                                     w=0.0
+<|start_header_id|>assistant<|end_header_id|>
+                                                     w=1.0
+{follow-up response}<|eot_id|>                       w=1.0
+\end{verbatim}
+
+\noindent This is optimal because:
+
+\begin{enumerate}
+  \item \textbf{Native token distribution.} The same model generates these
+        tokens during vLLM completion, so layer 10+20 representations are
+        in-distribution. No cross-model artifacts (BIPIA used GPT-4, CB used
+        an uncensored LLM).
+
+  \item \textbf{Built-in privilege hierarchy.} The role headers
+        (\texttt{system} $>$ \texttt{user} $>$ \texttt{tool}) serve the same
+        function as BIPIA's \texttt{<data>} tokens and StruQ's
+        \texttt{[MARK]} delimiters, but they are already in the model's
+        vocabulary and pre-trained distribution.
+
+  \item \textbf{Representational distinctness where it matters.} The 0.5
+        weight goes on injection tokens (HTML comments, \texttt{<INFORMATION>}
+        tags), which are surface-form distinct from clean queries. The 1.0
+        weight goes on assistant decision tokens, where harmful (wrong tool)
+        and benign (correct tool) diverge at the \emph{tool name} tokens.
+        This addresses the n-gram overlap problem from latent unlearning.
+
+  \item \textbf{Deployment-compatible.} At inference, the agent framework
+        (LangChain, vLLM tool mode, etc.) sends messages in exactly this
+        Llama 3.1 chat format. The representations the model sees during
+        inference are identical to training. No format adaptation needed.
+
+  \item \textbf{The \texttt{<|python\_tag|>} is a natural circuit-breaker
+        target.} This special token precedes every tool call. In harmful
+        traces, the layer 10+20 representation at this token position
+        encodes ``I am about to call a tool that the injection told me to
+        call.'' Rerouting this representation is precisely what CB needs.
+\end{enumerate}
+
+\noindent\textbf{What we considered and rejected:}
+
+\begin{center}
+\small
+\begin{tabular}{p{4cm}p{9cm}}
+\toprule
+Alternative & Why rejected \\
+\midrule
+Custom boundary tokens (BIPIA, StruQ) & Adds tokens not in pre-trained vocabulary. StruQ showed initialization matters critically. Llama's role headers already serve this purpose. \\
+Single-turn (CB paper) & Loses the tool$\to$assistant causal chain. Agent injection is inherently multi-turn. Instruction Hierarchy showed multi-turn generalizes. \\
+Custom delimiters (Hammer) & Breaks native chat template. At inference, the agent framework uses standard Llama format, not \texttt{[BEGIN OF ...]}. Distribution shift. \\
+Separate tool-selection adapter (AgentFlux) & Requires multiple LoRA heads. Incompatible with single-adapter CB training. The insight (separate tool-name vs.\ argument loss) is captured by \texttt{tool\_name\_weighted} policy instead. \\
+Raw text / flat format (Latent Unlearning) & Loses structural role information that all three defense papers showed is critical. \\
+Full-sequence uniform loss (CB original) & Penalizes shared-format tokens equally. Fails when harmful/benign tool calls share $>$20\% n-grams. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% ===================================================================
+\section{Sweep 6: Completed Traces + Simplified Pipeline (Mar 6, 2026)}
+% ===================================================================
+
+\subsection{Motivation: From Skeletons to Full Traces}
+
+Sweep 5's best result (33.7\% ASR) used skeleton Fujitsu traces with
+\texttt{cb\_full\_sequence} pooling --- the injection\_aware \emph{loss} mask
+drove the improvement, but the pooling still sampled from the full skeleton
+(system+user only). The completed traces add the critical post-injection
+assistant response, giving injection\_aware's 1.0-weighted region actual
+\emph{resistance} tokens to reroute.
+
+\subsection{Pipeline Simplification}
+
+Instead of the 5-operation LLM augmentation pipeline (requiring vLLM on cluster),
+we use two local preprocessing steps:
+
+\begin{enumerate}
+  \item \textbf{Complete Fujitsu} (\texttt{augment\_llm.py complete\_fujitsu --dry-run}):
+        Each skeleton $\to$ 2 completed traces (harmful + benign contrastive pair).
+        Dry-run mode uses template tool calls (no vLLM). Content doesn't matter for CB ---
+        position and mask weights do.
+  \item \textbf{Truncate AgentDojo} (\texttt{truncate\_to\_injection\_window.py}):
+        Cuts multi-turn traces to the injection decision window. For harmful:
+        keep messages[0..first\_post\_injection\_assistant]. For benign: keep
+        first tool$\to$assistant cycle. Drops 225 harmful traces without injection spans.
+\end{enumerate}
+
+\subsection{Training Data Summary}
+
+\begin{center}
+\small
+\begin{tabular}{lrrrl}
+\toprule
+Dataset & Harmful & Benign & Resisted & Notes \\
+\midrule
+Fujitsu B4 (completed) & 13{,}246 & 13{,}246 & --- & Template dry-run, 5 msgs each \\
+AgentDojo (truncated) & 1{,}000 & 2{,}894 & 250 & Truncated to injection window \\
+\midrule
+\textbf{Total} & \textbf{14{,}246} & \textbf{16{,}140} & \textbf{250} & \textbf{30{,}636 traces} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Contrastive pairs: 1{,}247 (from AgentDojo augmentation, all pairs still valid
+post-truncation).
+
+\noindent Messages: 132{,}460 (Fujitsu) + 22{,}870 (AgentDojo) = 155{,}330 total.
+
+\subsection{Key Differences from Sweep 5}
+
+\begin{center}
+\small
+\begin{tabular}{p{4cm}p{5cm}p{5cm}}
+\toprule
+Aspect & Sweep 5 & Sweep 6 \\
+\midrule
+Fujitsu format & Skeletons (2 msgs) & Completed (5 msgs) \\
+Fujitsu benign & None (skeletons are harmful-only) & 13{,}246 (contrastive pairs) \\
+AgentDojo & Full multi-turn (avg 8.9 msgs) & Truncated (avg 5.5 msgs) \\
+injection\_aware 1.0 tokens & Only from AgentDojo (1{,}250 traces) & From ALL harmful traces (14{,}246) \\
+Total traces & $\sim$14{,}000 & 30{,}636 \\
+Needs vLLM for data & No (but planned) & No (dry-run templates) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Hypotheses}
+
+\begin{enumerate}
+  \item \textbf{Fujitsu ASR should improve significantly} --- the 1.0-weighted
+        post-injection assistant tokens provide the resistance signal that was
+        entirely absent from skeletons. The injection\_aware loss can now
+        reroute at the tool-call decision point.
+  \item \textbf{Benign preservation should improve} --- 13{,}246 Fujitsu benign
+        traces (all-zero masks) anchor correct tool-calling behavior.
+        Sweep 5 had zero Fujitsu benign data.
+  \item \textbf{AgentDojo truncation should not hurt} --- the post-injection
+        decision window contains all the information needed for representation
+        rerouting. Later messages (follow-up tool calls, responses) are noise
+        that dilute the signal and waste sequence length.
+  \item \textbf{Contrastive pairs are now redundant} --- the completed Fujitsu
+        traces \emph{are} contrastive pairs (harmful + benign from same skeleton).
+        But we keep the AD pairs for diversity.
+\end{enumerate}
+
+\subsection{Configuration}
+
+All hyperparameters from Sweep 5 best:
+LoRA 0--20, $r=16$, CB layers 10+20, $\gamma_\mathrm{kl}=0.3$,
+300 steps, triplet\_full, $d_\mathrm{cos}$ 1.2/1.6,
+injection\_aware (loss) + cb\_full\_sequence (pool), contrastive pairs.
+
+\texttt{sbatch slurm/pipeline/sweep\_completed\_v1.sbatch}
 
 \end{document}
