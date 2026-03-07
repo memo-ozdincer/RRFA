@@ -104,16 +104,25 @@ fi
 echo "Tokenizer: $TOKENIZER"
 
 # =============================================================================
-# Input data (raw sources)
+# Input data (raw sources — on scratch from previous sweeps)
 # =============================================================================
-FUJITSU_RAW="$REPO_DIR/data/traces/fujitsu_b4_traces.jsonl"
-AGENTDOJO_RAW="$REPO_DIR/data/traces/agentdojo_augmented.jsonl"
-PAIRS_SRC="$REPO_DIR/data/traces/contrastive_pairs.jsonl"
+TRACES_DIR="$CB_SCRATCH/data/traces"
+FUJITSU_RAW="$TRACES_DIR/fujitsu_b4_ds.jsonl"
+AGENTDOJO_RAW="$TRACES_DIR/agentdojo_augmented.jsonl"
+PAIRS_SRC="$TRACES_DIR/contrastive_pairs.jsonl"
 TOOL_SCHEMA="$REPO_DIR/configs/tool_schemas/b4_standard_v1.json"
+
+# Copy from repo if not on scratch yet (agentdojo, contrastive pairs)
+for src_name in agentdojo_augmented.jsonl contrastive_pairs.jsonl; do
+    if [[ ! -f "$TRACES_DIR/$src_name" ]] && [[ -f "$REPO_DIR/data/traces/$src_name" ]]; then
+        echo "  Copying $src_name to scratch..."
+        cp "$REPO_DIR/data/traces/$src_name" "$TRACES_DIR/$src_name"
+    fi
+done
 
 for f in "$FUJITSU_RAW" "$AGENTDOJO_RAW" "$PAIRS_SRC"; do
     if [[ ! -f "$f" ]]; then
-        echo "ERROR: Missing $(basename "$f")"; exit 1
+        echo "ERROR: Missing $(basename "$f") — not on scratch and not in repo"; exit 1
     fi
     echo "  $(basename "$f"): $(wc -l < "$f") lines"
 done
@@ -337,10 +346,9 @@ fi
 EVAL_DIR="$RUN_DIR/eval/$EVAL_MODE"
 mkdir -p "$EVAL_DIR"
 
-# Use original (non-truncated) AgentDojo for eval to match Sweep 5
-AGENTDOJO_EVAL_SRC="$REPO_DIR/data/traces/agentdojo_augmented.jsonl"
-# Fujitsu eval uses the original DS traces (skeletons are fine for eval)
-DS_TRACES="$CB_SCRATCH/data/traces/fujitsu_b4_ds.jsonl"
+# Use original (non-truncated) data for eval to match Sweep 5
+AGENTDOJO_EVAL_SRC="$TRACES_DIR/agentdojo_augmented.jsonl"
+DS_TRACES="$TRACES_DIR/fujitsu_b4_ds.jsonl"
 
 # Fujitsu eval
 echo "  Fujitsu eval..."

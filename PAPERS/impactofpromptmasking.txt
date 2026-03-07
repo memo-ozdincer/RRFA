@@ -1,5 +1,5 @@
 Martin Krasser
-	•	About Blog Industry Open Source Citations Stories Contact
+	•	AboutBlogIndustryOpen SourceCitationsStoriesContact
 Impact of prompt masking on LLM agent step planning performance
  June 26, 2024 by Martin Krasser
 I recently experimented with fine-tuning an LLM agent's step planner on synthetic trajectories. During fine-tuning, the step planner module learns to create a task description for the next step and select an appropriate tool to execute that step. The selected tool is responsible for translating the informal task description into tool-specific executable actions and returning a (summarized) observation to the planner.
@@ -35,10 +35,10 @@ DeepSeek-R1 agents with code actions
 Comments
 
 
-	•	 linkedin.com/in/krasserm
-	•	 github.com/krasserm
-	•	 github.com/gradion-ai
-	•	 gradion.ai
-	•	 llms.txt
-	•	 feed.xml
+	•	linkedin.com/in/krasserm
+	•	github.com/krasserm
+	•	github.com/gradion-ai
+	•	gradion.ai
+	•	llms.txt
+	•	feed.xml
 // Martin Krasser, 2026
