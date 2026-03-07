@@ -192,6 +192,7 @@ for src in "$FUJITSU_SRC" "$AGENTDOJO_SRC"; do
 done
 
 echo "  ETL_B done ($(( $(date +%s) - etl_start ))s)"
+
 echo ""
 
 # =============================================================================
