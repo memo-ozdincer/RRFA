@@ -104,14 +104,14 @@ fi
 echo "Tokenizer: $TOKENIZER"
 
 # =============================================================================
-# Input data
+# Input data (raw sources)
 # =============================================================================
-FUJITSU_SRC="$REPO_DIR/data/traces/fujitsu_b4_completed.jsonl"
-AGENTDOJO_SRC="$REPO_DIR/data/traces/agentdojo_truncated.jsonl"
+FUJITSU_RAW="$REPO_DIR/data/traces/fujitsu_b4_traces.jsonl"
+AGENTDOJO_RAW="$REPO_DIR/data/traces/agentdojo_augmented.jsonl"
 PAIRS_SRC="$REPO_DIR/data/traces/contrastive_pairs.jsonl"
 TOOL_SCHEMA="$REPO_DIR/configs/tool_schemas/b4_standard_v1.json"
 
-for f in "$FUJITSU_SRC" "$AGENTDOJO_SRC" "$PAIRS_SRC"; do
+for f in "$FUJITSU_RAW" "$AGENTDOJO_RAW" "$PAIRS_SRC"; do
     if [[ ! -f "$f" ]]; then
         echo "ERROR: Missing $(basename "$f")"; exit 1
     fi
@@ -126,6 +126,39 @@ SWEEP_ID="completed_$(date +%Y%m%d_%H%M%S)"
 RUN_DIR="$CB_SCRATCH/sweeps/$SWEEP_ID/run"
 mkdir -p "$RUN_DIR"/{renders,lossmasks,split_fujitsu,split_agentdojo,model,eval}
 echo "Output: $RUN_DIR"
+echo ""
+
+# =============================================================================
+# Step 0: Generate completed Fujitsu + truncated AgentDojo
+# =============================================================================
+echo "========================================================"
+echo "Step 0: Data generation"
+echo "========================================================"
+gen_start=$(date +%s)
+
+FUJITSU_SRC="$RUN_DIR/fujitsu_b4_completed.jsonl"
+AGENTDOJO_SRC="$RUN_DIR/agentdojo_truncated.jsonl"
+
+echo "  Completing Fujitsu skeletons (dry-run)..."
+python "$REPO_DIR/scripts/augment_llm.py" \
+    --operation complete_fujitsu \
+    --input "$FUJITSU_RAW" \
+    --output "$FUJITSU_SRC" \
+    --dry-run 2>&1 | tail -5
+
+echo "  Truncating AgentDojo to injection window..."
+python "$REPO_DIR/scripts/truncate_to_injection_window.py" \
+    --input "$AGENTDOJO_RAW" \
+    --output "$AGENTDOJO_SRC" 2>&1 | tail -5
+
+for f in "$FUJITSU_SRC" "$AGENTDOJO_SRC"; do
+    if [[ ! -f "$f" ]] || [[ ! -s "$f" ]]; then
+        echo "ERROR: Data generation failed for $(basename "$f")"; exit 1
+    fi
+    echo "  $(basename "$f"): $(wc -l < "$f") lines"
+done
+
+echo "  Data generation done ($(( $(date +%s) - gen_start ))s)"
 echo ""
 
 # =============================================================================
