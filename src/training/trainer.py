@@ -1290,49 +1290,21 @@ class CircuitBreakerTrainer:
                 f"Unsupported loss_mode={loss_mode}. Expected one of {SUPPORTED_LOSS_MODES}"
             )
 
-        # Legacy modes keep schedule-based weighting; triplet uses explicit alpha/beta/gamma.
-        use_dual = False
-        if loss_mode == LOSS_MODE_ORIGINAL_RR:
-            # Paper schedule (Zou et al. 2024, Algorithm 1):
-            #   c_s = alpha * step / (2*T)        reroute: 0 -> alpha/2
-            #   c_r = alpha * (1 - step / (2*T))  retain:  alpha -> alpha/2
-            use_dual = True
-            alpha_max = self.config.alpha_max
-            T = max(1, self.config.total_steps)
-            progress = min(self.global_step / T, 1.0)
-            cs = alpha_max * progress / 2.0
-            cr = alpha_max * (1.0 - progress / 2.0)
-            alpha = cs
-        elif loss_mode in (LOSS_MODE_LEGACY_CB, LOSS_MODE_LEGACY_SCHEMA):
-            use_dual = getattr(self.config, "loss_weighting", "dual") == "dual"
-            if use_dual:
-                cs, cr = get_dual_coefficients(
-                    self.global_step,
-                    self.config.total_steps,
-                    self.config.alpha_max,
-                    self.config.alpha_decay_multiplier,
-                    self.config.alpha_decay_strategy,
-                )
-                alpha = cs
-            else:
-                alpha = get_alpha(
-                    self.global_step,
-                    self.config.alpha_max,
-                    self.config.total_steps,
-                    self.config.alpha_decay_strategy,
-                    self.config.alpha_decay_multiplier,
-                )
-                cs, cr = alpha, 1.0
-        else:
-            # Triplet modes: warmup schedule for triplet terms.
-            # Ramp triplet_scale from 0 → 1 over warmup_steps while KL anchors
-            # at full strength throughout.  This lets KL divergence build up as
-            # a counterforce before triplet losses push representations too far.
-            warmup = max(1, self.config.warmup_steps)
-            triplet_scale = min(1.0, self.global_step / warmup)
-            cs = triplet_scale
-            cr = 1.0
-            alpha = triplet_scale
+        # Unified schedule for ALL loss modes:
+        #   cs: alpha_max → 0  (reroute coefficient, starts HIGH, decays)
+        #   cr: 0 → alpha_max  (retain coefficient, starts LOW, ramps up)
+        # This gives the model maximum freedom to push harmful representations
+        # away first, then gradually locks in benign preservation.
+        # Matches the old working schedule from sweep_hparams_simple (d086ec9).
+        use_dual = True
+        cs, cr = get_dual_coefficients(
+            self.global_step,
+            self.config.total_steps,
+            self.config.alpha_max,
+            self.config.alpha_decay_multiplier,
+            self.config.alpha_decay_strategy,
+        )
+        alpha = cs
 
         # Extract batch data
         harmful_input_ids = batch['harmful_input_ids']
@@ -1597,7 +1569,7 @@ class CircuitBreakerTrainer:
                 benign_teacher_logits=teacher_logits_benign,
                 benign_attention_mask=benign_attention_mask,
                 benign_loss_mask=benign_loss_mask,
-                alpha_benign=cs * float(getattr(self.config, "triplet_alpha_benign", 0.5)),
+                alpha_benign=cr * float(getattr(self.config, "triplet_alpha_benign", 0.5)),
                 beta_harmful=cs * float(getattr(self.config, "triplet_beta_harmful", 0.4)),
                 gamma_kl=float(getattr(self.config, "triplet_gamma_kl", 0.9)),
                 margin_benign=float(getattr(self.config, "triplet_margin_benign", 500.0)),
@@ -1696,7 +1668,7 @@ class CircuitBreakerTrainer:
                 benign_teacher_logits=teacher_logits_benign,
                 benign_attention_mask=benign_attention_mask,
                 benign_loss_mask=benign_loss_mask,
-                alpha_benign=cs * float(getattr(self.config, "triplet_alpha_benign", 0.5)),
+                alpha_benign=cr * float(getattr(self.config, "triplet_alpha_benign", 0.5)),
                 beta_harmful=cs * float(getattr(self.config, "triplet_beta_harmful", 0.4)),
                 gamma_kl=float(getattr(self.config, "triplet_gamma_kl", 0.9)),
                 kl_temperature=kl_temp,
@@ -1768,7 +1740,7 @@ class CircuitBreakerTrainer:
                 benign_teacher_logits=teacher_logits_benign,
                 benign_attention_mask=benign_attention_mask,
                 benign_loss_mask=benign_loss_mask,
-                alpha_benign=cs * float(getattr(self.config, "triplet_alpha_benign", 0.5)),
+                alpha_benign=cr * float(getattr(self.config, "triplet_alpha_benign", 0.5)),
                 beta_harmful=cs * float(getattr(self.config, "triplet_beta_harmful", 0.4)),
                 gamma_kl=float(getattr(self.config, "triplet_gamma_kl", 0.9)),
                 kl_temperature=kl_temp,
@@ -1924,7 +1896,7 @@ class CircuitBreakerTrainer:
                 target_layers=self.config.cb_target_layers,
                 harmful_mask=_harmful_mask,
                 benign_mask=_benign_mask,
-                alpha_benign=cs * float(getattr(self.config, "triplet_alpha_benign", 0.5)),
+                alpha_benign=cr * float(getattr(self.config, "triplet_alpha_benign", 0.5)),
                 beta_harmful=cs * float(getattr(self.config, "triplet_beta_harmful", 0.4)),
                 gamma_kl=float(getattr(self.config, "triplet_gamma_kl", 0.9)),
                 margin_benign=float(getattr(self.config, "triplet_margin_benign", 1.2)),
@@ -2000,7 +1972,7 @@ class CircuitBreakerTrainer:
                 benign_student_logits=student_logits_benign,
                 benign_teacher_logits=teacher_logits_benign,
                 benign_attention_mask=benign_attention_mask,
-                alpha_benign=cs * float(getattr(self.config, "triplet_alpha_benign", 0.5)),
+                alpha_benign=cr * float(getattr(self.config, "triplet_alpha_benign", 0.5)),
                 beta_harmful=cs * float(getattr(self.config, "triplet_beta_harmful", 0.4)),
                 gamma_kl=float(getattr(self.config, "triplet_gamma_kl", 0.9)),
                 margin_benign=float(getattr(self.config, "triplet_margin_benign", 1.2)),
@@ -2023,9 +1995,10 @@ class CircuitBreakerTrainer:
             }
 
         elif loss_mode == LOSS_MODE_ORIGINAL_RR:
-            # Original RR from Zou et al. (2024), Algorithm 1.
-            # L = c_s * ReLU(cos_sim(frozen, cb)) + c_r * ||frozen - cb||_2
+            # RR loss (based on Zou et al. 2024, Algorithm 1).
+            # L = cs * ReLU(cos_sim(frozen, cb)) + cr * ||frozen - cb||_2
             #   + gamma_kl * KL(cb || frozen)   [when gamma_kl > 0]
+            # Schedule: cs starts HIGH (max reroute), cr starts LOW (zero retain).
             # Harmful mask: loss_mask (injection_aware) or attention_mask
             # Benign mask: attention_mask (NOT loss_mask — benign loss_mask is all-zero)
             _harmful_mask = harmful_loss_mask if harmful_loss_mask is not None else harmful_attention_mask

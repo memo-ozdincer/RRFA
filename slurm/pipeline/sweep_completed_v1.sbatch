@@ -9,26 +9,26 @@
 #SBATCH --account=def-zhijing
 
 # =============================================================================
-# SWEEP 7: Bug fixes + new loss modes (per technical plan)
+# SWEEP 8: Restored schedule + full LoRA layers
 # =============================================================================
 #
+# Key changes from Sweep 7 (which produced zero eval effect):
+#   1. Schedule REVERTED: cs starts HIGH (reroute), cr starts LOW (retain)
+#      Matches old working sweep (d086ec9). Sweep 7's "paper exact" schedule
+#      started cs=0 which gave zero reroute gradient.
+#   2. LoRA on ALL 32 layers (no --lora-target-layers restriction).
+#      Sweep 7 restricted to 0-20, freezing layers 21-31. This prevented
+#      the CB perturbation from propagating to output.
+#   3. LR=5e-5 (was 1e-5), LoRA alpha=32 (was 16). Matches old working sweep.
+#   4. Batch=8 (was 4x4=16). Matches old working sweep.
+#   5. alpha_benign uses cr (retain coeff), beta_harmful uses cs (reroute coeff).
+#
 # Runs (submit separately):
-#   LOSS_MODE=original_rr    sbatch slurm/pipeline/sweep_completed_v1.sbatch  # PAPER BASELINE
-#   LOSS_MODE=triplet_full   sbatch slurm/pipeline/sweep_completed_v1.sbatch
-#   LOSS_MODE=per_token_cb   sbatch slurm/pipeline/sweep_completed_v1.sbatch
+#   LOSS_MODE=original_rr    sbatch slurm/pipeline/sweep_completed_v1.sbatch
+#   LOSS_MODE=per_token_cb   sbatch slurm/pipeline/sweep_completed_v1.sbatch  # dl2sq default
+#   LOSS_MODE=per_token_cb DISTANCE=dl2rc sbatch ...
+#   LOSS_MODE=per_token_cb MARGIN_FREE=false sbatch ...       # with margins
 #   LOSS_MODE=simplified_pooled sbatch slurm/pipeline/sweep_completed_v1.sbatch
-#   LOSS_MODE=per_token_cb DISTANCE=dl2sq sbatch ...          # squared L2 distance
-#   LOSS_MODE=per_token_cb MARGIN_FREE=true sbatch ...        # margin-free (Option C)
-#
-# original_rr: Paper's exact loss (Zou et al. 2024, Algorithm 1)
-#   ReLU(cos_sim) reroute + L2 retain, paper coefficient schedule
-#   No margins, no triplet, no dl2rc. alpha=10, 150 steps.
-#   With GAMMA_KL=0 (default): paper exact. GAMMA_KL=0.3: adds KL preservation.
-#
-# Bug fixes applied to triplet/per_token/simplified modes:
-#   1. Distance: dl2rc (L2 + 10*ReLU(cos)) instead of dcos
-#   2. KL fix: benign KL uses attention_mask, not loss_mask
-#   3. Fujitsu truncated to 3 messages (no template garbage)
 #
 # Data:
 #   fujitsu_b4_completed.jsonl  - 26,492 (13,246 harmful + 13,246 benign)
@@ -81,45 +81,40 @@ LOSS_MODE="${LOSS_MODE:-simplified_pooled}"  # original_rr, triplet_full, per_to
 if [[ "$QUICK_TEST" == "true" ]]; then
     TOTAL_STEPS=20; LIMIT_EVAL=5; NUM_EXAMPLES=2
     echo "*** QUICK TEST MODE ***"
-elif [[ "$LOSS_MODE" == "original_rr" ]]; then
-    # Paper settings: 150 steps, alpha=10, batch=16 (4x4)
-    TOTAL_STEPS=150; LIMIT_EVAL=100; NUM_EXAMPLES=5
 else
-    TOTAL_STEPS=300; LIMIT_EVAL=100; NUM_EXAMPLES=5
+    # 200 steps matches old working sweep (d086ec9).
+    # With batch=8, lr=5e-5, LoRA alpha=32, this is enough for convergence.
+    TOTAL_STEPS="${TOTAL_STEPS:-200}"; LIMIT_EVAL=100; NUM_EXAMPLES=5
 fi
 
-BATCH_SIZE=4
-GRAD_ACCUM=4
-LEARNING_RATE=1e-5
+BATCH_SIZE=8
+GRAD_ACCUM=1
+LEARNING_RATE=5e-5
 WARMUP_STEPS=20
 MAX_SEQ_LENGTH=4096
 LORA_R=16
-LORA_ALPHA=16
-LORA_LAYERS="0-20"
+LORA_ALPHA=32
+# LoRA layers: NOT restricted — applied to ALL 32 layers (no --lora-target-layers).
+# This matches the old working sweep (d086ec9) where layers_to_transform was not set.
 CB_LAYERS="10 20"
-DISTANCE="${DISTANCE:-dl2sq}"  # dl2rc (default), dcos, dl2sq
+DISTANCE="${DISTANCE:-dl2sq}"  # dl2rc, dcos, dl2sq
 POLICY=injection_aware
 POOLING_POLICY=injection_aware
 EVAL_MODE=next_tool_prediction
 PRESET=llama-3.1-8b-instruct
 
 # Mode-specific defaults
-if [[ "$LOSS_MODE" == "original_rr" ]]; then
-    ALPHA_MAX=10.0
-    GAMMA_KL="${GAMMA_KL:-0.0}"   # 0 = paper exact, 0.3 = paper + KL
-else
-    ALPHA_MAX=10.0
-    GAMMA_KL="${GAMMA_KL:-0.3}"
-fi
+ALPHA_MAX=10.0
+GAMMA_KL="${GAMMA_KL:-0.3}"
 
 MARGIN_FREE="${MARGIN_FREE:-true}"
 
 echo "========================================================"
-echo "SWEEP 7: Bug fixes + $LOSS_MODE"
+echo "SWEEP 8: Restored schedule + full LoRA + $LOSS_MODE"
 echo "========================================================"
 echo "Job: ${SLURM_JOB_ID:-local} | $(date)"
 echo "Steps: $TOTAL_STEPS | Loss: $LOSS_MODE | Distance: $DISTANCE"
-echo "Policy: $POLICY | LoRA: $LORA_LAYERS | γ_kl: $GAMMA_KL | margin_free: $MARGIN_FREE"
+echo "Policy: $POLICY | LoRA: all layers | α_lora: $LORA_ALPHA | γ_kl: $GAMMA_KL | margin_free: $MARGIN_FREE"
 echo ""
 
 # =============================================================================
@@ -173,8 +168,9 @@ echo ""
 # =============================================================================
 # Shared data directory (reused across concurrent loss-mode runs)
 # =============================================================================
-SHARED_DATA="$CB_SCRATCH/sweeps/bugfix_shared_data"
-SWEEP_ID="bugfix_${LOSS_MODE}_$(date +%Y%m%d_%H%M%S)"
+# Shared data is per-policy (lossmasks depend on policy; renders don't but are cheap)
+SHARED_DATA="$CB_SCRATCH/sweeps/shared_data_${POLICY}"
+SWEEP_ID="s8_${LOSS_MODE}_${POLICY}_$(date +%Y%m%d_%H%M%S)"
 RUN_DIR="$CB_SCRATCH/sweeps/$SWEEP_ID/run"
 mkdir -p "$RUN_DIR"/{model,eval}
 mkdir -p "$SHARED_DATA"/{renders,lossmasks,split_fujitsu,split_agentdojo}
@@ -400,7 +396,6 @@ python src/training/train_schema.py \
     --lora-r "$LORA_R" \
     --lora-alpha "$LORA_ALPHA" \
     --lora-dropout 0.05 \
-    --lora-target-layers "$LORA_LAYERS" \
     --logging-steps 10 \
     --save-steps 9999 \
     --no-wandb \
@@ -484,7 +479,7 @@ cat > "$RUN_DIR/run_config.json" << RUNCFG
   "policy": "$POLICY",
   "pooling_policy": "$POOLING_POLICY",
   "cb_layers": "$CB_LAYERS",
-  "lora_layers": "$LORA_LAYERS",
+  "lora_layers": "all",
   "total_steps": $TOTAL_STEPS,
   "batch_size": $BATCH_SIZE,
   "grad_accum": $GRAD_ACCUM,

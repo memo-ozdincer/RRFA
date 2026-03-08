@@ -126,6 +126,11 @@ class CircuitBreakerConfig:
     # - Typical values: 1.0 - 4.0
     kl_temperature: float = 1.0
 
+    # Margin-free loss variant (per_token_cb / simplified_pooled):
+    # - If True, uses exp(-d/scale) instead of margin-based hinge loss
+    # - Eliminates margin tuning (no triplet_margin_benign/harmful needed)
+    margin_free: bool = False
+
     # === Training ===
     total_steps: int = 1100              # Paper: 1100 steps
     batch_size: int = 16                 # Paper: batch_size=16
