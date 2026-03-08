@@ -20,7 +20,8 @@
 #
 # original_rr: Paper's exact loss (Zou et al. 2024, Algorithm 1)
 #   ReLU(cos_sim) reroute + L2 retain, paper coefficient schedule
-#   No margins, no triplet, no KL, no dl2rc. alpha=10, 150 steps.
+#   No margins, no triplet, no dl2rc. alpha=10, 150 steps.
+#   With GAMMA_KL=0 (default): paper exact. GAMMA_KL=0.3: adds KL preservation.
 #
 # Bug fixes applied to triplet/per_token/simplified modes:
 #   1. Distance: dl2rc (L2 + 10*ReLU(cos)) instead of dcos
@@ -94,18 +95,19 @@ LORA_R=16
 LORA_ALPHA=16
 LORA_LAYERS="0-20"
 CB_LAYERS="10 20"
-GAMMA_KL=0.3
 DISTANCE=dl2rc
 POLICY=injection_aware
 POOLING_POLICY=cb_full_sequence
 EVAL_MODE=next_tool_prediction
 PRESET=llama-3.1-8b-instruct
 
-# Paper's alpha_max=10 for original_rr, 10.0 for others
+# Mode-specific defaults
 if [[ "$LOSS_MODE" == "original_rr" ]]; then
     ALPHA_MAX=10.0
+    GAMMA_KL="${GAMMA_KL:-0.0}"   # 0 = paper exact, 0.3 = paper + KL
 else
     ALPHA_MAX=10.0
+    GAMMA_KL="${GAMMA_KL:-0.3}"
 fi
 
 echo "========================================================"

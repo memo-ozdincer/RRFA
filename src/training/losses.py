@@ -697,16 +697,23 @@ def original_rr_loss(
     c_r: float,
     harmful_mask: Optional[torch.Tensor] = None,
     benign_mask: Optional[torch.Tensor] = None,
+    gamma_kl: float = 0.0,
+    benign_student_logits: Optional[torch.Tensor] = None,
+    benign_teacher_logits: Optional[torch.Tensor] = None,
+    benign_attention_mask: Optional[torch.Tensor] = None,
+    kl_temperature: float = 1.0,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
-    """Original RR loss from Zou et al. (2024), Algorithm 1.
+    """Original RR loss from Zou et al. (2024), Algorithm 1, with optional KL.
 
     L = c_s * ReLU(cos_sim(frozen, cb)) + c_r * ||frozen - cb||_2
+      + gamma_kl * KL(cb || frozen)   [only when gamma_kl > 0]
 
     Paper schedule:
         c_s = alpha * step / (2 * total_steps)    # 0 -> alpha/2
         c_r = alpha * (1 - step / (2 * total_steps))  # alpha -> alpha/2
 
-    No margins, no triplet, no cluster centers, no KL.
+    When gamma_kl=0 (default): paper exact. No margins, no triplet.
+    When gamma_kl>0: adds KL on benign logits (attention_mask, NOT loss_mask).
     """
     # RR loss: push harmful cos_sim toward 0 (orthogonal to frozen)
     loss_rr, rr_metrics = reroute_loss_relu_cos(
@@ -727,11 +734,26 @@ def original_rr_loss(
 
     total = c_s * loss_rr + c_r * loss_retain
 
+    # Optional KL term
+    loss_kl_val = 0.0
+    if gamma_kl > 0 and benign_student_logits is not None and benign_teacher_logits is not None:
+        loss_kl = kl_divergence_loss(
+            student_logits=benign_student_logits,
+            teacher_logits=benign_teacher_logits,
+            attention_mask=benign_attention_mask,
+            loss_mask=None,  # NOT loss_mask — benign loss_mask is all-zero with injection_aware
+            temperature=kl_temperature,
+        )
+        total = total + gamma_kl * loss_kl
+        loss_kl_val = loss_kl.item()
+
     metrics = {
         "loss_rr": loss_rr.item(),
         "loss_retain": loss_retain.item(),
+        "loss_kl": loss_kl_val,
         "c_s": c_s,
         "c_r": c_r,
+        "gamma_kl": gamma_kl,
         "cos_sim_mean": rr_metrics["cos_sim_mean"] if rr_metrics else 0.0,
         "cos_sim_positive_frac": rr_metrics["cos_sim_positive_frac"] if rr_metrics else 0.0,
     }

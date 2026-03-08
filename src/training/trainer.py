@@ -2005,15 +2005,18 @@ class CircuitBreakerTrainer:
         elif loss_mode == LOSS_MODE_ORIGINAL_RR:
             # Original RR from Zou et al. (2024), Algorithm 1.
             # L = c_s * ReLU(cos_sim(frozen, cb)) + c_r * ||frozen - cb||_2
+            #   + gamma_kl * KL(cb || frozen)   [when gamma_kl > 0]
             # Harmful mask: loss_mask (injection_aware) or attention_mask
             # Benign mask: attention_mask (NOT loss_mask — benign loss_mask is all-zero)
             _harmful_mask = harmful_loss_mask if harmful_loss_mask is not None else harmful_attention_mask
             _benign_mask = benign_attention_mask
+            _gamma_kl = float(getattr(self.config, "triplet_gamma_kl", 0.0))
 
             # Step-0 diagnostic
             if self.global_step == 0 and self.accelerator.is_main_process:
+                kl_info = f" gamma_kl={_gamma_kl}" if _gamma_kl > 0 else " (no KL)"
                 self.accelerator.print(
-                    f"\n  original_rr: c_s={cs:.3f} c_r={cr:.3f} alpha_max={self.config.alpha_max}"
+                    f"\n  original_rr: c_s={cs:.3f} c_r={cr:.3f} alpha_max={self.config.alpha_max}{kl_info}"
                 )
                 self.accelerator.print(
                     f"  harmful mask active: "
@@ -2032,12 +2035,18 @@ class CircuitBreakerTrainer:
                 c_r=cr,
                 harmful_mask=_harmful_mask,
                 benign_mask=_benign_mask,
+                gamma_kl=_gamma_kl,
+                benign_student_logits=student_logits_benign if _gamma_kl > 0 else None,
+                benign_teacher_logits=teacher_logits_benign if _gamma_kl > 0 else None,
+                benign_attention_mask=benign_attention_mask if _gamma_kl > 0 else None,
+                kl_temperature=kl_temp,
             )
 
             metrics = {
                 "loss": total_loss.item(),
                 "loss_reroute": orr_metrics["loss_rr"],
                 "loss_retain": orr_metrics["loss_retain"],
+                "loss_kl": orr_metrics["loss_kl"],
                 "cos_sim_mean": orr_metrics["cos_sim_mean"],
                 "cos_sim_positive_frac": orr_metrics["cos_sim_positive_frac"],
                 "alpha": alpha,
@@ -2065,10 +2074,13 @@ class CircuitBreakerTrainer:
                 )
             else:
                 cos_sim = reroute_metrics["cos_sim_mean"] if reroute_metrics is not None else 0.0
+                kl_str = ""
+                if "loss_kl" in metrics and metrics["loss_kl"] > 0:
+                    kl_str = f" L_kl={metrics['loss_kl']:.4f}"
                 self.accelerator.print(
                     f"[Step {self.global_step}] mode={loss_mode} cs={cs:.3f} cr={cr:.3f} | "
                     f"cos_sim={cos_sim:.4f} | "
-                    f"L_rr={metrics['loss_reroute']:.4f} L_ret={metrics['loss_retain']:.4f}"
+                    f"L_rr={metrics['loss_reroute']:.4f} L_ret={metrics['loss_retain']:.4f}{kl_str}"
                 )
 
         # Backward pass (SINGLE backward through combined graph)
