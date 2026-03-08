@@ -216,6 +216,102 @@ def load_model_and_tokenizer(
     return model, tokenizer
 
 
+def _adapter_logit_diagnostic(
+    model,
+    tokenizer,
+    eval_samples: List[Dict[str, Any]],
+    tools: List[Dict[str, Any]],
+    system_prompt: str,
+    n_samples: int = 5,
+) -> None:
+    """Compare first-token logits with adapter ON vs OFF.
+
+    Must be called BEFORE merge_and_unload() while the model is still a PeftModel.
+    Logs KL divergence, top-token agreement, and max logit shift to diagnose
+    whether the adapter is actually changing the output distribution.
+    """
+    from peft import PeftModel
+    if not isinstance(model, PeftModel):
+        logger.info("  Adapter diagnostic: skipped (not a PeftModel)")
+        return
+
+    logger.info(f"\n  === ADAPTER LOGIT DIAGNOSTIC ({n_samples} samples) ===")
+
+    # Build inputs for a few samples
+    diagnostic_samples = eval_samples[:n_samples]
+    kl_divs = []
+    top1_agree = 0
+    max_logit_diffs = []
+
+    for i, sample in enumerate(diagnostic_samples):
+        messages = sample.get("messages", [])
+        if not messages:
+            continue
+
+        # Tokenize
+        try:
+            input_text = tokenizer.apply_chat_template(
+                messages, tools=tools, tokenize=False, add_generation_prompt=True,
+            )
+        except TypeError:
+            input_text = tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True,
+            )
+        inputs = tokenizer(input_text, return_tensors="pt", truncation=True, max_length=4096)
+        inputs = {k: v.to(model.device) for k, v in inputs.items()}
+
+        with torch.no_grad():
+            # Forward with adapter ON
+            logits_cb = model(**inputs, use_cache=False).logits[0, -1, :]  # last token
+
+            # Forward with adapter OFF
+            with model.disable_adapter():
+                logits_base = model(**inputs, use_cache=False).logits[0, -1, :]
+
+        # Compare
+        p_cb = torch.softmax(logits_cb, dim=-1)
+        p_base = torch.softmax(logits_base, dim=-1)
+
+        # KL(cb || base)
+        kl = torch.sum(p_cb * (torch.log(p_cb + 1e-10) - torch.log(p_base + 1e-10))).item()
+        kl_divs.append(kl)
+
+        # Top-1 agreement
+        top1_cb = logits_cb.argmax().item()
+        top1_base = logits_base.argmax().item()
+        if top1_cb == top1_base:
+            top1_agree += 1
+
+        # Max logit diff
+        max_diff = (logits_cb - logits_base).abs().max().item()
+        max_logit_diffs.append(max_diff)
+
+        # Log per-sample detail
+        top5_cb = torch.topk(logits_cb, 5)
+        top5_base = torch.topk(logits_base, 5)
+        cb_tokens = [tokenizer.decode([t]) for t in top5_cb.indices.tolist()]
+        base_tokens = [tokenizer.decode([t]) for t in top5_base.indices.tolist()]
+        logger.info(
+            f"  Sample {i}: KL={kl:.4f} max_diff={max_diff:.3f} "
+            f"top1_agree={top1_cb == top1_base} "
+            f"base_top5={base_tokens} cb_top5={cb_tokens}"
+        )
+
+    n_valid = len(kl_divs)
+    if n_valid > 0:
+        mean_kl = sum(kl_divs) / n_valid
+        mean_max_diff = sum(max_logit_diffs) / n_valid
+        logger.info(f"  SUMMARY: mean_KL={mean_kl:.4f} mean_max_logit_diff={mean_max_diff:.3f} "
+                     f"top1_agree={top1_agree}/{n_valid}")
+        if mean_kl < 1e-4:
+            logger.warning("  WARNING: KL ~ 0 — adapter has NEGLIGIBLE effect on output logits!")
+        elif mean_kl < 0.01:
+            logger.warning("  WARNING: KL very small — adapter effect is weak.")
+        else:
+            logger.info(f"  Adapter is actively changing logits (KL={mean_kl:.4f})")
+    logger.info("  === END DIAGNOSTIC ===\n")
+
+
 def _split_list(items: List[Any], num_chunks: int) -> List[List[Any]]:
     if num_chunks <= 1:
         return [items]
@@ -589,10 +685,20 @@ def _evaluate_model_on_samples(
         except Exception:
             pass
 
+    # Load WITHOUT merging first so we can run adapter diagnostic
     model, tokenizer = load_model_and_tokenizer(
         model_path, adapter_path=adapter_path, device=device, torch_dtype=torch_dtype,
-        merge_adapter=merge_adapter
+        merge_adapter=False,  # merge manually after diagnostic
     )
+
+    # Run adapter logit diagnostic (before merge, while PeftModel wrapper is active)
+    if adapter_path:
+        _adapter_logit_diagnostic(model, tokenizer, eval_samples, tools, system_prompt)
+        # Now merge if requested
+        if merge_adapter:
+            logger.info("  Merging adapter into base model for faster inference...")
+            model = model.merge_and_unload()
+            logger.info("  Adapter merged successfully")
 
     # Log evaluation context
     _log_eval_context(eval_samples, tools, system_prompt, verbose)
