@@ -178,7 +178,8 @@ else
     python "$REPO_DIR/scripts/augment_llm.py" \
         --operation complete_fujitsu \
         --input "$FUJITSU_RAW" \
-        --output "$FUJITSU_SRC" 2>&1 | tail -5
+        --output "$FUJITSU_SRC" \
+        --dry-run 2>&1 | tail -5
 fi
 
 if [[ -f "$AGENTDOJO_SRC" ]] && [[ -s "$AGENTDOJO_SRC" ]]; then
