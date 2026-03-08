@@ -96,7 +96,7 @@ LORA_ALPHA=16
 LORA_LAYERS="0-20"
 CB_LAYERS="10 20"
 DISTANCE=dl2rc
-POLICY=injection_aware
+POLICY=cb_full_sequence
 POOLING_POLICY=cb_full_sequence
 EVAL_MODE=next_tool_prediction
 PRESET=llama-3.1-8b-instruct
@@ -104,7 +104,7 @@ PRESET=llama-3.1-8b-instruct
 # Mode-specific defaults
 if [[ "$LOSS_MODE" == "original_rr" ]]; then
     ALPHA_MAX=10.0
-    GAMMA_KL="${GAMMA_KL:-0.3}"   # 0 = paper exact, 0.3 = paper + KL
+    GAMMA_KL="${GAMMA_KL:-0.0}"   # 0 = paper exact, 0.3 = paper + KL
 else
     ALPHA_MAX=10.0
     GAMMA_KL="${GAMMA_KL:-0.3}"
