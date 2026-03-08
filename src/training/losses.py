@@ -19,6 +19,8 @@ LOSS_MODE_COSINE_SIMPLE = "cosine_simple"
 LOSS_MODE_L2_SIMPLE = "l2_simple"
 LOSS_MODE_LEGACY_SCHEMA = "legacy_schema"
 LOSS_MODE_LEGACY_CB = "legacy_cb"
+LOSS_MODE_PER_TOKEN_CB = "per_token_cb"
+LOSS_MODE_SIMPLIFIED_POOLED = "simplified_pooled"
 
 SUPPORTED_LOSS_MODES = (
     LOSS_MODE_TRIPLET_FULL,
@@ -26,18 +28,22 @@ SUPPORTED_LOSS_MODES = (
     LOSS_MODE_L2_SIMPLE,
     LOSS_MODE_LEGACY_SCHEMA,
     LOSS_MODE_LEGACY_CB,
+    LOSS_MODE_PER_TOKEN_CB,
+    LOSS_MODE_SIMPLIFIED_POOLED,
 )
 
 DISTANCE_L2 = "d2"
 DISTANCE_COSINE = "dcos"
 DISTANCE_MIX = "dmix"
 DISTANCE_NULL = "d0"
+DISTANCE_L2_RELU_COS = "dl2rc"
 
 SUPPORTED_DISTANCES = (
     DISTANCE_L2,
     DISTANCE_COSINE,
     DISTANCE_MIX,
     DISTANCE_NULL,
+    DISTANCE_L2_RELU_COS,
 )
 
 
@@ -264,6 +270,19 @@ def pooled_representations(
     return torch.stack(pooled_layers, dim=0).mean(dim=0)
 
 
+def _l2_relu_cos_distance(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """L2 + 10*ReLU(cos_dist) — non-zero gradient at LoRA scale.
+
+    Cosine distance alone has near-zero gradient when representations are
+    nearly identical (cos_sim ≈ 1.0 at LoRA scale).  L2 provides non-zero
+    gradient from the start; 10*ReLU(cos) amplifies angular differences
+    once L2 has moved representations apart.  Validated by Sam's code.
+    """
+    l2 = torch.norm(a - b, dim=-1)
+    cos_dist = 1.0 - F.cosine_similarity(a, b, dim=-1, eps=1e-8)
+    return l2 + 10.0 * F.relu(cos_dist)
+
+
 def pair_distance(
     left: torch.Tensor,
     right: torch.Tensor,
@@ -279,6 +298,8 @@ def pair_distance(
         d2 = torch.norm(left - right, p=2, dim=-1)
         dcos = 1.0 - F.cosine_similarity(left, right, dim=-1, eps=1e-8)
         return mix_l2_weight * d2 + mix_cos_weight * dcos
+    if distance == DISTANCE_L2_RELU_COS:
+        return _l2_relu_cos_distance(left, right)
     if distance == DISTANCE_NULL:
         return torch.zeros(left.size(0), device=left.device, dtype=left.dtype)
     raise ValueError(f"Unknown distance: {distance}")
@@ -346,11 +367,13 @@ def triplet_full_loss(
         + margin_harmful
     ).mean()
 
+    # FIX: benign KL must NOT use loss_mask (injection_aware = all-zeros
+    # for benign traces → KL was always zero).  Use attention_mask only.
     benign_kl = kl_divergence_loss(
         student_logits=benign_student_logits,
         teacher_logits=benign_teacher_logits,
         attention_mask=benign_attention_mask,
-        loss_mask=benign_loss_mask,
+        loss_mask=None,
         temperature=kl_temperature,
     )
 
@@ -494,6 +517,160 @@ def simple_l2_loss(
         "mean_benign_l2": benign_l2.mean().item(),
         "scale_h": scale_h.item(),
         "scale_b": scale_b.item(),
+        "total_loss": total.item(),
+    }
+    return total, metrics
+
+
+def _per_token_directional_loss(
+    model_reps: Dict[int, torch.Tensor],
+    frozen_reps: Dict[int, torch.Tensor],
+    target_layers: Sequence[int],
+    mask: torch.Tensor,
+    margin: float,
+    direction: str,
+) -> torch.Tensor:
+    """Per-token L2+10*ReLU(cos) distance with margin.
+
+    direction="push": harmful — loss when dist < margin (push apart)
+    direction="pull": benign  — loss when dist > margin (keep close)
+    """
+    total = torch.tensor(0.0, device=mask.device)
+    num_layers = 0
+
+    for layer_idx in target_layers:
+        if layer_idx not in model_reps or layer_idx not in frozen_reps:
+            continue
+
+        # Per-token distance: [B, T]
+        d = _l2_relu_cos_distance(model_reps[layer_idx], frozen_reps[layer_idx])
+
+        if direction == "push":
+            per_token_loss = F.relu(margin - d)
+        else:
+            per_token_loss = F.relu(d - margin)
+
+        mask_f = mask.float()
+        weighted = per_token_loss * mask_f
+        total = total + weighted.sum() / mask_f.sum().clamp_min(1e-8)
+        num_layers += 1
+
+    return total / max(num_layers, 1)
+
+
+def per_token_cb_loss(
+    harmful_model_reps: Dict[int, torch.Tensor],
+    harmful_frozen_reps: Dict[int, torch.Tensor],
+    benign_model_reps: Dict[int, torch.Tensor],
+    benign_frozen_reps: Dict[int, torch.Tensor],
+    benign_student_logits: torch.Tensor,
+    benign_teacher_logits: torch.Tensor,
+    target_layers: Sequence[int],
+    harmful_mask: torch.Tensor,
+    benign_mask: torch.Tensor,
+    *,
+    alpha_benign: float,
+    beta_harmful: float,
+    gamma_kl: float,
+    margin_benign: float,
+    margin_harmful: float,
+    benign_attention_mask: Optional[torch.Tensor] = None,
+    kl_temperature: float = 1.0,
+) -> Tuple[torch.Tensor, Dict[str, float]]:
+    """Per-token circuit breaker loss (Option A from technical plan).
+
+    No pooling, no cluster center, no decoupled masks.
+    Uses L2+10*ReLU(cos) distance per token, directly weighted by masks.
+
+    Harmful: push each token beyond margin (injection_aware mask)
+    Benign:  keep each token within margin (attention_mask)
+    KL:      preserve benign output distribution (attention_mask, no loss_mask)
+    """
+    harmful_loss = _per_token_directional_loss(
+        harmful_model_reps, harmful_frozen_reps, target_layers,
+        harmful_mask, margin_harmful, "push",
+    )
+
+    benign_loss = _per_token_directional_loss(
+        benign_model_reps, benign_frozen_reps, target_layers,
+        benign_mask, margin_benign, "pull",
+    )
+
+    kl_loss = kl_divergence_loss(
+        student_logits=benign_student_logits,
+        teacher_logits=benign_teacher_logits,
+        attention_mask=benign_attention_mask if benign_attention_mask is not None else benign_mask,
+        loss_mask=None,
+        temperature=kl_temperature,
+    )
+
+    total = alpha_benign * benign_loss + beta_harmful * harmful_loss + gamma_kl * kl_loss
+
+    metrics = {
+        "triplet_benign_loss": benign_loss.item(),
+        "triplet_harmful_loss": harmful_loss.item(),
+        "triplet_kl_loss": kl_loss.item(),
+        "triplet_alpha": float(alpha_benign),
+        "triplet_beta": float(beta_harmful),
+        "triplet_gamma": float(gamma_kl),
+        "total_loss": total.item(),
+    }
+    return total, metrics
+
+
+def simplified_pooled_loss(
+    harmful_new: torch.Tensor,
+    harmful_old: torch.Tensor,
+    benign_new: torch.Tensor,
+    benign_old: torch.Tensor,
+    benign_student_logits: torch.Tensor,
+    benign_teacher_logits: torch.Tensor,
+    benign_attention_mask: Optional[torch.Tensor],
+    *,
+    alpha_benign: float,
+    beta_harmful: float,
+    gamma_kl: float,
+    margin_benign: float,
+    margin_harmful: float,
+    kl_temperature: float = 1.0,
+) -> Tuple[torch.Tensor, Dict[str, float]]:
+    """Simplified pooled loss (Option B from technical plan).
+
+    No cluster center, no cross-terms.  Uses L2+10*ReLU(cos) distance
+    on pooled vectors with simple margin losses.
+
+    Harmful pool: injection_aware mask (focused on injection+decision tokens)
+    Benign pool:  attention_mask (all real tokens)
+    KL:           attention_mask, no loss_mask
+    """
+    # Distance: L2 + 10*ReLU(cos) on pooled vectors
+    harmful_dist = _l2_relu_cos_distance(harmful_new, harmful_old)
+    benign_dist = _l2_relu_cos_distance(benign_new, benign_old)
+
+    # Harmful: push apart (loss when dist < margin)
+    harmful_loss = F.relu(margin_harmful - harmful_dist).mean()
+    # Benign: keep close (loss when dist > margin)
+    benign_loss = F.relu(benign_dist - margin_benign).mean()
+
+    kl_loss = kl_divergence_loss(
+        student_logits=benign_student_logits,
+        teacher_logits=benign_teacher_logits,
+        attention_mask=benign_attention_mask,
+        loss_mask=None,
+        temperature=kl_temperature,
+    )
+
+    total = alpha_benign * benign_loss + beta_harmful * harmful_loss + gamma_kl * kl_loss
+
+    metrics = {
+        "triplet_benign_loss": benign_loss.item(),
+        "triplet_harmful_loss": harmful_loss.item(),
+        "triplet_kl_loss": kl_loss.item(),
+        "triplet_alpha": float(alpha_benign),
+        "triplet_beta": float(beta_harmful),
+        "triplet_gamma": float(gamma_kl),
+        "mean_harmful_dist": harmful_dist.mean().item(),
+        "mean_benign_dist": benign_dist.mean().item(),
         "total_loss": total.item(),
     }
     return total, metrics

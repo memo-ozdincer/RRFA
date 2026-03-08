@@ -436,12 +436,7 @@ def _build_completed_trace(
     new_id = _make_id(f"complete_{op_suffix}", parent_id)
     tool_attack = skeleton.get("tool_attack", {})
 
-    # Extract query for tool output generation
     user_content = skeleton.get("messages", [{}])[-1].get("content", "")
-    query = tool_args.get("query", _extract_query_from_content(user_content))
-
-    # Build tool output
-    tool_output = _generate_tool_output(tool_name, query)
 
     # For benign completions, use only the clean query (no injection)
     # This is critical for contrastive training: benign counterpart must NOT
@@ -454,7 +449,9 @@ def _build_completed_trace(
 
     call_id = f"call_{hashlib.md5(new_id.encode()).hexdigest()[:12]}"
 
-    # Build messages
+    # Build messages — only 3 messages (system, user, assistant tool call).
+    # msg[3-4] (tool output + follow-up) were template garbage that the model
+    # never sees at inference.  Training on them pollutes representations.
     messages = [
         skeleton["messages"][0],  # system
         user_msg,  # user (clean for benign, with injection for harmful)
@@ -469,18 +466,6 @@ def _build_completed_trace(
                 },
                 "call_id": call_id,
             }],
-        },
-        {
-            "role": "tool",
-            "content": tool_output,
-            "name": tool_name,
-            "tool_call_id": call_id,
-        },
-        {
-            "role": "assistant",
-            "content": f"Based on the results from {tool_name}, here is what I found about your query:\n\n"
-                       f"The search returned relevant information. Let me know if you'd like more details "
-                       f"or if you have any follow-up questions.",
         },
     ]
 

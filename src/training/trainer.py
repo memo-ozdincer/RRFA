@@ -53,9 +53,12 @@ from .losses import (
     LOSS_MODE_L2_SIMPLE,
     LOSS_MODE_LEGACY_CB,
     LOSS_MODE_LEGACY_SCHEMA,
+    LOSS_MODE_PER_TOKEN_CB,
+    LOSS_MODE_SIMPLIFIED_POOLED,
     LOSS_MODE_TRIPLET_FULL,
     SUPPORTED_LOSS_MODES,
     kl_divergence_loss as core_kl_divergence_loss,
+    per_token_cb_loss,
     pooled_representations,
     random_reroute_loss,
     reroute_loss_relu_cos,
@@ -63,6 +66,7 @@ from .losses import (
     retain_loss_l2,
     simple_cosine_loss,
     simple_l2_loss,
+    simplified_pooled_loss,
     triplet_full_loss,
 )
 from src.utils.wandb_logging import (
@@ -1362,7 +1366,7 @@ class CircuitBreakerTrainer:
 
         combined_input_ids = torch.cat([harmful_input_ids, benign_input_ids], dim=0)
         combined_attention_mask = torch.cat([harmful_attention_mask, benign_attention_mask], dim=0)
-        needs_frozen = loss_mode in (LOSS_MODE_TRIPLET_FULL, LOSS_MODE_COSINE_SIMPLE, LOSS_MODE_L2_SIMPLE, LOSS_MODE_LEGACY_CB)
+        needs_frozen = loss_mode in (LOSS_MODE_TRIPLET_FULL, LOSS_MODE_COSINE_SIMPLE, LOSS_MODE_L2_SIMPLE, LOSS_MODE_LEGACY_CB, LOSS_MODE_PER_TOKEN_CB, LOSS_MODE_SIMPLIFIED_POOLED)
         combined_frozen_reps = {}
         combined_teacher_logits = None
 
@@ -1862,12 +1866,132 @@ class CircuitBreakerTrainer:
                 "loss_retain": loss_retain.item(),
                 "alpha": alpha,
             }
+        elif loss_mode == LOSS_MODE_PER_TOKEN_CB:
+            if teacher_logits_benign is None:
+                raise RuntimeError("per_token_cb requires frozen-model logits")
+
+            # Per-token loss: no pooling needed.
+            # Harmful mask = injection_aware (loss_mask), benign mask = attention_mask.
+            _harmful_mask = harmful_loss_mask if harmful_loss_mask is not None else harmful_attention_mask
+            _benign_mask = benign_attention_mask
+
+            # Step-0 diagnostic
+            if self.global_step == 0 and self.accelerator.is_main_process:
+                self.accelerator.print(
+                    f"\n  per_token_cb: harmful mask active "
+                    f"{_harmful_mask.sum().item():.0f}/{_harmful_mask.numel()} | "
+                    f"benign mask active "
+                    f"{_benign_mask.sum().item():.0f}/{_benign_mask.numel()}"
+                )
+
+            total_loss, ptcb_metrics = per_token_cb_loss(
+                harmful_model_reps=harmful_model_reps,
+                harmful_frozen_reps=harmful_frozen_reps,
+                benign_model_reps=benign_model_reps,
+                benign_frozen_reps=benign_frozen_reps,
+                benign_student_logits=student_logits_benign,
+                benign_teacher_logits=teacher_logits_benign,
+                target_layers=self.config.cb_target_layers,
+                harmful_mask=_harmful_mask,
+                benign_mask=_benign_mask,
+                alpha_benign=cs * float(getattr(self.config, "triplet_alpha_benign", 0.5)),
+                beta_harmful=cs * float(getattr(self.config, "triplet_beta_harmful", 0.4)),
+                gamma_kl=float(getattr(self.config, "triplet_gamma_kl", 0.9)),
+                margin_benign=float(getattr(self.config, "triplet_margin_benign", 1.2)),
+                margin_harmful=float(getattr(self.config, "triplet_margin_harmful", 1.6)),
+                benign_attention_mask=benign_attention_mask,
+                kl_temperature=kl_temp,
+            )
+
+            metrics = {
+                "loss": total_loss.item(),
+                "loss_triplet_benign": ptcb_metrics["triplet_benign_loss"],
+                "loss_triplet_harmful": ptcb_metrics["triplet_harmful_loss"],
+                "loss_triplet_kl": ptcb_metrics["triplet_kl_loss"],
+                "triplet_alpha": ptcb_metrics["triplet_alpha"],
+                "triplet_beta": ptcb_metrics["triplet_beta"],
+                "triplet_gamma": ptcb_metrics["triplet_gamma"],
+                "alpha": alpha,
+            }
+        elif loss_mode == LOSS_MODE_SIMPLIFIED_POOLED:
+            if teacher_logits_benign is None:
+                raise RuntimeError("simplified_pooled requires frozen-model logits")
+
+            _pool_mode = getattr(self.config, "pooling_mode", "correct")
+
+            # Simplified pooled: harmful pools with injection_aware (loss_mask),
+            # benign pools with attention_mask.  No cluster center.
+            _harmful_pool = harmful_loss_mask if harmful_loss_mask is not None else harmful_attention_mask
+            _benign_pool = benign_attention_mask
+
+            harmful_new = pooled_representations(
+                reps_by_layer=harmful_model_reps,
+                target_layers=self.config.cb_target_layers,
+                token_mask=_harmful_pool,
+                pooling_mode=_pool_mode,
+            )
+            harmful_old = pooled_representations(
+                reps_by_layer=harmful_frozen_reps,
+                target_layers=self.config.cb_target_layers,
+                token_mask=_harmful_pool,
+                pooling_mode=_pool_mode,
+            )
+            benign_new = pooled_representations(
+                reps_by_layer=benign_model_reps,
+                target_layers=self.config.cb_target_layers,
+                token_mask=_benign_pool,
+                pooling_mode=_pool_mode,
+            )
+            benign_old = pooled_representations(
+                reps_by_layer=benign_frozen_reps,
+                target_layers=self.config.cb_target_layers,
+                token_mask=_benign_pool,
+                pooling_mode=_pool_mode,
+            )
+
+            # Step-0 diagnostic
+            if self.global_step == 0 and self.accelerator.is_main_process:
+                self.accelerator.print(
+                    f"\n  simplified_pooled: harmful pool mask active "
+                    f"{_harmful_pool.sum().item():.0f}/{_harmful_pool.numel()} | "
+                    f"benign pool mask active "
+                    f"{_benign_pool.sum().item():.0f}/{_benign_pool.numel()}"
+                )
+
+            total_loss, sp_metrics = simplified_pooled_loss(
+                harmful_new=harmful_new,
+                harmful_old=harmful_old,
+                benign_new=benign_new,
+                benign_old=benign_old,
+                benign_student_logits=student_logits_benign,
+                benign_teacher_logits=teacher_logits_benign,
+                benign_attention_mask=benign_attention_mask,
+                alpha_benign=cs * float(getattr(self.config, "triplet_alpha_benign", 0.5)),
+                beta_harmful=cs * float(getattr(self.config, "triplet_beta_harmful", 0.4)),
+                gamma_kl=float(getattr(self.config, "triplet_gamma_kl", 0.9)),
+                margin_benign=float(getattr(self.config, "triplet_margin_benign", 1.2)),
+                margin_harmful=float(getattr(self.config, "triplet_margin_harmful", 1.6)),
+                kl_temperature=kl_temp,
+            )
+
+            metrics = {
+                "loss": total_loss.item(),
+                "loss_triplet_benign": sp_metrics["triplet_benign_loss"],
+                "loss_triplet_harmful": sp_metrics["triplet_harmful_loss"],
+                "loss_triplet_kl": sp_metrics["triplet_kl_loss"],
+                "triplet_alpha": sp_metrics["triplet_alpha"],
+                "triplet_beta": sp_metrics["triplet_beta"],
+                "triplet_gamma": sp_metrics["triplet_gamma"],
+                "mean_harmful_dist": sp_metrics.get("mean_harmful_dist", 0),
+                "mean_benign_dist": sp_metrics.get("mean_benign_dist", 0),
+                "alpha": alpha,
+            }
         else:
             raise ValueError(f"Unexpected loss mode: {loss_mode}")
 
         # === Diagnostic Logging ===
         if self.global_step % 50 == 0:
-            if loss_mode in (LOSS_MODE_TRIPLET_FULL, LOSS_MODE_COSINE_SIMPLE, LOSS_MODE_L2_SIMPLE):
+            if loss_mode in (LOSS_MODE_TRIPLET_FULL, LOSS_MODE_COSINE_SIMPLE, LOSS_MODE_L2_SIMPLE, LOSS_MODE_PER_TOKEN_CB, LOSS_MODE_SIMPLIFIED_POOLED):
                 self.accelerator.print(
                     f"[Step {self.global_step}] mode={loss_mode} | "
                     f"L_b={metrics['loss_triplet_benign']:.4f} "

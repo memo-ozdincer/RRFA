@@ -9,16 +9,23 @@
 #SBATCH --account=def-zhijing
 
 # =============================================================================
-# SWEEP 6: Completed Fujitsu + Truncated AgentDojo
+# SWEEP 7: Bug fixes + new loss modes (per technical plan)
 # =============================================================================
 #
-# Single run with all settled hyperparameters from Sweep 5.
-# Only change: completed Fujitsu traces (not skeletons) and truncated AD traces.
+# Three concurrent runs (submit separately):
+#   LOSS_MODE=triplet_full   sbatch slurm/pipeline/sweep_completed_v1.sbatch
+#   LOSS_MODE=per_token_cb   sbatch slurm/pipeline/sweep_completed_v1.sbatch
+#   LOSS_MODE=simplified_pooled sbatch slurm/pipeline/sweep_completed_v1.sbatch
+#
+# Bug fixes applied to ALL modes:
+#   1. Distance: dl2rc (L2 + 10*ReLU(cos)) instead of dcos
+#   2. KL fix: benign KL uses attention_mask, not loss_mask
+#   3. Fujitsu truncated to 3 messages (no template garbage)
 #
 # Data:
 #   fujitsu_b4_completed.jsonl  - 26,492 (13,246 harmful + 13,246 benign)
 #   agentdojo_truncated.jsonl   - 4,144 (1,000 harmful + 2,894 benign + 250 resisted)
-#   contrastive_pairs.jsonl     - 1,247 pairs
+#   contrastive_pairs.jsonl     - 1,247 pairs (generated if missing)
 #
 # Usage:
 #   sbatch slurm/pipeline/sweep_completed_v1.sbatch
@@ -58,7 +65,7 @@ export TRANSFORMERS_OFFLINE=1
 export TQDM_DISABLE=1
 
 # =============================================================================
-# Configuration (ALL SETTLED from Sweep 5)
+# Configuration
 # =============================================================================
 QUICK_TEST="${QUICK_TEST:-false}"
 if [[ "$QUICK_TEST" == "true" ]]; then
@@ -78,17 +85,19 @@ LORA_ALPHA=16
 LORA_LAYERS="0-20"
 CB_LAYERS="10 20"
 GAMMA_KL=0.3
-LOSS_MODE=triplet_full
+LOSS_MODE="${LOSS_MODE:-triplet_full}"
+DISTANCE=dl2rc
 POLICY=injection_aware
 POOLING_POLICY=cb_full_sequence
 EVAL_MODE=next_tool_prediction
 PRESET=llama-3.1-8b-instruct
 
 echo "========================================================"
-echo "SWEEP 6: Completed Fujitsu + Truncated AgentDojo"
+echo "SWEEP 7: Bug fixes + $LOSS_MODE"
 echo "========================================================"
 echo "Job: ${SLURM_JOB_ID:-local} | $(date)"
-echo "Steps: $TOTAL_STEPS | Policy: $POLICY | LoRA: $LORA_LAYERS | γ_kl: $GAMMA_KL"
+echo "Steps: $TOTAL_STEPS | Loss: $LOSS_MODE | Distance: $DISTANCE"
+echo "Policy: $POLICY | LoRA: $LORA_LAYERS | γ_kl: $GAMMA_KL"
 echo ""
 
 # =============================================================================
@@ -112,13 +121,22 @@ AGENTDOJO_RAW="$TRACES_DIR/agentdojo_augmented.jsonl"
 PAIRS_SRC="$TRACES_DIR/contrastive_pairs.jsonl"
 TOOL_SCHEMA="$REPO_DIR/configs/tool_schemas/b4_standard_v1.json"
 
-# Copy from repo if not on scratch yet (agentdojo, contrastive pairs)
-for src_name in agentdojo_augmented.jsonl contrastive_pairs.jsonl; do
+# Copy from repo if not on scratch yet (agentdojo)
+for src_name in agentdojo_augmented.jsonl; do
     if [[ ! -f "$TRACES_DIR/$src_name" ]] && [[ -f "$REPO_DIR/data/traces/$src_name" ]]; then
         echo "  Copying $src_name to scratch..."
         cp "$REPO_DIR/data/traces/$src_name" "$TRACES_DIR/$src_name"
     fi
 done
+
+# Generate contrastive pairs if missing (gitignored, won't be in repo)
+if [[ ! -f "$PAIRS_SRC" ]]; then
+    echo "  Generating contrastive pairs..."
+    python "$REPO_DIR/scripts/augment_agentdojo.py" \
+        --traces-input "$AGENTDOJO_RAW" \
+        --operations removal,contrastive \
+        --contrastive-output "$PAIRS_SRC" 2>&1 | tail -5
+fi
 
 for f in "$FUJITSU_RAW" "$AGENTDOJO_RAW" "$PAIRS_SRC"; do
     if [[ ! -f "$f" ]]; then
@@ -131,7 +149,7 @@ echo ""
 # =============================================================================
 # Output directory
 # =============================================================================
-SWEEP_ID="completed_$(date +%Y%m%d_%H%M%S)"
+SWEEP_ID="bugfix_${LOSS_MODE}_$(date +%Y%m%d_%H%M%S)"
 RUN_DIR="$CB_SCRATCH/sweeps/$SWEEP_ID/run"
 mkdir -p "$RUN_DIR"/{renders,lossmasks,split_fujitsu,split_agentdojo,model,eval}
 echo "Output: $RUN_DIR"
@@ -148,7 +166,7 @@ gen_start=$(date +%s)
 FUJITSU_SRC="$RUN_DIR/fujitsu_b4_completed.jsonl"
 AGENTDOJO_SRC="$RUN_DIR/agentdojo_truncated.jsonl"
 
-echo "  Completing Fujitsu skeletons..."
+echo "  Completing Fujitsu skeletons (3-message truncated)..."
 python "$REPO_DIR/scripts/augment_llm.py" \
     --operation complete_fujitsu \
     --input "$FUJITSU_RAW" \
@@ -266,7 +284,7 @@ echo ""
 # Step 3: Training
 # =============================================================================
 echo "========================================================"
-echo "Step 3: Training ($TOTAL_STEPS steps)"
+echo "Step 3: Training ($LOSS_MODE, $TOTAL_STEPS steps)"
 echo "========================================================"
 train_start=$(date +%s)
 
@@ -288,10 +306,10 @@ python src/training/train_schema.py \
     --triplet-gamma-kl "$GAMMA_KL" \
     --triplet-margin-benign 1.2 \
     --triplet-margin-harmful 1.6 \
-    --triplet-benign-positive-distance dcos \
-    --triplet-benign-negative-distance dcos \
-    --triplet-harmful-positive-distance dcos \
-    --triplet-harmful-negative-distance dcos \
+    --triplet-benign-positive-distance "$DISTANCE" \
+    --triplet-benign-negative-distance "$DISTANCE" \
+    --triplet-harmful-positive-distance "$DISTANCE" \
+    --triplet-harmful-negative-distance "$DISTANCE" \
     --triplet-mix-l2-weight 0.5 \
     --triplet-mix-cos-weight 0.5 \
     --pooling-mode correct \
@@ -437,7 +455,7 @@ fi
 # =============================================================================
 echo ""
 echo "========================================================"
-echo "COMPLETE"
+echo "COMPLETE ($LOSS_MODE)"
 echo "========================================================"
 echo "Output: $RUN_DIR"
 echo "Date: $(date)"
