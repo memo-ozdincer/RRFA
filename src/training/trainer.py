@@ -1888,14 +1888,29 @@ class CircuitBreakerTrainer:
             _harmful_mask = harmful_loss_mask if harmful_loss_mask is not None else harmful_attention_mask
             _benign_mask = benign_attention_mask
 
-            # Step-0 diagnostic
+            _dist_fn = getattr(self.config, "triplet_harmful_positive_distance", "dl2rc")
+
+            # Step-0 diagnostic: masks + initial distances for margin calibration
             if self.global_step == 0 and self.accelerator.is_main_process:
                 self.accelerator.print(
-                    f"\n  per_token_cb: harmful mask active "
+                    f"\n  per_token_cb: distance={_dist_fn} | harmful mask active "
                     f"{_harmful_mask.sum().item():.0f}/{_harmful_mask.numel()} | "
                     f"benign mask active "
                     f"{_benign_mask.sum().item():.0f}/{_benign_mask.numel()}"
                 )
+                # Print initial distances so margins can be calibrated
+                with torch.no_grad():
+                    from .losses import _per_token_distance
+                    for _layer in self.config.cb_target_layers:
+                        if _layer in harmful_model_reps and _layer in harmful_frozen_reps:
+                            _d_h = _per_token_distance(harmful_model_reps[_layer], harmful_frozen_reps[_layer], _dist_fn)
+                            _d_b = _per_token_distance(benign_model_reps[_layer], benign_frozen_reps[_layer], _dist_fn)
+                            self.accelerator.print(
+                                f"  Step-0 layer {_layer}: harmful_dist={_d_h.mean().item():.4f} "
+                                f"benign_dist={_d_b.mean().item():.4f} "
+                                f"(margins: h={getattr(self.config, 'triplet_margin_harmful', 1.6)} "
+                                f"b={getattr(self.config, 'triplet_margin_benign', 1.2)})"
+                            )
 
             total_loss, ptcb_metrics = per_token_cb_loss(
                 harmful_model_reps=harmful_model_reps,
@@ -1914,6 +1929,7 @@ class CircuitBreakerTrainer:
                 margin_harmful=float(getattr(self.config, "triplet_margin_harmful", 1.6)),
                 benign_attention_mask=benign_attention_mask,
                 kl_temperature=kl_temp,
+                distance=getattr(self.config, "triplet_harmful_positive_distance", "dl2rc"),
             )
 
             metrics = {
@@ -1987,6 +2003,7 @@ class CircuitBreakerTrainer:
                 margin_benign=float(getattr(self.config, "triplet_margin_benign", 1.2)),
                 margin_harmful=float(getattr(self.config, "triplet_margin_harmful", 1.6)),
                 kl_temperature=kl_temp,
+                distance=getattr(self.config, "triplet_harmful_positive_distance", "dl2rc"),
             )
 
             metrics = {

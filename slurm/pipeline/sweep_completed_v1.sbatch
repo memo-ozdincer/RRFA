@@ -398,7 +398,79 @@ else
     tail -20 "$RUN_DIR/train.log" | sed 's/^/    /'
     exit 1
 fi
+
+# Training history summary
 echo ""
+echo "  Training history:"
+python3 - "$RUN_DIR/train.log" << 'TRAINDIAG'
+import re, sys
+
+log_path = sys.argv[1] if len(sys.argv) > 1 else ""
+if not log_path:
+    sys.exit(0)
+
+steps = []
+with open(log_path) as f:
+    for line in f:
+        # Match step-logged lines (every 50 steps from trainer diagnostics)
+        m = re.search(r'\[Step (\d+)\](.+)', line)
+        if m:
+            step = int(m.group(1))
+            rest = m.group(2).strip()
+            steps.append((step, rest))
+        # Also catch grad_norm lines
+        gm = re.search(r'grad_norm=([0-9.e+-]+)', line)
+        if gm and steps:
+            steps[-1] = (steps[-1][0], steps[-1][1] + f" grad={gm.group(1)}")
+
+if not steps:
+    # Fallback: generic step/loss pattern
+    with open(log_path) as f:
+        for line in f:
+            m = re.search(r'step[= ]+(\d+).*?loss[= ]+([0-9.e+-]+)', line, re.IGNORECASE)
+            if m:
+                steps.append((int(m.group(1)), f"loss={m.group(2)}"))
+
+if steps:
+    print(f"    Steps logged: {len(steps)}")
+    for label, idx in [("First", 0), ("Mid", len(steps)//2), ("Last", -1)]:
+        s, info = steps[idx]
+        print(f"    {label:5s} (step {s:>4d}): {info[:150]}")
+
+    # Check for warnings
+    with open(log_path) as f:
+        warns = [l.strip() for l in f if 'WARNING' in l and 'grad_norm' in l]
+    if warns:
+        print(f"    ⚠ Zero gradient warnings: {len(warns)}")
+else:
+    print("    No step diagnostics found in log")
+TRAINDIAG
+echo ""
+
+# Save run config
+cat > "$RUN_DIR/run_config.json" << RUNCFG
+{
+  "loss_mode": "$LOSS_MODE",
+  "distance": "$DISTANCE",
+  "policy": "$POLICY",
+  "pooling_policy": "$POOLING_POLICY",
+  "cb_layers": "$CB_LAYERS",
+  "lora_layers": "$LORA_LAYERS",
+  "total_steps": $TOTAL_STEPS,
+  "batch_size": $BATCH_SIZE,
+  "grad_accum": $GRAD_ACCUM,
+  "effective_batch": $(( BATCH_SIZE * GRAD_ACCUM )),
+  "learning_rate": "$LEARNING_RATE",
+  "gamma_kl": $GAMMA_KL,
+  "alpha_max": $ALPHA_MAX,
+  "lora_r": $LORA_R,
+  "lora_alpha": $LORA_ALPHA,
+  "eval_mode": "$EVAL_MODE",
+  "model": "$TOKENIZER",
+  "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "job_id": "${SLURM_JOB_ID:-local}"
+}
+RUNCFG
 
 # =============================================================================
 # Step 4: Evaluation
@@ -506,11 +578,63 @@ if cb: print(f'    AD Benign:  correct={cb.get(\"correct_tool_call_rate\",0):.0%
 fi
 
 # =============================================================================
-# Done
+# Summary
 # =============================================================================
 echo ""
 echo "========================================================"
-echo "COMPLETE ($LOSS_MODE)"
+echo "RESULTS SUMMARY ($LOSS_MODE)"
 echo "========================================================"
+
+python3 - "$RUN_DIR" "$LOSS_MODE" "$DISTANCE" "$GAMMA_KL" "$TOTAL_STEPS" << 'SUMMARY'
+import json, os, sys
+
+run_dir = sys.argv[1]
+loss_mode = sys.argv[2]
+distance = sys.argv[3]
+gamma_kl = sys.argv[4]
+steps = sys.argv[5]
+
+fmt = lambda v: f"{v:.0%}" if isinstance(v, (int, float)) and v >= 0 else "n/a"
+
+print(f"  Config: {loss_mode} | dist={distance} | γ_kl={gamma_kl} | steps={steps}")
+print()
+
+# Fujitsu
+fuj_path = os.path.join(run_dir, "eval", "next_tool_prediction", "fujitsu_eval.json")
+if os.path.isfile(fuj_path):
+    with open(fuj_path) as f:
+        r = json.load(f)
+    bl = r.get("baseline", {}).get("tool_flip_asr", {})
+    cb = r.get("cb_model", {}).get("tool_flip_asr", {})
+    if bl and cb:
+        print(f"  Fujitsu:")
+        print(f"    Baseline: ASR={fmt(bl.get('attack_success_rate', -1))} correct={fmt(bl.get('correct_tool_call_rate', -1))}")
+        print(f"    CB Model: ASR={fmt(cb.get('attack_success_rate', -1))} correct={fmt(cb.get('correct_tool_call_rate', -1))} no_tool={fmt(cb.get('no_tool_call_rate', -1))}")
+        delta = cb.get('attack_success_rate', 0) - bl.get('attack_success_rate', 0)
+        print(f"    Delta:    ASR {delta:+.0%}")
+
+# AgentDojo harmful
+adh_path = os.path.join(run_dir, "eval", "next_tool_prediction", "agentdojo_eval.json")
+if os.path.isfile(adh_path):
+    with open(adh_path) as f:
+        r = json.load(f)
+    cb = r.get("cb_model", {}).get("generation_comparison", {})
+    if cb:
+        print(f"  AgentDojo Harmful:")
+        print(f"    Resist={fmt(cb.get('harmful_resistance_rate', -1))} Malicious={fmt(cb.get('malicious_tool_call_rate', -1))}")
+
+# AgentDojo benign
+adb_path = os.path.join(run_dir, "eval", "next_tool_prediction", "agentdojo_benign_eval.json")
+if os.path.isfile(adb_path):
+    with open(adb_path) as f:
+        r = json.load(f)
+    cb = r.get("cb_model", {}).get("generation_comparison", {})
+    if cb:
+        print(f"  AgentDojo Benign:")
+        print(f"    Correct={fmt(cb.get('correct_tool_call_rate', -1))} No_tool={fmt(cb.get('no_tool_call_rate', -1))}")
+
+print()
+SUMMARY
+
 echo "Output: $RUN_DIR"
 echo "Date: $(date)"

@@ -39,6 +39,7 @@ DISTANCE_COSINE = "dcos"
 DISTANCE_MIX = "dmix"
 DISTANCE_NULL = "d0"
 DISTANCE_L2_RELU_COS = "dl2rc"
+DISTANCE_L2_SQUARED = "dl2sq"
 
 SUPPORTED_DISTANCES = (
     DISTANCE_L2,
@@ -46,6 +47,7 @@ SUPPORTED_DISTANCES = (
     DISTANCE_MIX,
     DISTANCE_NULL,
     DISTANCE_L2_RELU_COS,
+    DISTANCE_L2_SQUARED,
 )
 
 
@@ -302,6 +304,8 @@ def pair_distance(
         return mix_l2_weight * d2 + mix_cos_weight * dcos
     if distance == DISTANCE_L2_RELU_COS:
         return _l2_relu_cos_distance(left, right)
+    if distance == DISTANCE_L2_SQUARED:
+        return (left - right).pow(2).sum(dim=-1)
     if distance == DISTANCE_NULL:
         return torch.zeros(left.size(0), device=left.device, dtype=left.dtype)
     raise ValueError(f"Unknown distance: {distance}")
@@ -524,6 +528,24 @@ def simple_l2_loss(
     return total, metrics
 
 
+def _per_token_distance(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    distance: str = "dl2rc",
+) -> torch.Tensor:
+    """Per-token distance between representations. Returns [B, T]."""
+    if distance == DISTANCE_L2_SQUARED:
+        return (a - b).pow(2).sum(dim=-1)
+    elif distance == DISTANCE_L2_RELU_COS:
+        return _l2_relu_cos_distance(a, b)
+    elif distance == DISTANCE_L2:
+        return torch.norm(a - b, p=2, dim=-1)
+    elif distance == DISTANCE_COSINE:
+        return 1.0 - F.cosine_similarity(a, b, dim=-1, eps=1e-8)
+    else:
+        return _l2_relu_cos_distance(a, b)
+
+
 def _per_token_directional_loss(
     model_reps: Dict[int, torch.Tensor],
     frozen_reps: Dict[int, torch.Tensor],
@@ -531,8 +553,9 @@ def _per_token_directional_loss(
     mask: torch.Tensor,
     margin: float,
     direction: str,
+    distance: str = "dl2rc",
 ) -> Tuple[torch.Tensor, float]:
-    """Per-token L2+10*ReLU(cos) distance with margin.
+    """Per-token distance with margin.
 
     direction="push": harmful — loss when dist < margin (push apart)
     direction="pull": benign  — loss when dist > margin (keep close)
@@ -550,7 +573,7 @@ def _per_token_directional_loss(
             continue
 
         # Per-token distance: [B, T]
-        d = _l2_relu_cos_distance(model_reps[layer_idx], frozen_reps[layer_idx])
+        d = _per_token_distance(model_reps[layer_idx], frozen_reps[layer_idx], distance)
 
         if direction == "push":
             per_token_loss = F.relu(margin - d)
@@ -584,11 +607,12 @@ def per_token_cb_loss(
     margin_harmful: float,
     benign_attention_mask: Optional[torch.Tensor] = None,
     kl_temperature: float = 1.0,
+    distance: str = "dl2rc",
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """Per-token circuit breaker loss (Option A from technical plan).
 
     No pooling, no cluster center, no decoupled masks.
-    Uses L2+10*ReLU(cos) distance per token, directly weighted by masks.
+    Per-token distance weighted by masks.
 
     Harmful: push each token beyond margin (injection_aware mask)
     Benign:  keep each token within margin (attention_mask)
@@ -596,12 +620,12 @@ def per_token_cb_loss(
     """
     harmful_loss, mean_harmful_dist = _per_token_directional_loss(
         harmful_model_reps, harmful_frozen_reps, target_layers,
-        harmful_mask, margin_harmful, "push",
+        harmful_mask, margin_harmful, "push", distance=distance,
     )
 
     benign_loss, mean_benign_dist = _per_token_directional_loss(
         benign_model_reps, benign_frozen_reps, target_layers,
-        benign_mask, margin_benign, "pull",
+        benign_mask, margin_benign, "pull", distance=distance,
     )
 
     kl_loss = kl_divergence_loss(
@@ -643,19 +667,19 @@ def simplified_pooled_loss(
     margin_benign: float,
     margin_harmful: float,
     kl_temperature: float = 1.0,
+    distance: str = "dl2rc",
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """Simplified pooled loss (Option B from technical plan).
 
-    No cluster center, no cross-terms.  Uses L2+10*ReLU(cos) distance
-    on pooled vectors with simple margin losses.
+    No cluster center, no cross-terms.  Pooled vectors with margin losses.
 
     Harmful pool: injection_aware mask (focused on injection+decision tokens)
     Benign pool:  attention_mask (all real tokens)
     KL:           attention_mask, no loss_mask
     """
-    # Distance: L2 + 10*ReLU(cos) on pooled vectors
-    harmful_dist = _l2_relu_cos_distance(harmful_new, harmful_old)
-    benign_dist = _l2_relu_cos_distance(benign_new, benign_old)
+    # Distance on pooled vectors
+    harmful_dist = pair_distance(harmful_new, harmful_old, distance)
+    benign_dist = pair_distance(benign_new, benign_old, distance)
 
     # Harmful: push apart (loss when dist < margin)
     harmful_loss = F.relu(margin_harmful - harmful_dist).mean()
