@@ -589,6 +589,50 @@ def _per_token_directional_loss(
     return total / n, dist_sum / n
 
 
+def _per_token_expscale_loss(
+    model_reps: Dict[int, torch.Tensor],
+    frozen_reps: Dict[int, torch.Tensor],
+    target_layers: Sequence[int],
+    mask: torch.Tensor,
+    direction: str,
+    distance: str = "dl2rc",
+) -> Tuple[torch.Tensor, float]:
+    """Per-token margin-free loss (Option C).
+
+    direction="push": harmful — exp(-d/scale), bounded [0,1], always has gradient
+    direction="pull": benign  — d.mean(), direct penalty on drift
+
+    Scale is auto-computed from frozen rep norms so it works at any layer.
+    Returns (loss, mean_masked_distance) for diagnostics.
+    """
+    total = torch.tensor(0.0, device=mask.device)
+    dist_sum = 0.0
+    num_layers = 0
+    mask_f = mask.float()
+    mask_denom = mask_f.sum().clamp_min(1e-8)
+
+    for layer_idx in target_layers:
+        if layer_idx not in model_reps or layer_idx not in frozen_reps:
+            continue
+
+        d = _per_token_distance(model_reps[layer_idx], frozen_reps[layer_idx], distance)
+
+        if direction == "push":
+            # Auto-scale from frozen norm so exp() is well-calibrated
+            scale = frozen_reps[layer_idx].detach().norm(dim=-1).mean().clamp(min=1.0)
+            per_token_loss = torch.exp(-d / scale)
+        else:
+            per_token_loss = d
+
+        weighted = per_token_loss * mask_f
+        total = total + weighted.sum() / mask_denom
+        dist_sum += (d.detach() * mask_f).sum().item() / mask_denom.item()
+        num_layers += 1
+
+    n = max(num_layers, 1)
+    return total / n, dist_sum / n
+
+
 def per_token_cb_loss(
     harmful_model_reps: Dict[int, torch.Tensor],
     harmful_frozen_reps: Dict[int, torch.Tensor],
@@ -608,6 +652,7 @@ def per_token_cb_loss(
     benign_attention_mask: Optional[torch.Tensor] = None,
     kl_temperature: float = 1.0,
     distance: str = "dl2rc",
+    margin_free: bool = False,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """Per-token circuit breaker loss (Option A from technical plan).
 
@@ -617,16 +662,28 @@ def per_token_cb_loss(
     Harmful: push each token beyond margin (injection_aware mask)
     Benign:  keep each token within margin (attention_mask)
     KL:      preserve benign output distribution (attention_mask, no loss_mask)
-    """
-    harmful_loss, mean_harmful_dist = _per_token_directional_loss(
-        harmful_model_reps, harmful_frozen_reps, target_layers,
-        harmful_mask, margin_harmful, "push", distance=distance,
-    )
 
-    benign_loss, mean_benign_dist = _per_token_directional_loss(
-        benign_model_reps, benign_frozen_reps, target_layers,
-        benign_mask, margin_benign, "pull", distance=distance,
-    )
+    When margin_free=True (Option C): uses exp(-d/scale) for harmful and
+    d.mean() for benign. No margins needed — eliminates margin tuning.
+    """
+    if margin_free:
+        harmful_loss, mean_harmful_dist = _per_token_expscale_loss(
+            harmful_model_reps, harmful_frozen_reps, target_layers,
+            harmful_mask, "push", distance=distance,
+        )
+        benign_loss, mean_benign_dist = _per_token_expscale_loss(
+            benign_model_reps, benign_frozen_reps, target_layers,
+            benign_mask, "pull", distance=distance,
+        )
+    else:
+        harmful_loss, mean_harmful_dist = _per_token_directional_loss(
+            harmful_model_reps, harmful_frozen_reps, target_layers,
+            harmful_mask, margin_harmful, "push", distance=distance,
+        )
+        benign_loss, mean_benign_dist = _per_token_directional_loss(
+            benign_model_reps, benign_frozen_reps, target_layers,
+            benign_mask, margin_benign, "pull", distance=distance,
+        )
 
     kl_loss = kl_divergence_loss(
         student_logits=benign_student_logits,

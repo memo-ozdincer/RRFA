@@ -17,6 +17,8 @@
 #   LOSS_MODE=triplet_full   sbatch slurm/pipeline/sweep_completed_v1.sbatch
 #   LOSS_MODE=per_token_cb   sbatch slurm/pipeline/sweep_completed_v1.sbatch
 #   LOSS_MODE=simplified_pooled sbatch slurm/pipeline/sweep_completed_v1.sbatch
+#   LOSS_MODE=per_token_cb DISTANCE=dl2sq sbatch ...          # squared L2 distance
+#   LOSS_MODE=per_token_cb MARGIN_FREE=true sbatch ...        # margin-free (Option C)
 #
 # original_rr: Paper's exact loss (Zou et al. 2024, Algorithm 1)
 #   ReLU(cos_sim) reroute + L2 retain, paper coefficient schedule
@@ -95,7 +97,7 @@ LORA_R=16
 LORA_ALPHA=16
 LORA_LAYERS="0-20"
 CB_LAYERS="10 20"
-DISTANCE=dl2rc
+DISTANCE="${DISTANCE:-dl2sq}"  # dl2rc (default), dcos, dl2sq
 POLICY=injection_aware
 POOLING_POLICY=injection_aware
 EVAL_MODE=next_tool_prediction
@@ -110,12 +112,14 @@ else
     GAMMA_KL="${GAMMA_KL:-0.3}"
 fi
 
+MARGIN_FREE="${MARGIN_FREE:-false}"
+
 echo "========================================================"
 echo "SWEEP 7: Bug fixes + $LOSS_MODE"
 echo "========================================================"
 echo "Job: ${SLURM_JOB_ID:-local} | $(date)"
 echo "Steps: $TOTAL_STEPS | Loss: $LOSS_MODE | Distance: $DISTANCE"
-echo "Policy: $POLICY | LoRA: $LORA_LAYERS | γ_kl: $GAMMA_KL"
+echo "Policy: $POLICY | LoRA: $LORA_LAYERS | γ_kl: $GAMMA_KL | margin_free: $MARGIN_FREE"
 echo ""
 
 # =============================================================================
@@ -387,6 +391,7 @@ python src/training/train_schema.py \
     --benign-lossmasks "$SHARED_DATA/split_fujitsu/lossmasks_benign.jsonl" \
                        "$SHARED_DATA/split_agentdojo/agentdojo_lossmasks_benign.jsonl" \
     --contrastive-pairs "$PAIRS_SRC" \
+    $( [[ "$MARGIN_FREE" == "true" ]] && echo "--margin-free" ) \
     > "$RUN_DIR/train.log" 2>&1
 
 train_status=$?
@@ -465,6 +470,7 @@ cat > "$RUN_DIR/run_config.json" << RUNCFG
   "alpha_max": $ALPHA_MAX,
   "lora_r": $LORA_R,
   "lora_alpha": $LORA_ALPHA,
+  "margin_free": "$MARGIN_FREE",
   "eval_mode": "$EVAL_MODE",
   "model": "$TOKENIZER",
   "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",

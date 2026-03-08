@@ -1889,11 +1889,13 @@ class CircuitBreakerTrainer:
             _benign_mask = benign_attention_mask
 
             _dist_fn = getattr(self.config, "triplet_harmful_positive_distance", "dl2rc")
+            _margin_free = getattr(self.config, "margin_free", False)
 
             # Step-0 diagnostic: masks + initial distances for margin calibration
             if self.global_step == 0 and self.accelerator.is_main_process:
+                _mf_str = " | MARGIN-FREE" if _margin_free else ""
                 self.accelerator.print(
-                    f"\n  per_token_cb: distance={_dist_fn} | harmful mask active "
+                    f"\n  per_token_cb: distance={_dist_fn}{_mf_str} | harmful mask active "
                     f"{_harmful_mask.sum().item():.0f}/{_harmful_mask.numel()} | "
                     f"benign mask active "
                     f"{_benign_mask.sum().item():.0f}/{_benign_mask.numel()}"
@@ -1930,6 +1932,7 @@ class CircuitBreakerTrainer:
                 benign_attention_mask=benign_attention_mask,
                 kl_temperature=kl_temp,
                 distance=getattr(self.config, "triplet_harmful_positive_distance", "dl2rc"),
+                margin_free=_margin_free,
             )
 
             metrics = {
