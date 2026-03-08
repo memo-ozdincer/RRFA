@@ -97,7 +97,7 @@ LORA_ALPHA=32
 # LoRA layers: NOT restricted — applied to ALL 32 layers (no --lora-target-layers).
 # This matches the old working sweep (d086ec9) where layers_to_transform was not set.
 CB_LAYERS="10 20"
-DISTANCE="${DISTANCE:-dl2rc}"  # dl2rc, dcos, dl2sq
+DISTANCE="${DISTANCE:-dcos}"  # dl2rc, dcos, dl2sq
 POLICY=injection_aware
 POOLING_POLICY=injection_aware
 EVAL_MODE=next_tool_prediction
