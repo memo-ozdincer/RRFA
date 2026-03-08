@@ -15,7 +15,6 @@ llmail-inject-challenge/
 # ============================================================
 
 # Tier B: ETL_A outputs (canonical traces)
-data/traces/
 
 # Tier C: ETL_B outputs (renders + lossmasks)
 data/renders/
