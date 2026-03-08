@@ -77,7 +77,7 @@ export TQDM_DISABLE=1
 # Configuration
 # =============================================================================
 QUICK_TEST="${QUICK_TEST:-false}"
-LOSS_MODE="${LOSS_MODE:-simplified_pooled}"  # original_rr, triplet_full, per_token_cb, simplified_pooled
+LOSS_MODE="${LOSS_MODE:-original_rr}"  # original_rr, triplet_full, per_token_cb, simplified_pooled
 
 if [[ "$QUICK_TEST" == "true" ]]; then
     TOTAL_STEPS=20; LIMIT_EVAL=5; NUM_EXAMPLES=2
@@ -108,7 +108,7 @@ PRESET=llama-3.1-8b-instruct
 ALPHA_MAX=10.0
 GAMMA_KL="${GAMMA_KL:-0.3}"
 
-MARGIN_FREE="${MARGIN_FREE:-true}"
+MARGIN_FREE="${MARGIN_FREE:-false}"
 
 echo "========================================================"
 echo "SWEEP 8: Restored schedule + full LoRA + $LOSS_MODE"
