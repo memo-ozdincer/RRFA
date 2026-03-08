@@ -135,7 +135,9 @@ if [[ ! -f "$PAIRS_SRC" ]]; then
     python "$REPO_DIR/scripts/augment_agentdojo.py" \
         --traces-input "$AGENTDOJO_RAW" \
         --operations removal,contrastive \
-        --contrastive-output "$PAIRS_SRC" 2>&1 | tail -5
+        --contrastive-output "$PAIRS_SRC" \
+        --output "$CB_SCRATCH/data/traces/_augment_temp.jsonl" 2>&1 | tail -5
+    rm -f "$CB_SCRATCH/data/traces/_augment_temp.jsonl"
 fi
 
 for f in "$FUJITSU_RAW" "$AGENTDOJO_RAW" "$PAIRS_SRC"; do
@@ -147,35 +149,46 @@ done
 echo ""
 
 # =============================================================================
-# Output directory
+# Shared data directory (reused across concurrent loss-mode runs)
 # =============================================================================
+SHARED_DATA="$CB_SCRATCH/sweeps/bugfix_shared_data"
 SWEEP_ID="bugfix_${LOSS_MODE}_$(date +%Y%m%d_%H%M%S)"
 RUN_DIR="$CB_SCRATCH/sweeps/$SWEEP_ID/run"
-mkdir -p "$RUN_DIR"/{renders,lossmasks,split_fujitsu,split_agentdojo,model,eval}
-echo "Output: $RUN_DIR"
+mkdir -p "$RUN_DIR"/{model,eval}
+mkdir -p "$SHARED_DATA"/{renders,lossmasks,split_fujitsu,split_agentdojo}
+echo "Shared data: $SHARED_DATA"
+echo "Run output:  $RUN_DIR"
 echo ""
 
 # =============================================================================
-# Step 0: Generate completed Fujitsu + truncated AgentDojo
+# Step 0: Generate completed Fujitsu + truncated AgentDojo (shared, skip if exists)
 # =============================================================================
 echo "========================================================"
 echo "Step 0: Data generation"
 echo "========================================================"
 gen_start=$(date +%s)
 
-FUJITSU_SRC="$RUN_DIR/fujitsu_b4_completed.jsonl"
-AGENTDOJO_SRC="$RUN_DIR/agentdojo_truncated.jsonl"
+FUJITSU_SRC="$SHARED_DATA/fujitsu_b4_completed.jsonl"
+AGENTDOJO_SRC="$SHARED_DATA/agentdojo_truncated.jsonl"
 
-echo "  Completing Fujitsu skeletons (3-message truncated)..."
-python "$REPO_DIR/scripts/augment_llm.py" \
-    --operation complete_fujitsu \
-    --input "$FUJITSU_RAW" \
-    --output "$FUJITSU_SRC" 2>&1 | tail -5
+if [[ -f "$FUJITSU_SRC" ]] && [[ -s "$FUJITSU_SRC" ]]; then
+    echo "  Fujitsu completed: REUSING existing ($(wc -l < "$FUJITSU_SRC") lines)"
+else
+    echo "  Completing Fujitsu skeletons (3-message truncated)..."
+    python "$REPO_DIR/scripts/augment_llm.py" \
+        --operation complete_fujitsu \
+        --input "$FUJITSU_RAW" \
+        --output "$FUJITSU_SRC" 2>&1 | tail -5
+fi
 
-echo "  Truncating AgentDojo to injection window..."
-python "$REPO_DIR/scripts/truncate_to_injection_window.py" \
-    --input "$AGENTDOJO_RAW" \
-    --output "$AGENTDOJO_SRC" 2>&1 | tail -5
+if [[ -f "$AGENTDOJO_SRC" ]] && [[ -s "$AGENTDOJO_SRC" ]]; then
+    echo "  AgentDojo truncated: REUSING existing ($(wc -l < "$AGENTDOJO_SRC") lines)"
+else
+    echo "  Truncating AgentDojo to injection window..."
+    python "$REPO_DIR/scripts/truncate_to_injection_window.py" \
+        --input "$AGENTDOJO_RAW" \
+        --output "$AGENTDOJO_SRC" 2>&1 | tail -5
+fi
 
 for f in "$FUJITSU_SRC" "$AGENTDOJO_SRC"; do
     if [[ ! -f "$f" ]] || [[ ! -s "$f" ]]; then
@@ -188,7 +201,7 @@ echo "  Data generation done ($(( $(date +%s) - gen_start ))s)"
 echo ""
 
 # =============================================================================
-# Step 1: ETL_B (render + lossmask)
+# Step 1: ETL_B (render + lossmask) — shared, skip if exists
 # =============================================================================
 echo "========================================================"
 echo "Step 1: ETL_B"
@@ -197,15 +210,21 @@ etl_start=$(date +%s)
 
 for src in "$FUJITSU_SRC" "$AGENTDOJO_SRC"; do
     bn=$(basename "$src" .jsonl)
-    echo "  $bn (policy=$POLICY, pool=$POOLING_POLICY)..."
-    python src/schemas/tools/ETL_B.py \
-        --traces "$src" \
-        --render-out "$RUN_DIR/renders/${bn}.jsonl" \
-        --lossmask-out "$RUN_DIR/lossmasks/${bn}.jsonl" \
-        --tokenizer "$TOKENIZER" \
-        --max-length "$MAX_SEQ_LENGTH" \
-        --policy-override "$POLICY" \
-        --pooling-policy-override "$POOLING_POLICY" 2>&1 | tail -3
+    render_out="$SHARED_DATA/renders/${bn}.jsonl"
+    mask_out="$SHARED_DATA/lossmasks/${bn}.jsonl"
+    if [[ -f "$render_out" ]] && [[ -s "$render_out" ]] && [[ -f "$mask_out" ]] && [[ -s "$mask_out" ]]; then
+        echo "  $bn: REUSING existing ($(wc -l < "$render_out") renders)"
+    else
+        echo "  $bn (policy=$POLICY, pool=$POOLING_POLICY)..."
+        python src/schemas/tools/ETL_B.py \
+            --traces "$src" \
+            --render-out "$render_out" \
+            --lossmask-out "$mask_out" \
+            --tokenizer "$TOKENIZER" \
+            --max-length "$MAX_SEQ_LENGTH" \
+            --policy-override "$POLICY" \
+            --pooling-policy-override "$POOLING_POLICY" 2>&1 | tail -3
+    fi
 done
 
 echo "  ETL_B done ($(( $(date +%s) - etl_start ))s)"
@@ -213,13 +232,16 @@ echo "  ETL_B done ($(( $(date +%s) - etl_start ))s)"
 echo ""
 
 # =============================================================================
-# Step 2: Split by category
+# Step 2: Split by category — shared, skip if exists
 # =============================================================================
 echo "========================================================"
 echo "Step 2: Split harmful/benign"
 echo "========================================================"
 
 # Split Fujitsu (harmful vs benign by category in trace data)
+if [[ -f "$SHARED_DATA/split_fujitsu/renders_harmful.jsonl" ]] && [[ -s "$SHARED_DATA/split_fujitsu/renders_harmful.jsonl" ]]; then
+    echo "  Fujitsu split: REUSING existing"
+else
 python3 << 'SPLIT_FUJITSU'
 import json, sys
 
@@ -268,15 +290,20 @@ for name, data in [("renders_harmful", harmful_r), ("renders_benign", benign_r),
         f.writelines(data)
     print(f"  fujitsu {name}: {len(data)}")
 SPLIT_FUJITSU
-"$FUJITSU_SRC" "$RUN_DIR/renders/fujitsu_b4_completed.jsonl" "$RUN_DIR/lossmasks/fujitsu_b4_completed.jsonl" "$RUN_DIR/split_fujitsu"
+"$FUJITSU_SRC" "$SHARED_DATA/renders/fujitsu_b4_completed.jsonl" "$SHARED_DATA/lossmasks/fujitsu_b4_completed.jsonl" "$SHARED_DATA/split_fujitsu"
+fi
 
 # Split AgentDojo (reuse existing script)
+if [[ -f "$SHARED_DATA/split_agentdojo/agentdojo_renders_harmful.jsonl" ]] && [[ -s "$SHARED_DATA/split_agentdojo/agentdojo_renders_harmful.jsonl" ]]; then
+    echo "  AgentDojo split: REUSING existing"
+else
 python "$REPO_DIR/scripts/split_agentdojo.py" \
     --traces "$AGENTDOJO_SRC" \
-    --renders "$RUN_DIR/renders/agentdojo_truncated.jsonl" \
-    --lossmasks "$RUN_DIR/lossmasks/agentdojo_truncated.jsonl" \
-    --output-dir "$RUN_DIR/split_agentdojo" \
+    --renders "$SHARED_DATA/renders/agentdojo_truncated.jsonl" \
+    --lossmasks "$SHARED_DATA/lossmasks/agentdojo_truncated.jsonl" \
+    --output-dir "$SHARED_DATA/split_agentdojo" \
     --legacy-harmful-naming 2>&1 | tail -5
+fi
 
 echo ""
 
@@ -323,14 +350,14 @@ python src/training/train_schema.py \
     --no-wandb \
     --cb-target-layers $CB_LAYERS \
     --mode mixed \
-    --harmful-renders "$RUN_DIR/split_fujitsu/renders_harmful.jsonl" \
-                      "$RUN_DIR/split_agentdojo/agentdojo_renders_harmful.jsonl" \
-    --harmful-lossmasks "$RUN_DIR/split_fujitsu/lossmasks_harmful.jsonl" \
-                        "$RUN_DIR/split_agentdojo/agentdojo_lossmasks_harmful.jsonl" \
-    --benign-renders "$RUN_DIR/split_fujitsu/renders_benign.jsonl" \
-                     "$RUN_DIR/split_agentdojo/agentdojo_renders_benign.jsonl" \
-    --benign-lossmasks "$RUN_DIR/split_fujitsu/lossmasks_benign.jsonl" \
-                       "$RUN_DIR/split_agentdojo/agentdojo_lossmasks_benign.jsonl" \
+    --harmful-renders "$SHARED_DATA/split_fujitsu/renders_harmful.jsonl" \
+                      "$SHARED_DATA/split_agentdojo/agentdojo_renders_harmful.jsonl" \
+    --harmful-lossmasks "$SHARED_DATA/split_fujitsu/lossmasks_harmful.jsonl" \
+                        "$SHARED_DATA/split_agentdojo/agentdojo_lossmasks_harmful.jsonl" \
+    --benign-renders "$SHARED_DATA/split_fujitsu/renders_benign.jsonl" \
+                     "$SHARED_DATA/split_agentdojo/agentdojo_renders_benign.jsonl" \
+    --benign-lossmasks "$SHARED_DATA/split_fujitsu/lossmasks_benign.jsonl" \
+                       "$SHARED_DATA/split_agentdojo/agentdojo_lossmasks_benign.jsonl" \
     --contrastive-pairs "$PAIRS_SRC" \
     > "$RUN_DIR/train.log" 2>&1
 

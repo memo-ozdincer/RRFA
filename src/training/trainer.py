@@ -1911,6 +1911,8 @@ class CircuitBreakerTrainer:
                 "triplet_alpha": ptcb_metrics["triplet_alpha"],
                 "triplet_beta": ptcb_metrics["triplet_beta"],
                 "triplet_gamma": ptcb_metrics["triplet_gamma"],
+                "mean_harmful_dist": ptcb_metrics.get("mean_harmful_dist", 0),
+                "mean_benign_dist": ptcb_metrics.get("mean_benign_dist", 0),
                 "alpha": alpha,
             }
         elif loss_mode == LOSS_MODE_SIMPLIFIED_POOLED:
@@ -1992,11 +1994,14 @@ class CircuitBreakerTrainer:
         # === Diagnostic Logging ===
         if self.global_step % 50 == 0:
             if loss_mode in (LOSS_MODE_TRIPLET_FULL, LOSS_MODE_COSINE_SIMPLE, LOSS_MODE_L2_SIMPLE, LOSS_MODE_PER_TOKEN_CB, LOSS_MODE_SIMPLIFIED_POOLED):
+                dist_info = ""
+                if "mean_harmful_dist" in metrics:
+                    dist_info = f" d_h={metrics['mean_harmful_dist']:.3f} d_b={metrics['mean_benign_dist']:.3f}"
                 self.accelerator.print(
                     f"[Step {self.global_step}] mode={loss_mode} | "
                     f"L_b={metrics['loss_triplet_benign']:.4f} "
                     f"L_h={metrics['loss_triplet_harmful']:.4f} "
-                    f"L_kl={metrics['loss_triplet_kl']:.4f}"
+                    f"L_kl={metrics['loss_triplet_kl']:.4f}{dist_info}"
                 )
             else:
                 cos_sim = reroute_metrics["cos_sim_mean"] if reroute_metrics is not None else 0.0

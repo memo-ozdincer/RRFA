@@ -529,14 +529,19 @@ def _per_token_directional_loss(
     mask: torch.Tensor,
     margin: float,
     direction: str,
-) -> torch.Tensor:
+) -> Tuple[torch.Tensor, float]:
     """Per-token L2+10*ReLU(cos) distance with margin.
 
     direction="push": harmful — loss when dist < margin (push apart)
     direction="pull": benign  — loss when dist > margin (keep close)
+
+    Returns (loss, mean_masked_distance) for diagnostics.
     """
     total = torch.tensor(0.0, device=mask.device)
+    dist_sum = 0.0
     num_layers = 0
+    mask_f = mask.float()
+    mask_denom = mask_f.sum().clamp_min(1e-8)
 
     for layer_idx in target_layers:
         if layer_idx not in model_reps or layer_idx not in frozen_reps:
@@ -550,12 +555,13 @@ def _per_token_directional_loss(
         else:
             per_token_loss = F.relu(d - margin)
 
-        mask_f = mask.float()
         weighted = per_token_loss * mask_f
-        total = total + weighted.sum() / mask_f.sum().clamp_min(1e-8)
+        total = total + weighted.sum() / mask_denom
+        dist_sum += (d.detach() * mask_f).sum().item() / mask_denom.item()
         num_layers += 1
 
-    return total / max(num_layers, 1)
+    n = max(num_layers, 1)
+    return total / n, dist_sum / n
 
 
 def per_token_cb_loss(
@@ -586,12 +592,12 @@ def per_token_cb_loss(
     Benign:  keep each token within margin (attention_mask)
     KL:      preserve benign output distribution (attention_mask, no loss_mask)
     """
-    harmful_loss = _per_token_directional_loss(
+    harmful_loss, mean_harmful_dist = _per_token_directional_loss(
         harmful_model_reps, harmful_frozen_reps, target_layers,
         harmful_mask, margin_harmful, "push",
     )
 
-    benign_loss = _per_token_directional_loss(
+    benign_loss, mean_benign_dist = _per_token_directional_loss(
         benign_model_reps, benign_frozen_reps, target_layers,
         benign_mask, margin_benign, "pull",
     )
@@ -613,6 +619,8 @@ def per_token_cb_loss(
         "triplet_alpha": float(alpha_benign),
         "triplet_beta": float(beta_harmful),
         "triplet_gamma": float(gamma_kl),
+        "mean_harmful_dist": mean_harmful_dist,
+        "mean_benign_dist": mean_benign_dist,
         "total_loss": total.item(),
     }
     return total, metrics

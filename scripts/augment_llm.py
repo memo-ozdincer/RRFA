@@ -421,16 +421,15 @@ def _build_completed_trace(
 ) -> Dict:
     """Build a completed trace from a skeleton + generated tool call.
 
-    Creates a multi-turn trace:
+    Creates a 3-message trace (matching inference format):
     1. system: B4 system prompt
     2. user: query (with or without injection depending on category)
-    3. assistant: tool call (the generated response)
-    4. tool: simulated tool output
-    5. assistant: follow-up response summarizing results
+    3. assistant: tool call (the decision point)
 
-    This structure is what injection_aware masking needs:
+    No msg[3-4] (template garbage) — at inference the model only generates
+    msg[2], so training must match.  injection_aware masking uses:
     - injection_char_span on message 1 (user)
-    - Post-injection assistant at message 2 (tool call) and message 4 (follow-up)
+    - Post-injection assistant at message 2 (tool call)
     """
     parent_id = skeleton.get("id", "unknown")
     new_id = _make_id(f"complete_{op_suffix}", parent_id)

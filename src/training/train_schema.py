@@ -53,11 +53,12 @@ def load_renders_and_masks(render_path: Path, lossmask_path: Path) -> List[Dict[
             logger.warning("No render found for lossmask %s", render_id)
             continue
 
-        # Filter zero-mask samples (all-zero loss_mask contributes nothing)
         loss_mask = mask_row["loss_mask"]
         if not any(m > 0 for m in loss_mask):
             zero_mask_count += 1
-            continue
+            # DO NOT filter: benign traces with injection_aware have all-zero
+            # loss_mask but still contribute via attention_mask (per_token_cb
+            # benign pull, KL divergence, benign triplet pooling).
 
         input_ids = render["input_ids"]
         samples.append(
@@ -74,8 +75,8 @@ def load_renders_and_masks(render_path: Path, lossmask_path: Path) -> List[Dict[
         )
 
     if zero_mask_count > 0:
-        logger.warning(
-            "Filtered %d zero-mask samples from %s", zero_mask_count, lossmask_path
+        logger.info(
+            "Loaded %d zero-loss-mask samples (benign) from %s", zero_mask_count, lossmask_path
         )
 
     return samples
