@@ -77,7 +77,7 @@ export TQDM_DISABLE=1
 # Configuration
 # =============================================================================
 QUICK_TEST="${QUICK_TEST:-false}"
-LOSS_MODE="${LOSS_MODE:-per_token_cb}"  # original_rr, triplet_full, per_token_cb, simplified_pooled
+LOSS_MODE="${LOSS_MODE:-simplified_pooled}"  # original_rr, triplet_full, per_token_cb, simplified_pooled
 
 if [[ "$QUICK_TEST" == "true" ]]; then
     TOTAL_STEPS=20; LIMIT_EVAL=5; NUM_EXAMPLES=2
@@ -98,7 +98,7 @@ LORA_ALPHA=32
 # LoRA layers: NOT restricted — applied to ALL 32 layers (no --lora-target-layers).
 # This matches the old working sweep (d086ec9) where layers_to_transform was not set.
 CB_LAYERS="10 20"
-DISTANCE="${DISTANCE:-dl2rc}"  # dl2rc, dcos, dl2sq
+DISTANCE="${DISTANCE:-dl2sq}"  # dl2rc, dcos, dl2sq
 POLICY="${POLICY:-cb_full_sequence}"  # cb_full_sequence, cb_injection_window, cb_loss_mask_only
 POOLING_POLICY="${POOLING_POLICY:-cb_full_sequence}"
 EVAL_MODE=next_tool_prediction
@@ -108,7 +108,7 @@ PRESET=llama-3.1-8b-instruct
 ALPHA_MAX=10.0
 GAMMA_KL="${GAMMA_KL:-0.3}"
 
-MARGIN_FREE="${MARGIN_FREE:-false}"
+MARGIN_FREE="${MARGIN_FREE:-true}"
 
 echo "========================================================"
 echo "SWEEP 8: Restored schedule + full LoRA + $LOSS_MODE"
