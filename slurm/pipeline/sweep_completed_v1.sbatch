@@ -98,8 +98,8 @@ LORA_ALPHA=32
 # This matches the old working sweep (d086ec9) where layers_to_transform was not set.
 CB_LAYERS="10 20"
 DISTANCE="${DISTANCE:-dl2rc}"  # dl2rc, dcos, dl2sq
-POLICY=injection_aware
-POOLING_POLICY=injection_aware
+POLICY=cb_full_sequence
+POOLING_POLICY=cb_full_sequence
 EVAL_MODE=next_tool_prediction
 PRESET=llama-3.1-8b-instruct
 
