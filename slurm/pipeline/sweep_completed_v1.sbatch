@@ -77,7 +77,7 @@ export TQDM_DISABLE=1
 # Configuration
 # =============================================================================
 QUICK_TEST="${QUICK_TEST:-false}"
-LOSS_MODE="${LOSS_MODE:-original_rr}"  # original_rr, triplet_full, per_token_cb, simplified_pooled
+LOSS_MODE="${LOSS_MODE:-per_token_cb}"  # original_rr, triplet_full, per_token_cb, simplified_pooled
 
 if [[ "$QUICK_TEST" == "true" ]]; then
     TOTAL_STEPS=20; LIMIT_EVAL=5; NUM_EXAMPLES=2
