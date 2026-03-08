@@ -104,7 +104,7 @@ PRESET=llama-3.1-8b-instruct
 # Mode-specific defaults
 if [[ "$LOSS_MODE" == "original_rr" ]]; then
     ALPHA_MAX=10.0
-    GAMMA_KL="${GAMMA_KL:-0.0}"   # 0 = paper exact, 0.3 = paper + KL
+    GAMMA_KL="${GAMMA_KL:-0.3}"   # 0 = paper exact, 0.3 = paper + KL
 else
     ALPHA_MAX=10.0
     GAMMA_KL="${GAMMA_KL:-0.3}"
