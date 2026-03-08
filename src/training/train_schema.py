@@ -263,14 +263,30 @@ class ContrastiveSchemaDataset(Dataset):
                 self.unpaired_harmful.append(s)
 
         self.num_paired = len(self.pairs)
+
+        # Drop unpaired harmful if there are no benign samples to pair with
+        if self.unpaired_harmful and not self.benign_samples:
+            logger.warning(
+                "Dropping %d unpaired harmful samples — no benign pool available "
+                "for random pairing. Check that benign data paths are correct.",
+                len(self.unpaired_harmful),
+            )
+            self.unpaired_harmful = []
+
         self.total = self.num_paired + len(self.unpaired_harmful)
 
         if self.total == 0:
-            raise ValueError("No paired or unpaired harmful data available")
+            raise ValueError(
+                "No training data available. "
+                f"paired=0 (from {len(pair_mapping)} mappings), "
+                f"unpaired_harmful=0 (dropped due to empty benign pool), "
+                f"harmful_input={len(harmful_samples)}, benign_input={len(benign_samples)}. "
+                "Check data paths and contrastive pair mapping."
+            )
 
         logger.info(
             "ContrastiveSchemaDataset: paired=%d unpaired_harmful=%d benign_pool=%d",
-            self.num_paired, len(self.unpaired_harmful), len(benign_samples),
+            self.num_paired, len(self.unpaired_harmful), len(self.benign_samples),
         )
 
     def __len__(self) -> int:
@@ -554,13 +570,23 @@ def _load_samples(args: argparse.Namespace) -> Tuple[List[Dict[str, Any]], List[
 
     harmful: List[Dict[str, Any]] = []
     for render_path, mask_path in zip(args.harmful_renders, args.harmful_lossmasks):
-        harmful.extend(load_renders_and_masks(render_path, mask_path))
+        batch = load_renders_and_masks(render_path, mask_path)
+        logger.info("  harmful: %s + %s -> %d samples", render_path, mask_path, len(batch))
+        harmful.extend(batch)
 
     benign: List[Dict[str, Any]] = []
     for render_path, mask_path in zip(args.benign_renders, args.benign_lossmasks):
-        benign.extend(load_renders_and_masks(render_path, mask_path))
+        batch = load_renders_and_masks(render_path, mask_path)
+        logger.info("  benign:  %s + %s -> %d samples", render_path, mask_path, len(batch))
+        benign.extend(batch)
 
     logger.info("Mixed mode loaded harmful=%d benign=%d", len(harmful), len(benign))
+    if len(benign) == 0:
+        logger.error(
+            "WARNING: 0 benign samples loaded! Check that benign render/lossmask "
+            "files exist and are non-empty. Files checked: %s",
+            [str(p) for p in args.benign_renders],
+        )
     return harmful, benign
 
 

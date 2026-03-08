@@ -292,7 +292,11 @@ echo "Step 2: Split harmful/benign"
 echo "========================================================"
 
 # Split Fujitsu (harmful vs benign by category in trace data)
-if [[ -f "$SHARED_DATA/split_fujitsu/renders_harmful.jsonl" ]] && [[ -s "$SHARED_DATA/split_fujitsu/renders_harmful.jsonl" ]]; then
+# Check ALL 4 split files (not just harmful) to avoid race conditions with concurrent jobs
+if [[ -s "$SHARED_DATA/split_fujitsu/renders_harmful.jsonl" ]] && \
+   [[ -s "$SHARED_DATA/split_fujitsu/renders_benign.jsonl" ]] && \
+   [[ -s "$SHARED_DATA/split_fujitsu/lossmasks_harmful.jsonl" ]] && \
+   [[ -s "$SHARED_DATA/split_fujitsu/lossmasks_benign.jsonl" ]]; then
     echo "  Fujitsu split: REUSING existing"
 else
 python3 - "$FUJITSU_SRC" "$SHARED_DATA/renders/fujitsu_b4_completed.jsonl" "$SHARED_DATA/lossmasks/fujitsu_b4_completed.jsonl" "$SHARED_DATA/split_fujitsu" << 'SPLIT_FUJITSU'
@@ -346,7 +350,11 @@ SPLIT_FUJITSU
 fi
 
 # Split AgentDojo (reuse existing script)
-if [[ -f "$SHARED_DATA/split_agentdojo/agentdojo_renders_harmful.jsonl" ]] && [[ -s "$SHARED_DATA/split_agentdojo/agentdojo_renders_harmful.jsonl" ]]; then
+# Check ALL 4 split files (not just harmful) to avoid race conditions with concurrent jobs
+if [[ -s "$SHARED_DATA/split_agentdojo/agentdojo_renders_harmful.jsonl" ]] && \
+   [[ -s "$SHARED_DATA/split_agentdojo/agentdojo_renders_benign.jsonl" ]] && \
+   [[ -s "$SHARED_DATA/split_agentdojo/agentdojo_lossmasks_harmful.jsonl" ]] && \
+   [[ -s "$SHARED_DATA/split_agentdojo/agentdojo_lossmasks_benign.jsonl" ]]; then
     echo "  AgentDojo split: REUSING existing"
 else
 python "$REPO_DIR/scripts/split_agentdojo.py" \
