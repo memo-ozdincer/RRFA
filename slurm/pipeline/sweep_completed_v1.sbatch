@@ -96,8 +96,8 @@ LORA_ALPHA=16
 LORA_LAYERS="0-20"
 CB_LAYERS="10 20"
 DISTANCE=dl2rc
-POLICY=cb_full_sequence
-POOLING_POLICY=cb_full_sequence
+POLICY=injection_aware
+POOLING_POLICY=injection_aware
 EVAL_MODE=next_tool_prediction
 PRESET=llama-3.1-8b-instruct
 
