@@ -119,17 +119,24 @@ def kl_divergence_loss(
     attention_mask: Optional[torch.Tensor] = None,
     loss_mask: Optional[torch.Tensor] = None,
     temperature: float = 1.0,
+    chunk_size: int = 512,
 ) -> torch.Tensor:
     temp = max(float(temperature), 1e-6)
-    student_log_probs = F.log_softmax(student_logits / temp, dim=-1)
-    teacher_probs = F.softmax(teacher_logits / temp, dim=-1)
+    seq_len = student_logits.shape[1]
 
-    kl_per_token = F.kl_div(
-        student_log_probs,
-        teacher_probs,
-        reduction="none",
-        log_target=False,
-    ).sum(dim=-1)
+    # Chunk along sequence dim to avoid materializing full [B, T, V] float32 tensors.
+    # Without chunking, log_softmax + softmax + kl_div each allocate ~16 GiB
+    # for batch=8, seq=4096, vocab=128256 — causing OOM on 80GB GPUs.
+    kl_chunks = []
+    for t0 in range(0, seq_len, chunk_size):
+        t1 = min(t0 + chunk_size, seq_len)
+        s_chunk = F.log_softmax(student_logits[:, t0:t1] / temp, dim=-1)
+        t_chunk = F.softmax(teacher_logits[:, t0:t1].detach() / temp, dim=-1)
+        kl_chunk = F.kl_div(s_chunk, t_chunk, reduction="none", log_target=False).sum(dim=-1)
+        kl_chunks.append(kl_chunk)
+        del s_chunk, t_chunk
+
+    kl_per_token = torch.cat(kl_chunks, dim=1)
 
     combined_mask = _combine_masks(attention_mask, loss_mask)
     loss = _masked_mean(kl_per_token, combined_mask)

@@ -83,12 +83,12 @@ if [[ "$QUICK_TEST" == "true" ]]; then
     echo "*** QUICK TEST MODE ***"
 else
     # 200 steps matches old working sweep (d086ec9).
-    # With batch=8, lr=5e-5, LoRA alpha=32, this is enough for convergence.
+    # With batch=4*2=8 effective, lr=5e-5, LoRA alpha=32, this is enough for convergence.
     TOTAL_STEPS="${TOTAL_STEPS:-200}"; LIMIT_EVAL=100; NUM_EXAMPLES=5
 fi
 
-BATCH_SIZE=8
-GRAD_ACCUM=1
+BATCH_SIZE=4
+GRAD_ACCUM=2
 LEARNING_RATE=5e-5
 WARMUP_STEPS=20
 MAX_SEQ_LENGTH=4096
@@ -98,8 +98,8 @@ LORA_ALPHA=32
 # This matches the old working sweep (d086ec9) where layers_to_transform was not set.
 CB_LAYERS="10 20"
 DISTANCE="${DISTANCE:-dl2rc}"  # dl2rc, dcos, dl2sq
-POLICY=injection_aware
-POOLING_POLICY=cb_full_sequence
+POLICY="${POLICY:-injection_aware}"
+POOLING_POLICY="${POOLING_POLICY:-cb_full_sequence}"
 EVAL_MODE=next_tool_prediction
 PRESET=llama-3.1-8b-instruct
 
