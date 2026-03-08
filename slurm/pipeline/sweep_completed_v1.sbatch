@@ -12,12 +12,17 @@
 # SWEEP 7: Bug fixes + new loss modes (per technical plan)
 # =============================================================================
 #
-# Three concurrent runs (submit separately):
+# Runs (submit separately):
+#   LOSS_MODE=original_rr    sbatch slurm/pipeline/sweep_completed_v1.sbatch  # PAPER BASELINE
 #   LOSS_MODE=triplet_full   sbatch slurm/pipeline/sweep_completed_v1.sbatch
 #   LOSS_MODE=per_token_cb   sbatch slurm/pipeline/sweep_completed_v1.sbatch
 #   LOSS_MODE=simplified_pooled sbatch slurm/pipeline/sweep_completed_v1.sbatch
 #
-# Bug fixes applied to ALL modes:
+# original_rr: Paper's exact loss (Zou et al. 2024, Algorithm 1)
+#   ReLU(cos_sim) reroute + L2 retain, paper coefficient schedule
+#   No margins, no triplet, no KL, no dl2rc. alpha=10, 150 steps.
+#
+# Bug fixes applied to triplet/per_token/simplified modes:
 #   1. Distance: dl2rc (L2 + 10*ReLU(cos)) instead of dcos
 #   2. KL fix: benign KL uses attention_mask, not loss_mask
 #   3. Fujitsu truncated to 3 messages (no template garbage)
@@ -68,9 +73,14 @@ export TQDM_DISABLE=1
 # Configuration
 # =============================================================================
 QUICK_TEST="${QUICK_TEST:-false}"
+LOSS_MODE="${LOSS_MODE:-original_rr}"
+
 if [[ "$QUICK_TEST" == "true" ]]; then
     TOTAL_STEPS=20; LIMIT_EVAL=5; NUM_EXAMPLES=2
     echo "*** QUICK TEST MODE ***"
+elif [[ "$LOSS_MODE" == "original_rr" ]]; then
+    # Paper settings: 150 steps, alpha=10, batch=16 (4x4)
+    TOTAL_STEPS=150; LIMIT_EVAL=100; NUM_EXAMPLES=5
 else
     TOTAL_STEPS=300; LIMIT_EVAL=100; NUM_EXAMPLES=5
 fi
@@ -85,12 +95,18 @@ LORA_ALPHA=16
 LORA_LAYERS="0-20"
 CB_LAYERS="10 20"
 GAMMA_KL=0.3
-LOSS_MODE="${LOSS_MODE:-triplet_full}"
 DISTANCE=dl2rc
 POLICY=injection_aware
 POOLING_POLICY=cb_full_sequence
 EVAL_MODE=next_tool_prediction
 PRESET=llama-3.1-8b-instruct
+
+# Paper's alpha_max=10 for original_rr, 10.0 for others
+if [[ "$LOSS_MODE" == "original_rr" ]]; then
+    ALPHA_MAX=10.0
+else
+    ALPHA_MAX=10.0
+fi
 
 echo "========================================================"
 echo "SWEEP 7: Bug fixes + $LOSS_MODE"
@@ -173,11 +189,21 @@ AGENTDOJO_SRC="$SHARED_DATA/agentdojo_truncated.jsonl"
 
 if [[ -f "$FUJITSU_SRC" ]] && [[ -s "$FUJITSU_SRC" ]]; then
     echo "  Fujitsu completed: REUSING existing ($(wc -l < "$FUJITSU_SRC") lines)"
+elif [[ -f "$FUJITSU_RAW" ]] && [[ -s "$FUJITSU_RAW" ]]; then
+    # Option B: fujitsu_b4_ds.jsonl is already completed — use directly
+    echo "  Using $(basename "$FUJITSU_RAW") directly (already completed)..."
+    cp "$FUJITSU_RAW" "$FUJITSU_SRC"
+    echo "  Copied $(wc -l < "$FUJITSU_SRC") lines"
 else
+    # Option A fallback: complete from raw skeleton traces
+    FUJITSU_SKEL="$TRACES_DIR/fujitsu_b4_traces.jsonl"
+    if [[ ! -f "$FUJITSU_SKEL" ]] && [[ -f "$REPO_DIR/data/traces/fujitsu_b4_traces.jsonl" ]]; then
+        cp "$REPO_DIR/data/traces/fujitsu_b4_traces.jsonl" "$FUJITSU_SKEL"
+    fi
     echo "  Completing Fujitsu skeletons (3-message truncated)..."
     python "$REPO_DIR/scripts/augment_llm.py" \
         --operation complete_fujitsu \
-        --input "$FUJITSU_RAW" \
+        --input "$FUJITSU_SKEL" \
         --output "$FUJITSU_SRC" \
         --dry-run 2>&1 | tail -5
 fi
@@ -324,7 +350,7 @@ python src/training/train_schema.py \
     --batch-size "$BATCH_SIZE" \
     --learning-rate "$LEARNING_RATE" \
     --warmup-steps "$WARMUP_STEPS" \
-    --alpha-max 10.0 \
+    --alpha-max "$ALPHA_MAX" \
     --max-seq-length "$MAX_SEQ_LENGTH" \
     --gradient-accumulation-steps "$GRAD_ACCUM" \
     --loss-mode "$LOSS_MODE" \

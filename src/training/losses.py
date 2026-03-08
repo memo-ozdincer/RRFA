@@ -21,6 +21,7 @@ LOSS_MODE_LEGACY_SCHEMA = "legacy_schema"
 LOSS_MODE_LEGACY_CB = "legacy_cb"
 LOSS_MODE_PER_TOKEN_CB = "per_token_cb"
 LOSS_MODE_SIMPLIFIED_POOLED = "simplified_pooled"
+LOSS_MODE_ORIGINAL_RR = "original_rr"
 
 SUPPORTED_LOSS_MODES = (
     LOSS_MODE_TRIPLET_FULL,
@@ -30,6 +31,7 @@ SUPPORTED_LOSS_MODES = (
     LOSS_MODE_LEGACY_CB,
     LOSS_MODE_PER_TOKEN_CB,
     LOSS_MODE_SIMPLIFIED_POOLED,
+    LOSS_MODE_ORIGINAL_RR,
 )
 
 DISTANCE_L2 = "d2"
@@ -680,5 +682,57 @@ def simplified_pooled_loss(
         "mean_harmful_dist": harmful_dist.mean().item(),
         "mean_benign_dist": benign_dist.mean().item(),
         "total_loss": total.item(),
+    }
+    return total, metrics
+
+
+def original_rr_loss(
+    harmful_model_reps: Dict[int, torch.Tensor],
+    harmful_frozen_reps: Dict[int, torch.Tensor],
+    benign_model_reps: Dict[int, torch.Tensor],
+    benign_frozen_reps: Dict[int, torch.Tensor],
+    target_layers: Sequence[int],
+    *,
+    c_s: float,
+    c_r: float,
+    harmful_mask: Optional[torch.Tensor] = None,
+    benign_mask: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, Dict[str, float]]:
+    """Original RR loss from Zou et al. (2024), Algorithm 1.
+
+    L = c_s * ReLU(cos_sim(frozen, cb)) + c_r * ||frozen - cb||_2
+
+    Paper schedule:
+        c_s = alpha * step / (2 * total_steps)    # 0 -> alpha/2
+        c_r = alpha * (1 - step / (2 * total_steps))  # alpha -> alpha/2
+
+    No margins, no triplet, no cluster centers, no KL.
+    """
+    # RR loss: push harmful cos_sim toward 0 (orthogonal to frozen)
+    loss_rr, rr_metrics = reroute_loss_relu_cos(
+        model_reps=harmful_model_reps,
+        frozen_reps=harmful_frozen_reps,
+        target_layers=target_layers,
+        loss_mask=harmful_mask,
+        return_metrics=True,
+    )
+
+    # Retain loss: keep benign reps close to frozen
+    loss_retain = retain_loss_l2(
+        model_reps=benign_model_reps,
+        frozen_reps=benign_frozen_reps,
+        target_layers=target_layers,
+        loss_mask=benign_mask,
+    )
+
+    total = c_s * loss_rr + c_r * loss_retain
+
+    metrics = {
+        "loss_rr": loss_rr.item(),
+        "loss_retain": loss_retain.item(),
+        "c_s": c_s,
+        "c_r": c_r,
+        "cos_sim_mean": rr_metrics["cos_sim_mean"] if rr_metrics else 0.0,
+        "cos_sim_positive_frac": rr_metrics["cos_sim_positive_frac"] if rr_metrics else 0.0,
     }
     return total, metrics

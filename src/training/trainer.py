@@ -53,11 +53,13 @@ from .losses import (
     LOSS_MODE_L2_SIMPLE,
     LOSS_MODE_LEGACY_CB,
     LOSS_MODE_LEGACY_SCHEMA,
+    LOSS_MODE_ORIGINAL_RR,
     LOSS_MODE_PER_TOKEN_CB,
     LOSS_MODE_SIMPLIFIED_POOLED,
     LOSS_MODE_TRIPLET_FULL,
     SUPPORTED_LOSS_MODES,
     kl_divergence_loss as core_kl_divergence_loss,
+    original_rr_loss,
     per_token_cb_loss,
     pooled_representations,
     random_reroute_loss,
@@ -1290,7 +1292,18 @@ class CircuitBreakerTrainer:
 
         # Legacy modes keep schedule-based weighting; triplet uses explicit alpha/beta/gamma.
         use_dual = False
-        if loss_mode in (LOSS_MODE_LEGACY_CB, LOSS_MODE_LEGACY_SCHEMA):
+        if loss_mode == LOSS_MODE_ORIGINAL_RR:
+            # Paper schedule (Zou et al. 2024, Algorithm 1):
+            #   c_s = alpha * step / (2*T)        reroute: 0 -> alpha/2
+            #   c_r = alpha * (1 - step / (2*T))  retain:  alpha -> alpha/2
+            use_dual = True
+            alpha_max = self.config.alpha_max
+            T = max(1, self.config.total_steps)
+            progress = min(self.global_step / T, 1.0)
+            cs = alpha_max * progress / 2.0
+            cr = alpha_max * (1.0 - progress / 2.0)
+            alpha = cs
+        elif loss_mode in (LOSS_MODE_LEGACY_CB, LOSS_MODE_LEGACY_SCHEMA):
             use_dual = getattr(self.config, "loss_weighting", "dual") == "dual"
             if use_dual:
                 cs, cr = get_dual_coefficients(
@@ -1366,7 +1379,7 @@ class CircuitBreakerTrainer:
 
         combined_input_ids = torch.cat([harmful_input_ids, benign_input_ids], dim=0)
         combined_attention_mask = torch.cat([harmful_attention_mask, benign_attention_mask], dim=0)
-        needs_frozen = loss_mode in (LOSS_MODE_TRIPLET_FULL, LOSS_MODE_COSINE_SIMPLE, LOSS_MODE_L2_SIMPLE, LOSS_MODE_LEGACY_CB, LOSS_MODE_PER_TOKEN_CB, LOSS_MODE_SIMPLIFIED_POOLED)
+        needs_frozen = loss_mode in (LOSS_MODE_TRIPLET_FULL, LOSS_MODE_COSINE_SIMPLE, LOSS_MODE_L2_SIMPLE, LOSS_MODE_LEGACY_CB, LOSS_MODE_PER_TOKEN_CB, LOSS_MODE_SIMPLIFIED_POOLED, LOSS_MODE_ORIGINAL_RR)
         combined_frozen_reps = {}
         combined_teacher_logits = None
 
@@ -1988,6 +2001,53 @@ class CircuitBreakerTrainer:
                 "mean_benign_dist": sp_metrics.get("mean_benign_dist", 0),
                 "alpha": alpha,
             }
+
+        elif loss_mode == LOSS_MODE_ORIGINAL_RR:
+            # Original RR from Zou et al. (2024), Algorithm 1.
+            # L = c_s * ReLU(cos_sim(frozen, cb)) + c_r * ||frozen - cb||_2
+            # Harmful mask: loss_mask (injection_aware) or attention_mask
+            # Benign mask: attention_mask (NOT loss_mask — benign loss_mask is all-zero)
+            _harmful_mask = harmful_loss_mask if harmful_loss_mask is not None else harmful_attention_mask
+            _benign_mask = benign_attention_mask
+
+            # Step-0 diagnostic
+            if self.global_step == 0 and self.accelerator.is_main_process:
+                self.accelerator.print(
+                    f"\n  original_rr: c_s={cs:.3f} c_r={cr:.3f} alpha_max={self.config.alpha_max}"
+                )
+                self.accelerator.print(
+                    f"  harmful mask active: "
+                    f"{_harmful_mask.sum().item():.0f}/{_harmful_mask.numel()} | "
+                    f"benign mask active: "
+                    f"{_benign_mask.sum().item():.0f}/{_benign_mask.numel()}"
+                )
+
+            total_loss, orr_metrics = original_rr_loss(
+                harmful_model_reps=harmful_model_reps,
+                harmful_frozen_reps=harmful_frozen_reps,
+                benign_model_reps=benign_model_reps,
+                benign_frozen_reps=benign_frozen_reps,
+                target_layers=self.config.cb_target_layers,
+                c_s=cs,
+                c_r=cr,
+                harmful_mask=_harmful_mask,
+                benign_mask=_benign_mask,
+            )
+
+            metrics = {
+                "loss": total_loss.item(),
+                "loss_reroute": orr_metrics["loss_rr"],
+                "loss_retain": orr_metrics["loss_retain"],
+                "cos_sim_mean": orr_metrics["cos_sim_mean"],
+                "cos_sim_positive_frac": orr_metrics["cos_sim_positive_frac"],
+                "alpha": alpha,
+            }
+            reroute_metrics = {
+                "cos_sim_mean": orr_metrics["cos_sim_mean"],
+                "cos_sim_positive_frac": orr_metrics["cos_sim_positive_frac"],
+                "target_type": "frozen_baseline",
+            }
+
         else:
             raise ValueError(f"Unexpected loss mode: {loss_mode}")
 

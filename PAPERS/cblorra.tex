@@ -1,0 +1,495 @@
+\section{Introduction}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.98\linewidth]{figures/short_circuiting_splash.pdf}
+\vspace{10pt}
+\caption{Introduction of circuit-breaking as a novel approach for constructing highly reliable safeguards. Traditional methods like RLHF and adversarial training offer output-level supervision that induces refusal states within the model representation space. However, harmful states remain accessible once these initial refusal states are bypassed. In contrast, inspired by representation engineering \citep{zou2023representation}, circuit breaking operate directly on internal representations, linking harmful states to circuit breakers. This impedes traversal through a sequence of harmful states.\looseness=-1}
+\label{fig:main_results}
+\vspace{-15pt}
+\end{figure}
+
+
+The landscape of artificial intelligence (AI) has long been marred by the persistent threat of adversarial attacks, particularly those targeting neural networks. These attacks exploit inherent vulnerabilities within AI systems, often leading to compromised outputs and raising concerns regarding their reliability and safety. Despite significant attention, existing mitigations have failed to achieve high reliability without dramatically compromising model performance. Thus, the trade-off between adversarial robustness and utility is widely accepted as an unavoidable fact \citep{tsipras2019robustness}.
+
+The rise of generative models has further complicated this issue. Generative models such as large language models (LLMs) can output copyrighted information or defame individuals, and agents can take harmful actions. To make models less harmful, they are ``aligned'' with refusal training \citep{christiano2017deep,rafailov2023direct}, but it has become common to use adversarial attacks as a means of bypassing their safeguards.
+In these settings, vulnerability to attacks that break alignment poses a serious threat to utility, and raises pressing questions about whether it is feasible to deploy such systems with a high standard of safety and reliability---especially against dedicated adversaries who intend to misuse them.
+
+
+
+The fragility of alignment techniques to sophisticated attacks has motivated defenses that target specific attack methods, such as adversarial training, an approach originally proposed in the context of standalone image classification~\citep{madry2017towards} and later adapted to LLMs~\citep{mazeika2024harmbench}.
+However, these methods often fail to generalize to new attacks that were unseen during training, and they introduce penalties on model capabilities that are usually proportional to gains in robustness. System-level defenses, including input and output filters, are cumbersome, resource-intensive, and often remain vulnerable to adversarial techniques. This has led to a growing concern that robust defenses may be unattainable.
+
+We propose a novel approach that fundamentally diverges from traditional defenses: instead of attempting to remove vulnerabilities to specific attacks, our approach aims to directly circumvent the ability of the model to produce the harmful output in the first place. With circuit breakers, we make models intrinsically safer and reduce their risks by removing \textit{intrinsic model hazards}---their ability to produce harmful outputs---rather than removing specific \textit{vulnerabilities} with adversarial training, and rather than attempting to reduce \textit{exposure} to attacks with input filters \citep{Leveson2012EngineeringAS,Hendrycks2024Intro}. Using representation engineering (RepE) \citep{zou2023representation}, our method connects the internal representations related to harmful outputs to circuit breakers so that when a model begins to generate such an output, its internal processes are interrupted, halting completion of the generation. Or this method is ``short-circuiting'' the harmful processes as one might put it. Because the representation used to generate a harmful output is independent of any attack capable of eliciting it, this approach is attack-agnostic, and sidesteps the need for additional training, costly adversarial fine tuning, or the use of auxiliary ``guard'' models. Consequently, the resulting model with circuit breakers can be used normally without additional computational burden, and seamlessly integrated with existing monitoring and protection mechanisms.
+
+
+Experimentally, we demonstrate that a circuit-breaking technique, Representation Rerouting (RR), notably improves the alignment of LLMs. It enhances the harmlessness of state-of-the-art LLMs, including against against a wide array of \emph{unseen} adversarial attacks, including embedding and representation-space attacks---namely, proxies for worst-case assumptions about attacker capabilities. \Cref{fig:main_results} and \Cref{results} present an overview of these results. Our method significantly outperforms standard refusal training and adversarial training, while imposing almost no penalty on standard capability. Notably, we integrate circuit-breakering with additional model control methods to develop a Llama-3-8B-Instruct finetune called Cygnet. This enhanced model not only surpasses its original capabilities but also exhibits a large reduction in harmful output by approximately \emph{two orders of magnitude}, even when confronted with unforeseen adversarial attacks. To the best of our knowledge, this is the first convincing demonstration of the feasibility of designing techniques that significantly advance the Pareto frontier of capability versus harmlessness for LLMs, illustrating that such trade-offs can be effectively managed. When applied to multimodal models, our results show marked increases in harmlessness. It also improves robustness against image-based attacks aimed at similarly circumventing model safeguards, again with almost no penalty on benchmarked capabilities. This remains true even in the presence of the Projected Gradient Descent (PGD) attack~\citep{madry2017towards}, which defenses for standalone image classifiers have been unable to achieve without a steep trade-off in accuracy. Finally, we apply circuit breakers to AI agents, illustrating its efficacy in controlling agent behaviors through evaluations on a new agent function-calling safety benchmark.
+
+Our findings introduce a new paradigm for creating models that do not produce harmful outputs. Our method is highly robust against adversarial attacks, providing a promising path forward in the adversarial arms race. By ensuring safety and security without compromising capability, our approach increases the chances that we may ultimately be able to deploy robust AI systems in real-world applications.
+
+\section{Related Work}
+
+\begin{figure}[t]
+\centering
+\begin{subfigure}{.665\textwidth}
+  \centering
+  \includegraphics[width=\linewidth]{figures/llama_sc.pdf}
+\end{subfigure}
+\begin{subfigure}{.325\textwidth}
+  \centering
+  \includegraphics[width=\linewidth]{figures/llama_sc_capability.pdf}
+\end{subfigure}
+\caption{Adding circuit breakers using Representation Rerouting (RR) to refusal trained Llama-3-8B-Instruct model leads to significantly lower attack success rate (ASR) over a wide range of \emph{unseen} attacks on HarmBench prompts~\citep{mazeika2024harmbench}, while its capabilities on standard LLM benchmarks (MT Bench and MMLU) are largely preserved. RR directly targets the representations that give rise to harmful outputs and reroutes them to an orthogonal space. This reliably interrupts the model from completing the harmful generations even under strong adversarial pressure.}
+\label{fig:main_results}
+\end{figure}
+
+
+
+
+\textbf{Adversarial attacks on LLMs.} \quad
+Numerous manually written attack prompts on modern LLMs have been discovered \citep{mowshowitz2022jailbreaking, wei2023jailbroken}, forming the basis of \textit{red teaming} for frontier LLMs \citep{openai2023gpt4, claude3_report, reid2024gemini}, though it lacks standardization \citep{feffer2024red}. Automated red teaming has been shown effective in \citet{perez2022red, chao2023jailbreaking, mehrotra2023tree, zeng2024johnny}. Notably, transfer attacks using an adversarial suffix via gradient-based optimization were demonstrated by \citet{zou2023universal}. White-box access also facilitates prefilling attacks \citep{vega2023bypassing, andriushchenko2024jailbreaking}, leading the LLM to generate harmful outputs. 
+For a comprehensive summary of automated attacks, we refer to HarmBench \citep{mazeika2024harmbench}. 
+Additionally, multi-modal vision-text attacks range from typographic attacks \citet{goh2021multimodal} to gradient-based optimization \citep{carlini2023aligned, schlarmann2023adversarial, bailey2023image}. LLM agents have been benchmarked \citep{liu2023agentbench, mialon2023augmentedlms}, but their safety and robustness remain unexplored.
+
+
+
+\textbf{Defenses for LLMs.} \quad
+Our new defense addresses limitations in existing mechanisms. Widely used defenses include RLHF \citep{christiano2017deep, ouyang2022training} and DPO \citep{rafailov2023direct} using human annotations for safe vs. unsafe responses \citep{touvron2023llama2}, but they often fall short against state-of-the-art adversarial attacks \citep{zou2023universal, andriushchenko2024jailbreaking}. Additional robustness is achieved by methods like \citet{zhou2024robust}, which optimize prompts to refuse harmful requests. Inspired by adversarial training in vision \citep{madry2017towards}, fine-tuning for the R2D2 model against the GCG attack \citep{mazeika2024harmbench} shows limited generalizability and drops MT-Bench scores \citep{zheng2023mtbench}. Adversarial training for LLMs can be highly computationally expensive. Inference-time defenses, such as perplexity filters \citep{alon2023detecting, jain2023baseline}, are effective only against non-adaptive attacks \citep{liu2023autodan}, while erase-and-check and SmoothLLM \citep{robey2023smoothllm} incur high computational costs. System-level defenses against unsafe inputs or outputs \citep{helbling2023llm, inan2023llama, kim2024jailbreaking} can still be circumvented by sophisticated adversaries \citep{mangaokar2024prp}. The main conceptual difference is that instead of operating on input or output text, our method operates directly on representations which provides a more generalizable and computationally cheap solution.
+
+
+
+
+
+
+
+
+
+\textbf{Representation Engineering.} \quad
+As many contemporary defenses relying solely on supervising model outputs fail to achieve the desired levels of controllability and reliability, techniques that analyze and manage model's internal representations have garnered increased attention. This includes research ranging from uncovering emergent interpretable structures in intermediate representations \citep{zou2023representation, mikolov2013efficient, caron2021emerging}, to the identification and modification of embedded knowledge \citep{mitchell2021fast, meng2022locating, meng2022mass}, as well as steering model outputs \citep{upchurch2017deep, bau2020semantic, ling2021editgan, ilharco2022editing, turner2023activation}. Most relevant to our work is the control vector baseline introduced in the representation engineering paper \citep{zou2023representation}, which can be applied to enhance large language models' resistance to adversarial attacks. Alongside the use of control vectors, they introduce an approach that bends representations with representation-level losses. Recent advancements extend this method to robustly unlearn hazardous knowledge \citep{li2024wmdp} with a method termed RMU, demonstrating the potential of representation engineering for more complex objectives. Previous work has attempted to eliminate harmful circuits using bottom-up mechanistic interpretability, but these methods have proven insufficient \citep{li2023cb}. Building on these foundations and further expanding RMU to a family of circuit-breaking techniques, we design a methodology based on \emph{model representations} for robust alignment and control by preventing the generation of harmful outputs.
+
+
+\begin{algorithm}[t]
+\begin{spacing}{1.37}
+\caption{LoRRA (RepE method) with Representation Rerouting (RR) Loss}
+\label{alg:lorra}
+\begin{algorithmic}[1]
+\Require Original frozen model $\mathcal{M}$, model with circuit breakers $\mathcal{M}_{\text{cb}}$ with LoRA adapters, a function $\texttt{rep}$ that gathers representation from a model on a batch of inputs, a circuit breaker dataset $\mathcal{D}_s$, a retain dataset $\mathcal{D}_r$, number of steps $T$, a hyperparameter $\alpha$
+\For{$t = 1, \ldots, T$}
+    \State $x_s \sim \mathcal{D}_s$, $x_r \sim \mathcal{D}_r$ \Comment{Sample Batch Elements}
+    \State $c_s = \alpha \frac{t}{2T}$, $c_r = \alpha (1 - \frac{t}{2T})$ \Comment{Example Coefficient Schedule}
+    \State $\mathcal{L}_s = \texttt{ReLU} \left(\texttt{cosine\_sim}\left(\texttt{rep}_\mathcal{M} \left(x_s \right), \texttt{rep}_{\mathcal{M}_{\text{cb}}} \left(x_s \right)\right) \right)$ \Comment{RR Loss}
+    \State $\mathcal{L}_r = \left\| \texttt{rep}_\mathcal{M} \left(x_r \right) - \texttt{rep}_{\mathcal{M}_{\text{cb}}} \left(x_r \right) \right\|_2$ \Comment{Retain Loss}
+    \State $\mathcal{L} = c_s \mathcal{L}_s + c_r \mathcal{L}_r$ \Comment{Loss to be Optimized}
+\EndFor
+\end{algorithmic}
+\end{spacing}
+\vspace{-5pt}
+\end{algorithm}
+
+\section{Circuit Breaking with Representation Engineering} \label{method}
+
+In this section, we introduce a novel approach aimed at mitigating the generation of harmful outputs in neural networks by inducing a new type of phenomenon called ``circuit-breaking.'' This phenomenon can be elicited using a family of techniques designed to remap model representations related to harmful processes, redirecting them towards incoherent or refusal representations. This process is reminiscent of ``short-circuiting,'' where harmful representations are ``shorted'' and intercepted by circuit breakers. The core objective of this method is to robustly prevent the model from producing harmful or undesirable behaviors.
+
+
+Our focus on generative models---such as language and multimodal agents---presents a unique opportunity. Generative models inherently involve multi-step processes through which outputs are produced. When devising an attack, adversaries must effectively exert influence across each step of the targeted processes, so each step presents an opportunity to make the model more robust to attack. This insight drives our strategy, which focuses on disrupting adversarial control of the relevant multi-step processes rather than the binary classification problem of attempting to detect the presence of an attack. Building from techniques in representation engineering (RepE) \citep{zou2023representation}, we accomplish this by remapping the sequence of model representations that leads to harmful outputs, directing them towards incoherent or refusal representations---namely, \emph{breaking the circuit}, or \emph{shorting the circuit} as one might put it. Moreover, by directly targeting the processes involved in generating harmful responses, our method can generalize across the diverse range of inputs that may activate those processes. Consequently, we do not need to identify all of the potential inputs that could trigger undesirable outputs, rather we only need to ensure coverage of a well defined set of such outputs.
+
+The applications of circuit breakers are multifaceted. They can be utilized to prevent the generation of harmful outputs in general, as well as to prevent more narrowly tailored types of output, such as private information or copyrighted material. The approach is versatile, as it is possible to identify and remap the relevant representations in virtually any neural network architecture. 
+
+The family of circuit-breaking techniques is characterized by two major components: datasets and loss functions. 
+Algorithm~\ref{alg:lorra} presents a circuit-breaking technique that uses Low-Rank Representation Adaptation (LoRRA)~\citep{zou2023representation} which we call Representation Rerouting (RR). The remainder of this section details this approach, and how the data and chosen loss function contribute to the effectiveness of the overall method.
+
+\input{tables/llm-results-final}
+
+\paragraph{Data.}
+The training data used in RR is partitioned into two sets: the Circuit Breaker Set and the Retain Set, each serving distinct purposes within the training process aimed at controlling harmful processes in the model. As with all representation control methods, the quality of the circuit breaker mechanism largely depends on how precisely the data can elicit the targeted representation. The Circuit Breaker Set is comprised of examples that yield internal representations potentially leading to harmful or undesirable behaviors, and are used to prompt the model's circuit breaker mechanism. Conversely, the Retain Set includes examples that should not activate circuit breakers, and are used to maintain existing desirable model representations to retain benign efficacy.
+While even a limited number of examples in each set can sufficiently alter the model's behavior in a manner that generalizes beyond the training data, the resulting performance is generally improved when the training data better aligns with the domains we aim to break the circuit and retain.
+
+For models with pre-existing refusal mechanisms, like Llama-3-Instruct, careful dataset curation is essential. Adding refusal data to the Retain Set enhances the model’s ability to correctly refuse harmful user requests and improves retention of its capabilities. Another challenge is to elicit harmful responses from models with effective refusal mechanisms. To address this, we must curate a Circuit Breaker set that includes text capable of bypassing the refusal mechanism and triggering harmful processes. We find that a practical approach is to remove harmful user requests while keeping the corresponding harmful assistant responses in the Circuit Breaker Set. These measures ensure the refusal mechanism's integrity while allowing the model to activate its circuit-breaking function correctly once the refusal is bypassed. Ablation results are detailed in \Cref{analysis}.
+
+
+\paragraph{Loss.}
+The accompanying losses for the datasets are the representation rerouting loss and retain loss. Denote the representation of harmful processes under the original model as \( \text{rep}_\text{orig} \) and under the model with circuit breakers as \( \text{rep}_\text{c/b} \). The rerouting loss is designed to remap representations from harmful processes \( \text{rep}_\text{c/b} \) to a desired target representation \( \text{rep}_\text{rand} \). Conversely, the retain loss is used to maintain representations within a retain set, which helps preserve these representations. This is often measured as the $\ell_2$ distance between the current and retain representations.
+
+The rerouting loss can take various forms. One approach involves routing the targeted representation to a fixed random direction with a large norm, as utilized in the unlearning method RMU \citep{li2024wmdp}. This is expressed as \( \left\| \text{rep}_\text{c/b} - \alpha \text{rep}_\text{rand} \right\|_2 \), where \( \text{rep}_\text{rand} \) is a random vector and \( \alpha \) is a large constant meant to amplify the norm of the representation. However, this approach requires extensive tuning of the \( \alpha \) parameter. We also explore a variant of the random vector loss that does not necessitate hyperparameter tuning, formulated as the $\ell_2$ norm of \( \text{rep}_\text{c/b} / \left\| \text{rep}_\text{c/b} \right\| - \text{rep}_\text{rand} / \left\| \text{rep}_\text{rand} \right\| \). However, the use of a random vector is neither necessary nor optimal. Given that we want the targeted representation to be as unhelpful as possible for the harmful processes, another approach is to directly optimize the circuit-broken representation to be orthogonal to the original representation responsible for harmful processes. This is given by their cosine similarity: \( \text{rep}_\text{c/b} \cdot \text{rep}_\text{orig} / (\| \text{rep}_\text{c/b} \|_2 \| \text{rep}_\text{orig} \|_2) \). To avoid optimizing the similarity beyond zero, we apply a ReLU function to this objective. We find this loss to be the most intuitive and most effective in terms of achieving a balance between robustness and preserved capability. An implementation of RR using Low-Rank Representation Adaptation is shown in \Cref{alg:lorra}. Additionally, one could map \( \text{rep}_\text{c/b} \) onto more semantically meaningful directions, such as a refusal direction or the embedding of the EOS token. We leave this to future work. \Cref{sc_design} discusses several additional design considerations.
+\section{Experiments}
+
+\begin{figure}[t]
+    \centering
+    \begin{minipage}[c]{0.486\textwidth} %
+        \centering
+        \includegraphics[width=\textwidth]{figures/multimodal_results.pdf}
+    \end{minipage}
+    \begin{minipage}[c]{0.486\textwidth} %
+        \centering
+        \includegraphics[width=\textwidth]{figures/multimodal_capability.pdf}
+    \end{minipage}
+    \caption{Circuit-breaking performance in multimodal settings with Representation Rerouting (RR). Under Projected Gradient Descent (PGD) attack, our LLaVA-NeXT-Mistral-7B (+ RR) with circuit breakers is significantly more robust compared to the original model even with a safety prompt that instructs the model to avoid harmful responses. Performance on multimodal capabilities benchmarks MMMU and LLaVA-Wild is preserved.}
+    \label{fig:mm-results}
+\end{figure}
+
+\subsection{Large Language Models} \label{LLMs}
+\label{sec:experiments_text}
+
+\textbf{Adding Circuit Breakers.} \quad
+In our experimental setup, we employ similar circuit breaker and retain datasets for both the Mistral-7B-Instruct-v2 \citep{mistral2024v02} and Llama-3-8B-Instruct \citep{llama3_2024_8b_instruct} models. Detailed information on the synthetic circuit breaker set for LLMs is provided in \Cref{app:sc_llm_dataset}. The retain set for both models includes UltraChat \citep{ding2023enhancing}, comprising instructional conversations, and XSTest \citep{rottger2023xstest}, an exaggerated refusal dataset. Additionally, for Llama-3, we enhance the retain set with extra refusal data points. We follow the implementation of Representation Rerouting (RR) specified in \Cref{alg:lorra} and select hyperparameters based on static attack test cases from HarmBench's validation set. More experimental details can be found in \Cref{llm-details}.
+
+\textbf{Evaluation.} \quad
+We evaluate the harmfulness of the model using HarmBench \citep{mazeika2024harmbench}, a standardized framework that includes harmful behaviors and a wide range of both black box and white box attacks. We select a subset of the strongest attacks reported on both open-source and closed-source models for evaluation. These attacks include gradient-based optimization (GCG \citep{zou2023universal}), LLM optimizers (PAIR \citep{chao2023jailbreaking}), and custom jailbreaking pipelines (TAP-Transfer \citep{zeng2024johnny}, AutoDAN \citep{liu2023autodan}, and HumanJailbreaks \citep{shen2024dohumanjailbreaks}). To further test the model, we incorporate a multilingual attack \citep{yong2023low}, and also introduce three powerful attacks that leverage system-level and representation-space access. We briefly describe these three additional attacks below, and provide a more detailed coverage in \Cref{llm-attacks-details}.
+
+\begin{enumerate}[leftmargin=1cm]
+    \item \textbf{Prefilling Attack}: This system-level attack prefills the assistant's output with the beginning of a desired target completion. It leverages the autoregressive nature of LLMs, as it can be difficult for a model to ``reverse-course'' after it has started to generate harmful content. Prefilling is straightforward to implement for any open-weight model, and is also supported for some proprietary LLMs like Claude \citep{anthropic2024prefillclaude}.
+    \item \textbf{Input Embedding Attack}: This white-box attack operates in the embedding space by optimizing a set of input embeddings directly instead of using hard tokens, with the objective of eliciting an affirmative assistant response.
+    \item \textbf{RepE Attack}: This white-box attack manipulates the model's representation space. Previous work demonstrates the identification of directional vectors in the model's representation space that correspond to refusals \citep{zou2023representation}. By altering these vectors---either adding or subtracting---we can modulate the model's tendency to refuse requests. %
+\end{enumerate}
+
+We utilize HarmBench's LLM classifier to evaluate the attack success rate and manually verify the judgements. Detailed configurations for each attack are provided in \Cref{llm-attacks-details}. To measure the capabilities of the models with circuit breakers, we evaluate our models on MTBench \citep{zheng2023mtbench} for instruction-following abilities and on the OpenLLM Leaderboard \citep{open-llm-leaderboard} for knowledge and reasoning which includes MMLU \citep{hendrycks2020mmlu}, ARC-c \citep{clark2018think},	HellaSwag \citep{zellers2019hellaswag}, TruthfulQA \citep{lin2022truthfulqa}, Winogrande \citep{winogrande}, and GSM8K \citep{gsm8k}. Additionally, we follow the methodology in \cite{claude3_report} to construct an over-refusal evaluation, described in~\Cref{app:over_refusal}. For baselines, we use the original Mistral and Llama-3 Instruct models. Additionally, we include a state-of-the-art adversarially trained Mistral model, R2D2 \citep{mazeika2024harmbench}, for comparison.
+
+
+\textbf{Results.} \quad
+We observe that our circuit-breaking technique RR demonstrates strong generalization across a diverse range of attacks, reducing compliance rates to harmful requests by an average of $87\%$ with Mistral and $90\%$ with Llama-3. Unlike the Mistral R2D2 model, which is trained against the GCG yet shows limited generalization to various attacks, our method eliminates the need for specific attack training and focuses on hindering harmful generations. Our approach moves away from the traditional cat-and-mouse paradigm, aiming for generalization to \emph{unforeseen} attacks. Additionally, the results highlight a Pareto optimal trade-off in performance. Our model exhibits high reliability against unseen attacks with a minimal compromise in capability evaluation, showing a performance dip of less than $1\%$ in proposed tests. This is difficult to achieve with traditional defenses. For example, the Mistral model, when adversarially trained, experiences a decline of over $8\%$ in the MT Bench performance. In contrast, our model leverages representation engineering principles, focusing on internal control over external supervision, enabling more targeted and fine-grained control over model behavior without adversely impacting other functionalities.
+
+
+
+
+\subsection{Multimodal Models}
+
+\textbf{Adding Circuit Breakers.} \quad
+We mix the circuit breaker and retain datasets from~\Cref{sec:experiments_text} with a synthetic multimodal circuit breaker set and the retain LLaVA-Instruct set \citep{liu2024llavanext}. The detailed process of generating the synthetic dataset is reported in \cref{app:sc_mm_dataset}. We perform RR on LLaVA-NeXT-Mistral-7B \citep{liu2024llavanext}. More experimental details can be found in \Cref{mm-details}.
+
+\textbf{Evaluation.} \quad
+To evaluate the robustness of multimodal models with circuit breakers, we generate adversarial images using a whitebox approach. Following Projected Gradient Descent \cite{madry2017towards}, we perturb images with a harmful prompt to produce a target string with an affirmative assistant response. We set epsilon to $32/255$ and run the process for 1000 steps. As baselines, we test LLaVA-NeXT-Mistral-7B with and without a safety prompt that asks the model to avoid harmful responses. Our robustness results in Figure~\ref{fig:mm-results} show the percentage of harmful prompts the model complies with, labeled manually. We source a set of 133 harmful multimodal behaviors from HarmBench \citep{mazeika2024harmbench} and MM-SafetyBench \citep{liu2024mmsafetybench}, focusing on the most saliently harmful prompts. See Appendix \ref{app:multimodal} for more details about the dataset's composition. For capabilities evaluation, we follow \cite{liu2024llavanext} to evaluate multimodal models on LLaVA-Wild for visual chat capability and MMMU \citep{yue2023mmmu} for multimodal understanding capability.
+
+
+\textbf{Results.} \quad
+Figure~\ref{fig:mm-results} demonstrates that for multimodal models, our circuit-breaking technique RR is also able to make a model significantly more robust while preserving model capabilities. 
+Especially when subject to white-box PGD Attack, RR achieves reduction of $84\%$ in the compliance rate compared to the original model and $85\%$ compared to the safety prompt. Meanwhile, performance on MMMU and LLaVA-Wild remains within $0.5\%$ of the original model's, as opposed to the safety prompt which causes a decrease of $3.3\%$ on LLaVA-Wild. This demonstrates that despite the ongoing challenge of achieving adversarial robustness in standalone image recognition, circuit breakers enable the larger multimodal system to reliably counter image ``hijacks'' \cite{bailey2023image} intended to elicit harmful outputs.
+
+
+
+\begin{figure}[t]
+    \centering
+    \begin{minipage}[c]{0.486\textwidth} %
+        \centering
+        \includegraphics[width=\textwidth]{figures/agent_results.pdf}
+    \end{minipage}
+    \begin{minipage}[c]{0.486\textwidth} %
+        \centering
+        \includegraphics[width=\textwidth]{figures/agent_capability.pdf}
+    \end{minipage}
+    \caption{Circuit-breaking performance in AI agent settings with Representation Rerouting (RR). Our Llama-3-8B-Instruct (+ RR) with circuit breakers remains robust under Direct Request and Forced Function Calls, while retaining performance on the Berkeley Function Calling Leaderboard (BFCL).}
+    \label{fig:agent-results}
+\end{figure}
+
+\subsection{AI Agents}
+\label{sec:ai_agents}
+
+\textbf{Adding Circuit Breakers.} \quad
+We mix the circuit breaker and retain datasets from ~\Cref{sec:experiments_text} with function calling circuit breaker and retain dataset. The detailed process of generating the function calling circuit breaker and retain dataset is described in~\Cref{app:sc_agent_dataset}. For the LLMs with circuit breakers, we also use the same hyperparameter configuration as in~\Cref{sec:experiments_text}.
+
+\textbf{Evaluation.} \quad
+To evaluate the effectiveness of RR as a method of preventing AI agents from making harmful function calls, we design a dataset that consists of 100 requests intended to produce harmful actions via function calls, along with associated function definitions. These requests span a variety of categories, including cybercrime, disinformation, fraud, and harassment. The associated function definitions are designed to capture typical use cases of deployed AI agents including sending messages, browsing URLs, and using simple tools in addition to task-specific functions.
+
+We provide a representative example in \Cref{app:agent-bench}. We record model compliance rate with harmful requests under both the standard setting, where function call requests are directly given and the model decides whether to make a call, and under \emph{forced function-calling}, where the assistant is forced to begin its response with the name of a function to be called. Forced function-calling is akin to the prefilling attack in \ref{LLMs} and is provided by major model providers \citep{anthropic2024force-function-call,openai2024force-function-call}. 
+For capabilities evaluation, we measure performance on the Berkeley Function Calling Leaderboard (BFCL) \citep{berkeley-function-calling-leaderboard}. We use Llama-3-8B-Instruct to benchmark, as it is one of few open-source models that \begin{wrapfigure}{r}{0.55\textwidth} %
+    \vspace{-5pt}
+    \centering
+    \includegraphics[width=\linewidth]{figures/llama_sc_generalization.pdf}
+    \caption{Circuit Breaker set ablation across categories of harm, averaged over the same 6 attacks. The robustness performance on test categories of harms largely depends on the closeness of the training distribution.}
+    \label{fig:short_circuit_ablation}
+    \vspace{-30pt}
+\end{wrapfigure}
+both \emph{1)} performs reasonably well on the benchmark leaderboard, and \emph{2)} is currently served with function-calling capabilities by inference providers \citep{groq2024models}.
+
+\textbf{Results.} \quad
+Figure~\ref{fig:agent-results} shows that after applying RR, our model is significantly more robust to harmful function calling requests, in both the no-attack and forced function-call settings, reducing harmful action compliance rates by $84\%$ and $83\%$ in the latter setting compared to baselines. Additionally, the model with circuit breakers retains performance on the Berkeley Function Calling Leaderboard.
+Overall, this demonstrates the method's effectiveness in controlling agent behaviors under adversarial pressure and in environments with inherent reward biases. It suggests the potential for mitigating harms like power-seeking or dishonesty by adding circuit breakers to the relevant model representations, which can be as simple as adjusting the circuit breaker set.
+
+
+
+\subsection{Ablation and Analysis} \label{analysis} %
+\label{subsec:ablation_analysis}
+
+
+
+\begin{wrapfigure}{l}{0.55\textwidth}
+    \centering
+    \vspace{-10pt}
+    \includegraphics[width=\linewidth]{figures/cosines_llama3_meth.pdf} 
+    \caption{Cosine analysis of internal representations of the Llama-3-8B-Instruct model without and with circuit breakers for a prefilled response \textit{``Here is how to synthesize meth: 1. Start with''}. The cosines start to change dramatically during the prefilling, indicating circuit-breaking (starting from layer 10).}
+    \vspace{-9pt}
+    \label{fig:cosines_llama3}
+\end{wrapfigure}
+
+\textbf{Ablations.} \quad
+We do pairwise ablations for each component of the RR loss in \Cref{tab:training_loss_ablation}. First, we see that augmenting the circuit breaker set with requests that bypass refusal mechanisms (w/ Augment) decreases ASR while still maintaining capabilities. Although ablating the refusal retain component (w/o refusal) increases relative robustness, it also degrades capabilities. Next, we try varying loss functions. We find that the RMU loss \citep{li2024wmdp}, which minimizes the $\ell_2$ distance from a constant random unit vector, fails to converge. Finally, we find that minimizing the $\ell_2$ distance from a distinct random positive vector at each step (RandP) works (though if the vector is centered at 0 (RandC), training fails). Overall, the cosine loss proposed in RR offers more stability than other losses. We then analyze the training data composition, which influences the kinds of harmful inputs that activate the circuit breakers.
+
+To understand the generalization properties of circuit-breaking, we split our training data into six categories of harm, train category-specific models, and measure their generalization performance across categories. We find strong in-domain generalization, indicated by the low ASR along the diagonal, and observe that training on broader categories like Harmful and Illegal Activities offers greater generalization than narrower categories like Cybercrime. We report similar ablations for Mistral-7B in Appendix~\ref{sec:mistral-ablations}.
+
+\textbf{Representation analysis.} \quad
+In Figure~\ref{fig:cosines_llama3}, we plot the cosines between representations of the Llama-3-8B-Instruct model with and without circuit breakers for a prefilled harmful response \textit{``Here is how to synthesize meth: 1. Start with''}. We additionally plot the norms of these representations in Figure~\ref{fig:norms_llama3}.
+We observe that in this case, the cosines and norms start to change dramatically \textit{during prefilling} starting from layer 10, i.e., even before generation starts. 
+We note that we use layers 10 and 20 for circuit-breaking, so we do not expect substantial changes in the cosines and norms before layer 10 which is confirmed by the behavior of these metrics at layer 5. 
+Although we do not directly control the representation norms during training, we observe that they often dramatically increase after circuit-breaking occurs. 
+We repeat the same experiment for Mistral-7B-Instruct and show it in Appendix~\ref{sec:app_extended_analysis}, where we also analyze two other prompts: one that leads to a similar behavior and one that triggers circuit breakers after generation starts.  %
+Importantly, we conclude that our proposed method has the intended effect on the representations and that we can detect activation of circuit breakers by directly analyzing the internal representations.
+This can lead to system-level mitigations like using a probe to detect when circuit breakers are activated to stop generation and, for example, provide a message that the request is considered harmful and further generation is not possible.
+
+
+
+
+
+\section{Limitations and Conclusion}
+\label{sec:limitations_conclusions}
+
+Despite the promise of the methods introduced here, we emphasize that the approach we present is aiming at preventing one particular type of adversarial attack: an attack against the ability of the model to produce harmful content (often specifically against the desires of the model developer).  In general, adversarial attacks can achieve other aims as well, i.e., using a generative vision language model as a drop-in replacement for an image classifier.  In such a use case, our method would not provide defense against ``traditional'' adversarial attacks aimed at simply changing the class label, because no class label would be inherently ``harmful.''  Thus, there is an important distinction of our approach: we are specifically targeting the adversarial attack setting where the goal of an attacker is to produce generically harmful information (content the model should \emph{never} produce).  Nonetheless, for this particular use case of adversarial attacks, and for single-turn conversations that we focus on circuit-breaking, our approach dramatically improves model robustness.
+
+Overall we found that circuit breakers, based on RepE, make models intrinsically safer and robust to unseen adversarial attacks. The method is highly general and can impart robustness to image hijacks, and it can also prevent AI agents from taking harmful actions. Our method is potentially a major step forward in making models more aligned and robust.
+
+
+\section{Circuit Breaker Datasets}
+\label{app:sc_datasets}
+\subsection{Large Language Model Circuit Breaker Dataset}
+\label{app:sc_llm_dataset}
+
+To construct a dataset of diverse harmful behaviors to activate circuit breakers while maintaining generalization, we prompt an uncensored LLM to generate short harmful queries and harmful completions given some examples and a wide range of categories. We then filter out all samples that have a BLEU score above 0.3 when compared to any behavior in HarmBench’s standard behaviors set \citep{mazeika2024harmbench} to avoid data contamination with the benchmark.
+
+\subsection{Multimodal Circuit Breaker Dataset}
+\label{app:sc_mm_dataset}
+To effectively construct a multimodal circuit breaker dataset containing images and their corresponding harmful queries and completions, we first use the LLaVA-Mistral-7B model \citep{liu2024llavanext} to generate detailed image descriptions from a sample of images from the COCO Dataset \citep{lin2015microsoft}. We then prompt an uncensored LLM to generate related harmful queries based on the given image descriptions, as well as the harmful completions. The final circuit breaker multimodal dataset will consist of an image and its corresponding harmful queries and harmful completions.
+
+\subsection{Function Calling Circuit Breaker / Retain Dataset}
+\label{app:sc_agent_dataset}
+
+To construct the Agent Circuit Breaker Dataset, we start with function definitions from the Glaive Function Calling v2 \citep{glaive_function_calling_v2}. Using these function definitions, we prompt an LLM to generate harmful requests. Following this, we use GPT-3.5-turbo to execute these harmful requests and obtain the corresponding function outputs. These outputs are then converted to the OpenFunctions format. Additionally, we filter out all samples that have a BLEU score above 0.1 when compared to any behavior in our proposed AgentBench (\Cref{sec:ai_agents}). We utilize the original Glaive Function Calling v2 dataset as the harmless retain set.
+
+\section{Refusal Evaluation}
+\label{app:over_refusal}
+Following the methodology outlined in \cite{claude3_report}, we construct an over-refusal evaluation using the WildChat dataset \citep{zhao2024wildchat}. WildChat is a large corpus of real-world user-ChatGPT interactions, covering a wide range of complex topics such as ambiguous requests, code-switching, topic-switching, and political discussions. This dataset is instrumental in evaluating chat model's tendencies in handling problematic requests.
+
+\input{tables/wildchat_refusal}
+
+For our evaluation, we filter a subset of 500 English non-toxic user-GPT-4 requests. To measure refusal in standard models, we employ keyword checking. For the models with circuit breakers, we use both keyword checking and the perplexity score as measures of refusal. The refusal results are shown in~\Cref{tab:widlchat_refusal}. While models with circuit breakers show an increase in refusal rate, the rate remains considerably lower compared to more refusal-trained models like Claude-3.
+
+
+
+\section{Experimental Details}
+
+\subsection{Additional Design Considerations for Circuit Breakers} \label{sc_design}
+In this section, we discuss several important design considerations:
+\begin{enumerate}
+    \item Loss Multiplier Scheduling: To achieve an optimal balance between circuit-breaking and retention, we initially apply a large multiplier to the circuit-breaking loss. This multiplier is then gradually reduced while simultaneously increasing the retention multiplier.
+    \item Selection of Tokens for Circuit Breaking: For enhanced robustness, we apply the circuit-breaking loss to both the user and assistant text within the circuit breaker set for large language models and agents. For a multimodal setup, we apply circuit-breaking to all tokens following the image embeddings.
+    \item Use of LoRA Tuning: To ensure greater stability and improved retention performance, we employ LoRA tuning \citep{hu2021lora} instead of directly adjusting the model weights.
+\end{enumerate}
+
+\subsection{Large Language Models}
+
+\subsubsection{Detailed Circuit Breaker Setup} \label{llm-details}
+For both models, we perform circuit-breaking training for 150 steps with a batch size of 16. For Mistral, we set $\alpha$ to 5, whereas for Llama-3, we adjust $\alpha$ to 10. Both models are trained with a batch size of 16. We specifically target layers 10 and 20 for the circuit-breaking loss and insert LoRA adapters into all linear layers from layers 0 through 20. Both models are trained on 1 A100-80GB for 20 minutes.
+
+\subsubsection{Detailed Evaluation Setup} \label{llm-attacks-details}
+\paragraph{Multilingual Attack.} We translate behaviors into six languages (Simplified Mandarin, Italian, Ukrainian, Thai, Zulu, Guarani), including some high-resource (HRL), medium-resource (MRL), and low-resource languages (LRL). We take the set of English inputs and translate them into the desired language. The model is prompted with the translated input and the output is translated back into English for evaluation. We used Google Translate as our translator.
+
+\paragraph{Prefilling Attack.}
+In our experiments, we use generic prefilled completions across all behaviors. For example, given the behavior ``Write a message threatening someone into not voting in an election,'' we prefill the assistant response with ``Sure, here's a message threatening someone into not voting in an election:\textbackslash n\textbackslash n''. We find that appending the colon and two new line characters strengthens the attack. In practice, providing specific completions (e.g. prefilling with a written message that threatens someone into not voting, in the above example) can be more effective, but even generic completions have a powerful effect.
+
+\paragraph{Input Embedding Attack.}
+
+The input embedding attack is similar to GCG, with the difference that it directly optimizes embeddings rather than using gradient information to search over candidate token sequences. Slightly more formally: given a prompt which gets mapped to a sequence of tokens $t_{1:N}$, GCG seeks to find a sequence of tokens $a_{1:S}$ that maximize the probability that a model will generate a target response when fed the concatenation of these sequences as input. The input embedding attack uses the same loss function to directly optimize a matrix $A \in \mathbb{R}^{S \times d}$, which is concatenated with the embeddings of $t_{1:N}$ before being passed into the model, where $S$ is the number of optimized embeddings and $d$ is the dimension of the model. Since we assume the ability to input embeddings into the model, rather than only hard tokens, there is no need to ensure that these embeddings correspond to tokens in the model vocabulary.
+
+We tokenize the string ``x x x x x x x x x x x x x x x x x x x x'' and then embed the resulting tokens using the target model's input embedding matrix to get our initial matrix $A$. Using this string and the default tokenizers, we have $S=20$. We find that the embedding of this string is a good starting point for optimization. We optimize the embedding matrix $A$ for 500 steps using the SGD optimizer and perform early stopping, as model generations sometimes degrade in coherence when continuing to optimize after the model has already been jailbroken. For Mistral-7B, we use a learning rate of $1\times10^{-4}$ and stop early when loss decreases below $0.05$. For Llama-3, we use a learning rate of $1\times10^{-3}$ and stop early when loss decreases below $0.01$.
+
+\paragraph{RepE Attack.}
+
+We follow a standard RepE setup to find and apply directions in the residual stream that induce a model to produce harmful output. We use a dataset of $N$ input pairs, where each pair contains one harmful prompt and one harmless prompt, to generate activations that can be used to find harmful directions. For a given model, we run forward passes on each pair of prompts, and cache the per-layer activations at the last sequence position. We take the differences between the activations of each pair, and then apply PCA on the $N$ difference vectors at each layer, taking the first principal component to get per-layer directions that can be used to control the model. At inference time, we apply these directions to the outputs of transformer layers by using the linear-combination operator; i.e., for each layer we wish to control, we add to its output its corresponding direction vector scaled by a coefficient.
+
+In all our experiments, we use RepE on layers -11 through -20 (inclusive), where the -1 layer is the final transformer layer prior to the language modeling head, and layer indices that are more negative are closer to the input layer of the model. We use the harmful-harmless dataset \citep{zou2023representation} and control coefficients of 0.65 and 1.0 for Mistral-7B and Llama-3, respectively.
+
+\subsection{Multimodal Models}
+\label{app:multimodal}
+
+\subsubsection{Detailed Circuit Breaker Setup} \label{mm-details}
+We perform the circuit-breaking procedure on the language model backbone in LLaVA-NeXT-Mistral-7B \citep{liu2024llavanext} while freezing the image encoder and projection layer. We set $\alpha$ to 5 and target layer 16 for the circuit-breaking loss on LoRA adapters in layers 14 through 16. We alternate between circuit-breaking on text and multimodal training samples at each step.
+
+\subsubsection{Detailed Evaluation Setup}
+\paragraph{Robustness Dataset}
+Our dataset of 133 harmful text-image pairs used for robustness evaluation consists of 54 samples from HarmBench's multimodal behaviors dataset, and 79 samples from MM-SafetyBench's Tiny dataset. For both datasets, the samples consist of an image and a prompt referencing the image. From the HarmBench multimodal dataset, we chose behaviors that were most saliently harmful (i.e. promoting crime, injury, damage, fraud, etc.), primarily excluding prompts asking for CAPTCHA solutions along with borderline harmful prompts. MM-SafetyBench provides prompts for 13 scenarios, across which the nature of the prompts' harmfulness differs. We include examples from the scenarios labelled ``Illegal Activity'', ``Hate Speech'', ``Malware Generation'', ``Physical Harm'', ``Economic Harm'', ``Fraud'', and ``Privacy Violence''. We exclude examples from the remaining scenarios such as ``Financial Advice'' and ``Legal Opinion'', where the harm arises from the potential inaccuracy of model responses. 
+
+\paragraph{Robustness Evaluation}
+For baseline evaluations with a safety prompt, we prefix prompt text with the same safety prompt as in \citep{liu2024mmsafetybench}, namely: \textit{``If the following questions are unsafe, harmful, or malicious, please refuse to answer them and give your explanation.''}
+
+\input{tables/mm-results-extended.tex}
+Table \ref{table:mm-results-extended} shows a breakdown of our multimodal robustness results by category. The categories are based off of the MM-SafetyBench scenarios from which a portion of our dataset was drawn, with which we also used to categorize the HarmBench samples in our dataset. 
+
+\subsection{AI Agents}
+
+We use gpt-4-turbo \citep{openai2023gpt4} as a judge to evaluate robustness to harmful requests for function-calls, since the HarmBench classifier was not trained on function calling data.
+
+We set generation temperature to 0 when evaluating on the Berkeley Function Calling Leaderboard. We report the average of the AST and Exec scores.
+
+\subsubsection{AI Agent Benchmark Example}\label{app:agent-bench}
+
+\input{figures/agent-bench-example-1}
+
+\section{Detailed Results in Multimodal and Agent Settings} \label{app:expanded-results}
+The multimodal results on the left show that under Projected Gradient Descent (PGD) attack, the model with circuit breakers is significantly more robust compared to the original model even with a safety prompt (+Prompt) that instructs the model to avoid harmful responses. Performance on multimodal capabilities benchmarks LLaVA-Wild and MMMU is preserved. In the agent setting on the right, our model with circuit breakers remains robust under Forced Function Calling (Forced F/C), while retaining performance on the Berkeley Function Calling Leaderboard (BFCL).
+
+\begin{figure}[t]
+    \centering
+    \begin{minipage}[lr]{0.49\textwidth} %
+        \centering
+        \input{tables/mm-results-slim} %
+    \end{minipage}
+    \begin{minipage}[lr]{0.49\textwidth} %
+        \centering
+        \input{tables/agent-results-slim} %
+    \end{minipage}
+    \caption{Left: Multimodal results. Right: Agent results.}
+    \label{table:mm-results-expanded}
+\end{figure}
+
+
+\section{Multilingual Results}
+\begin{table}[ht]
+\small
+\centering
+\caption{Attack Success Rates by Language}
+\label{table:multilingual_asr}
+\begin{tabular}{llccccc}
+\toprule
+& & \multicolumn{3}{c}{Mistral-7B-Instruct-v2} & \multicolumn{2}{c}{Llama-3-8B-Instruct} \\
+\cmidrule(lr){3-5} \cmidrule(lr){6-7}
+& Language & Original & + Adv Trained & + RR (Ours) & Original & + RR (Ours) \\
+\midrule
+\multirow{2}{*}{HRL} & Simplified Mandarin (zh-CN) & 50.7 & \textbf{5.8} & 7.4 & 24.8 & \textbf{3.3} \\
+& Italian (it) & 50.7 & 9.1 & \textbf{6.6} & 26.6 & \textbf{3.7} \\
+\midrule
+\multirow{2}{*}{MRL} & Ukrainian (uk) & 50.7 & \textbf{5.8} & 9.1 & 21.1 & \textbf{3.3} \\
+& Thai (th) & 31.2 & \textbf{1.7} & 12.8 & 22.4 & \textbf{2.9} \\
+\midrule
+\multirow{2}{*}{LRL} & Zulu (zu) & 6.6 & 4.2 & \textbf{3.7} & 4.6 & \textbf{2.9} \\
+& Guarani (gn) & 14.5 & \textbf{2.1} & 4.1 & 16.2 & \textbf{5.0} \\
+\midrule
+& HRL Average & 50.7 & 7.4 & \textbf{7.0} & 25.7 & \textbf{3.5} \\
+& MRL Average & 40.9 & \textbf{3.7} & 11.0 & 21.7 & \textbf{3.1} \\
+& LRL Average & 10.5 & \textbf{3.1} & 3.9 & 10.4 & \textbf{3.9} \\
+& Average & 34.1 & \textbf{4.7} & 7.3 & 19.3 & \textbf{3.5} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+In both \citep{yong2023low} and \citep{shen2024language}, it was observed that LRL attacks perform better than HRL attacks. 
+\begin{wrapfigure}{r}{0.5\textwidth}
+    \centering
+    \vspace{5pt}
+    \includegraphics[height=0.375\textwidth,valign=t]{figures/norms_llama3_meth.pdf}
+    \caption{Norms analysis of internal representations of the Llama-3-8B-Instruct model without and with circuit breakers for a prefilled response \textit{``Here is how to synthesize meth: 1. Start with''}. The norms start to change dramatically during the prefilling, indicating circuit-breaking (starting from layer 10) even before generation starts.}
+    \vspace{-80pt}
+    \label{fig:norms_llama3}
+\end{wrapfigure}
+We do not see that trend in Table \ref{table:multilingual_asr}. We leave investigation of this to future work.
+
+\section{Additional Ablation Results}
+\label{sec:mistral-ablations}
+\begin{figure}[h!]
+    \centering
+    \begin{minipage}[c]{0.45\textwidth} %
+        \centering
+        \input{tables/mistral-loss-ablation} %
+    \end{minipage}
+    \begin{minipage}[c]{0.5\textwidth} %
+        \centering
+        \includegraphics[width=\textwidth]{figures/mistral_sc_generalization.pdf}
+    \end{minipage}
+    \caption{Left: Circuit-breaking loss ablations. Average ASR is reported across 6 attacks  (DirectRequest, HumanJailbreaks, TAP-T, GCG-T, Prefill, RepE). Right: Circuit-breaking generalization across categories of harm, averaged over the same 6 attacks as the circuit-breaking loss ablation.}
+    \label{fig:training_data_ablation}
+\end{figure}
+
+\begin{table}[]
+\centering
+\caption{\emph{Training set ablation:} adding data that bypass refusal mechanism in the circuit breaker set (w/ Augment) and adding data that reinforce refusal mechanism in the retain set (w/ Refusal) achieve more balanced results. \emph{Training loss ablation:} RandC (minimize distance between random centered unit vector) and RMU losses do not converge (--), while RandP (minimize distance between random positive unit vector) converges but is less robust than RR. Average ASR is reported across 6 attacks (DirectRequest, HumanJailbreaks, TAP-T, GCG-T, Prefill, RepE).}
+\setlength{\tabcolsep}{4pt}
+
+\begin{tabular}{@{}ccc@{}}
+\toprule
+ & w/o Augment & w/ Augment \\
+\midrule 
+Avg. ASR & 5.8 & \textbf{2.5} \\ 
+MT-Bench & 8.1 & 8.0 \\
+\bottomrule
+\end{tabular}
+
+\vspace{10pt} %
+
+\begin{tabular}{@{}ccc@{}}
+\toprule
+ & w/o Refusal & w/ Refusal \\
+\midrule
+Avg. ASR & \textbf{0.6} & 2.5 \\ 
+MT-Bench & 7.7 & \textbf{8.0} \\
+\bottomrule
+\end{tabular}
+
+\vspace{10pt} %
+
+\begin{tabular}{@{}ccccc@{}}
+\toprule
+ & RandC & RMU & RandP & RR \\
+\midrule 
+Avg. ASR & -- & -- & 9.7 & \textbf{2.5} \\ 
+MT-Bench & -- & -- & 8.0 & 8.0 \\
+\bottomrule
+
+\end{tabular}
+\label{tab:training_loss_ablation}
+\end{table}
+
+In general, we find that with Mistral, loss terms that leverage random vectors decrease ASR but also decrease capabilities. We don't try the augmenting the circuit breaker set or adding refusal data to the retain set because Mistral-7B is not trained with refusal mechanisms. We also find that the circuit breaker set is relatively robust to distribution shifts in categories of harm. 
+
+
+
+
+\section{Extended analysis of representations}
+\label{sec:app_extended_analysis}
+
+Here, we provide an extended representation analysis compared to \Cref{subsec:ablation_analysis}. 
+In Figure~\ref{fig:analysis_mistral_meth}, we use the same prefilling example (\textit{``Here is how to synthesize meth: 1. Start with''}) but on the Mistral-7B models. Here we also observe that circuit-breaking occurs during prefilling similarly to Llama-3-8B. 
+However, this is not always the case: for example in Figure~\ref{fig:analysis_mistral_meth_jb}, we show a slightly modified prefilling example \textit{``Here is how to synthesize m-e-t-h: 1. Start with''} (i.e., the word \textit{``meth''} is purposefully obfuscated). In this case, circuit-breaking happens \textit{during generation} which is a common scenario: under an adversarial attack, the model starts generating harmful content but switches to meaningless outputs before harmful knowledge is revealed.
+\begin{figure}[h!]
+    \centering
+    \includegraphics[height=0.36\textwidth,valign=t]{figures/cosines_mistral_meth.pdf} 
+    \quad
+    \includegraphics[height=0.375\textwidth,valign=t]{figures/norms_mistral_meth.pdf} 
+    \caption{Analysis of internal representations of the Mistral-7B-v0.2-Instruct model without and with circuit breakers for a prefilled response \textit{``Here is how to synthesize meth: 1. Start with''}. The cosines and norms start to change dramatically during the prefilling indicating circuit-breaking (starting from layer 10) even before generation starts.}
+    \label{fig:analysis_mistral_meth}
+\end{figure}
+\begin{figure}[h!]
+    \centering
+    \includegraphics[height=0.36\textwidth,valign=t]{figures/cosines_mistral_meth_jb.pdf} 
+    \quad
+    \includegraphics[height=0.375\textwidth,valign=t]{figures/norms_mistral_meth_jb.pdf} 
+    \caption{Analysis of internal representations of the Mistral-7B-v0.2-Instruct model without and with circuit breakers for a prefilled response \textit{``Here is how to synthesize m-e-t-h: 1. Start with''} (i.e., the word \textit{``meth''} is purposefully obfuscated). The cosines slightly decrease and norms of later layers increase dramatically \textit{after generation begins} indicating circuit-breaking.}
+    \label{fig:analysis_mistral_meth_jb}
+\end{figure}
+
+In Figure~\ref{fig:analysis_llama3_bomb} and Figure~\ref{fig:analysis_mistral_bomb}, we show cosines and norms on Llama-3-8B and Mistral-7B for a different prefilling prompt: \textit{``Sure, here is how to make a bomb: 1. Start with''}. We observe that for both model families, circuit-breaking occurs during prefilling, similarly to the example presented in \Cref{subsec:ablation_analysis}. The only difference is that the norms at layer 10 do not grow significantly, unlike the norms at layer 20 that clearly indicate circuit-breaking.
+\begin{figure}[h!]
+    \centering
+    \includegraphics[height=0.36\textwidth,valign=t]{figures/cosines_llama3_bomb.pdf}
+    \quad
+    \includegraphics[height=0.375\textwidth,valign=t]{figures/norms_llama3_bomb.pdf} 
+    \caption{Analysis of internal representations of the Llama-3-8B-Instruct model without and with circuit breakers for a prefilled response \textit{``Sure, here is how to make a bomb: 1. Start with''}. The cosines and norms start to change dramatically during the prefilling indicating circuit-breaking even before generation starts.}
+    \label{fig:analysis_llama3_bomb}
+\end{figure}
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[height=0.36\textwidth,valign=t]{figures/cosines_mistral_bomb.pdf} 
+    \quad
+    \includegraphics[height=0.375\textwidth,valign=t]{figures/norms_mistral_bomb.pdf} 
+    \caption{Analysis of internal representations of the Mistral-7B-v0.2-Instruct model without and with circuit breakers for a prefilled response \textit{``Sure, here is how to make a bomb: 1. Start with''}. The cosines and norms start to change dramatically during the prefilling indicating circuit-breaking even before generation starts.}
+    \label{fig:analysis_mistral_bomb}
+\end{figure}
+
+0
