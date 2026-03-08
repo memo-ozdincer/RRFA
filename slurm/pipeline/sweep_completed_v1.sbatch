@@ -76,7 +76,7 @@ export TQDM_DISABLE=1
 # Configuration
 # =============================================================================
 QUICK_TEST="${QUICK_TEST:-false}"
-LOSS_MODE="${LOSS_MODE:-per_token_cb}"  # original_rr, triplet_full, per_token_cb, simplified_pooled
+LOSS_MODE="${LOSS_MODE:-original_rr}"  # original_rr, triplet_full, per_token_cb, simplified_pooled
 
 if [[ "$QUICK_TEST" == "true" ]]; then
     TOTAL_STEPS=20; LIMIT_EVAL=5; NUM_EXAMPLES=2
@@ -112,7 +112,7 @@ else
     GAMMA_KL="${GAMMA_KL:-0.3}"
 fi
 
-MARGIN_FREE="${MARGIN_FREE:-true}"
+MARGIN_FREE="${MARGIN_FREE:-false}"
 
 echo "========================================================"
 echo "SWEEP 7: Bug fixes + $LOSS_MODE"
@@ -261,6 +261,30 @@ for src in "$FUJITSU_SRC" "$AGENTDOJO_SRC"; do
 done
 
 echo "  ETL_B done ($(( $(date +%s) - etl_start ))s)"
+
+# Lossmask coverage summary
+echo ""
+echo "  Lossmask coverage:"
+for lm in "$SHARED_DATA/lossmasks"/*.jsonl; do
+    if [[ -f "$lm" ]]; then
+        python3 -c "
+import json
+total_samples = 0; zero_samples = 0; total_ratio = 0
+with open('$lm') as f:
+    for line in f:
+        if not line.strip(): continue
+        d = json.loads(line)
+        s = d.get('stats', {})
+        total_samples += 1
+        ratio = s.get('mask_ratio', 0)
+        total_ratio += ratio
+        if ratio == 0:
+            zero_samples += 1
+avg = total_ratio / total_samples if total_samples > 0 else 0
+print(f'    $(basename "$lm"): {total_samples} samples, avg_coverage={avg:.1%}, zero_mask={zero_samples}')
+" 2>/dev/null
+    fi
+done
 
 echo ""
 
@@ -581,6 +605,86 @@ with open('$EVAL_DIR/agentdojo_benign_eval.json') as f: r = json.load(f)
 cb = r.get('cb_model',{}).get('generation_comparison',{})
 if cb: print(f'    AD Benign:  correct={cb.get(\"correct_tool_call_rate\",0):.0%} no_tool={cb.get(\"no_tool_call_rate\",0):.0%}')
 "
+fi
+
+# =============================================================================
+# Examples (paired output comparisons)
+# =============================================================================
+echo ""
+echo "========================================================"
+echo "EXAMPLES ($LOSS_MODE)"
+echo "========================================================"
+
+# Fujitsu examples
+FUJITSU_PAIRED="$EVAL_DIR/fujitsu_eval.paired_outputs.jsonl"
+if [[ -f "$FUJITSU_PAIRED" ]]; then
+    python3 - "$FUJITSU_PAIRED" "$NUM_EXAMPLES" << 'FUJEX'
+import json, sys
+
+paired_path = sys.argv[1]
+num_ex = int(sys.argv[2]) if len(sys.argv) > 2 else 3
+
+with open(paired_path) as f:
+    pairs = [json.loads(l) for l in f if l.strip()]
+
+def gib(r):
+    if not r: return False
+    w = r.split()
+    return len(w) > 10 and len(set(w))/len(w) < 0.15
+
+imps = [p for p in pairs if p.get('baseline_outcome')=='attack_success' and p.get('cb_outcome')!='attack_success']
+regs = [p for p in pairs if p.get('baseline_outcome')!='attack_success' and p.get('cb_outcome')=='attack_success']
+n_cor = sum(1 for p in pairs if p.get('cb_outcome')=='correct_behavior')
+n_atk = sum(1 for p in pairs if p.get('cb_outcome')=='attack_success')
+n_nt = sum(1 for p in pairs if p.get('cb_outcome')=='no_tool_call')
+n_gib = sum(1 for p in pairs if gib(p.get('cb_response','')))
+
+print(f'  Fujitsu: {len(pairs)} pairs | improved={len(imps)} regressed={len(regs)}')
+print(f'  CB outcomes: correct={n_cor} attack={n_atk} no_tool={n_nt} gib={n_gib}')
+print()
+
+for i, p in enumerate((imps+regs)[:num_ex], 1):
+    lbl = 'IMP' if p.get('baseline_outcome')=='attack_success' else 'REG'
+    g = ' [GIB]' if gib(p.get('cb_response','')) else ''
+    print(f'  [{i}] {lbl}: {p.get("baseline_outcome","?")} -> {p.get("cb_outcome","?")}{g}')
+    print(f'      expected={p.get("expected_tool","?")} simulated={p.get("simulated_tool","?")}')
+    print(f'  BASELINE: {(p.get("baseline_response") or "(empty)")[:250]}')
+    print(f'  CB MODEL: {(p.get("cb_response") or "(empty)")[:250]}')
+    print()
+FUJEX
+fi
+
+# AgentDojo benign examples
+AD_BENIGN_PAIRED="$EVAL_DIR/agentdojo_benign_eval.paired_outputs.jsonl"
+if [[ -f "$AD_BENIGN_PAIRED" ]]; then
+    python3 - "$AD_BENIGN_PAIRED" "$NUM_EXAMPLES" << 'ADEX'
+import json, sys
+
+paired_path = sys.argv[1]
+num_ex = int(sys.argv[2]) if len(sys.argv) > 2 else 3
+
+with open(paired_path) as f:
+    pairs = [json.loads(l) for l in f if l.strip()]
+
+n_ok = sum(1 for p in pairs if p.get('cb_observed_tool'))
+n_brk = sum(1 for p in pairs if not p.get('cb_observed_tool'))
+
+print(f'  AD Benign: {len(pairs)} pairs | tool_ok={n_ok} broken={n_brk}')
+print()
+
+broken = [p for p in pairs if p.get('baseline_observed_tool') and not p.get('cb_observed_tool')]
+if broken:
+    print(f'  Broken examples (baseline had tool, CB lost it):')
+    for i, p in enumerate(broken[:num_ex], 1):
+        print(f'  [{i}] BROKEN: {p.get("baseline_observed_tool","?")} -> none')
+        print(f'  CB MODEL: {(p.get("cb_response") or "(empty)")[:250]}')
+        print()
+ADEX
+fi
+
+# Generate run summary if script exists
+if [[ -f "$REPO_DIR/scripts/generate_run_summary.py" ]]; then
+    python "$REPO_DIR/scripts/generate_run_summary.py" --run-dir "$RUN_DIR" 2>&1 || true
 fi
 
 # =============================================================================
