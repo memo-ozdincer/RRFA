@@ -148,12 +148,11 @@ gen_start=$(date +%s)
 FUJITSU_SRC="$RUN_DIR/fujitsu_b4_completed.jsonl"
 AGENTDOJO_SRC="$RUN_DIR/agentdojo_truncated.jsonl"
 
-echo "  Completing Fujitsu skeletons (dry-run)..."
+echo "  Completing Fujitsu skeletons..."
 python "$REPO_DIR/scripts/augment_llm.py" \
     --operation complete_fujitsu \
     --input "$FUJITSU_RAW" \
-    --output "$FUJITSU_SRC" \
-    --dry-run 2>&1 | tail -5
+    --output "$FUJITSU_SRC" 2>&1 | tail -5
 
 echo "  Truncating AgentDojo to injection window..."
 python "$REPO_DIR/scripts/truncate_to_injection_window.py" \

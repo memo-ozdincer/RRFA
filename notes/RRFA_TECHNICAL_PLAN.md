@@ -1094,6 +1094,29 @@ further from frozen.
   the key requirement is that benign mask is NOT all-zero.
 - **KL on harmful:** Currently KL is only on benign. Should harmful traces also have KL?
   Probably NOT — we WANT harmful outputs to change. But worth noting as a design decision.
+- **Contrastive pairs generation on cluster:** `contrastive_pairs.jsonl` is gitignored
+  and won't be in the cluster repo. It cannot be regenerated with `--operations contrastive`
+  alone — the contrastive operation depends on `removal_traces` being built in the same run.
+  Correct regeneration command:
+  ```bash
+  python scripts/augment_agentdojo.py \
+      --traces-input $AGENTDOJO_RAW \
+      --operations removal,contrastive \
+      --contrastive-output $PAIRS_SRC
+  ```
+  This loads existing augmented traces, re-runs removal to rebuild benign counterparts,
+  then builds pairs. Output should be ~1247 pairs. Verify count before proceeding.
+  Add this as a conditional block in the sbatch before the existence checks:
+  ```bash
+  if [[ ! -f "$PAIRS_SRC" ]]; then
+      echo "  Generating contrastive pairs..."
+      python "$REPO_DIR/scripts/augment_agentdojo.py" \
+          --traces-input "$AGENTDOJO_RAW" \
+          --operations removal,contrastive \
+          --contrastive-output "$PAIRS_SRC" 2>&1 | tail -5
+  fi
+  ```
+
 - **Contrastive pairs with per-token loss:** The ContrastiveSchemaDataset serves matched
   (harmful, benign) pairs. With per-token loss, each pair still goes through separate
   harmful/benign branches. No change needed, but verify the pairing still works.
