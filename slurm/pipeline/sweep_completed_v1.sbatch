@@ -76,7 +76,7 @@ export TQDM_DISABLE=1
 # Configuration
 # =============================================================================
 QUICK_TEST="${QUICK_TEST:-false}"
-LOSS_MODE="${LOSS_MODE:-per_token_cb}"  # original_rr, triplet_full, per_token_cb, simplified_pooled
+LOSS_MODE="${LOSS_MODE:-simplified_pooled}"  # original_rr, triplet_full, per_token_cb, simplified_pooled
 
 if [[ "$QUICK_TEST" == "true" ]]; then
     TOTAL_STEPS=20; LIMIT_EVAL=5; NUM_EXAMPLES=2
@@ -97,7 +97,7 @@ LORA_R=16
 LORA_ALPHA=16
 LORA_LAYERS="0-20"
 CB_LAYERS="10 20"
-DISTANCE="${DISTANCE:-dl2sq}"  # dl2rc (default), dcos, dl2sq
+DISTANCE="${DISTANCE:-dl2rc}"  # dl2rc (default), dcos, dl2sq
 POLICY=injection_aware
 POOLING_POLICY=injection_aware
 EVAL_MODE=next_tool_prediction
@@ -112,7 +112,7 @@ else
     GAMMA_KL="${GAMMA_KL:-0.3}"
 fi
 
-MARGIN_FREE="${MARGIN_FREE:-true}"
+MARGIN_FREE="${MARGIN_FREE:-false}"
 
 echo "========================================================"
 echo "SWEEP 7: Bug fixes + $LOSS_MODE"
