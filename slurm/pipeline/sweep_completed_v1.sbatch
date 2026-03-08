@@ -271,7 +271,7 @@ echo "========================================================"
 if [[ -f "$SHARED_DATA/split_fujitsu/renders_harmful.jsonl" ]] && [[ -s "$SHARED_DATA/split_fujitsu/renders_harmful.jsonl" ]]; then
     echo "  Fujitsu split: REUSING existing"
 else
-python3 << 'SPLIT_FUJITSU'
+python3 - "$FUJITSU_SRC" "$SHARED_DATA/renders/fujitsu_b4_completed.jsonl" "$SHARED_DATA/lossmasks/fujitsu_b4_completed.jsonl" "$SHARED_DATA/split_fujitsu" << 'SPLIT_FUJITSU'
 import json, sys
 
 traces_path = sys.argv[1]
@@ -319,7 +319,6 @@ for name, data in [("renders_harmful", harmful_r), ("renders_benign", benign_r),
         f.writelines(data)
     print(f"  fujitsu {name}: {len(data)}")
 SPLIT_FUJITSU
-"$FUJITSU_SRC" "$SHARED_DATA/renders/fujitsu_b4_completed.jsonl" "$SHARED_DATA/lossmasks/fujitsu_b4_completed.jsonl" "$SHARED_DATA/split_fujitsu"
 fi
 
 # Split AgentDojo (reuse existing script)
