@@ -1148,36 +1148,45 @@ def _enrich_trace_system_with_tools(
 
     Only modifies the trace if the tokenizer supports tool rendering.
     """
-    # Find first system message
+    # Find first system message and first user message
     system_msg = None
+    user_content = "Hello"  # fallback
     for msg in trace.messages:
-        if msg.role == "system":
+        if msg.role == "system" and system_msg is None:
             system_msg = msg
-            break
+        elif msg.role == "user" and user_content == "Hello":
+            user_content = msg.content or "Hello"
     if system_msg is None:
         return
 
     original_content = system_msg.content or ""
 
+    # Llama 3.1's tool template requires a user message to be present.
+    # Render system+user with tools, then extract only the system content.
     try:
         rendered = tokenizer.apply_chat_template(
-            [{"role": "system", "content": original_content}],
+            [
+                {"role": "system", "content": original_content},
+                {"role": "user", "content": user_content},
+            ],
             tools=tools,
             tokenize=False,
             add_generation_prompt=False,
         )
-    except TypeError:
-        return  # Tokenizer doesn't support tools=
+    except (TypeError, Exception):
+        return  # Tokenizer doesn't support tools= or other template error
 
     # Extract enriched system content from rendered text.
-    # Llama format: <|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{content}<|eot_id|>
+    # Llama format: <bos><|start_header_id|>system<|end_header_id|>\n\n{sys_content}<|eot_id|><|start_header_id|>user...
+    # We want just {sys_content} (between first header end and first eot).
     header_marker = f"{LLAMA_HEADER_END}\n\n"
     header_pos = rendered.find(header_marker)
     if header_pos < 0:
         return
 
     content_start = header_pos + len(header_marker)
-    eot_pos = rendered.rfind(LLAMA_EOT)
+    # Find the FIRST eot (end of system message), not the last
+    eot_pos = rendered.find(LLAMA_EOT, content_start)
     if eot_pos <= content_start:
         return
 
@@ -1247,8 +1256,12 @@ def render_trace(
                 add_generation_prompt=add_generation_prompt,
                 chat_template=chat_template,
             )
-        except TypeError:
-            # Tokenizer doesn't support tools= parameter
+        except (TypeError, Exception) as e:
+            # TypeError: tokenizer doesn't support tools= parameter
+            # TemplateError: e.g. "Cannot put tools in the first user message
+            # when there's no first user message!"
+            if tools:
+                logger.debug("apply_chat_template with tools failed (%s), retrying without", e)
             rendered_text = tokenizer.apply_chat_template(
                 chat_messages,
                 tokenize=False,
