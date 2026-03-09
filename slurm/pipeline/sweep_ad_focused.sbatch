@@ -118,7 +118,7 @@ BATCH_SIZE=4
 GRAD_ACCUM=2
 LEARNING_RATE=5e-5
 WARMUP_STEPS=20
-MAX_SEQ_LENGTH="${MAX_SEQ_LENGTH:-4096}"
+MAX_SEQ_LENGTH="${MAX_SEQ_LENGTH:-2048}"  # 2048 matches old working sweep (d086ec9), doubles signal density
 LORA_R=16
 LORA_ALPHA=32
 CB_LAYERS="10 20"
@@ -205,8 +205,8 @@ echo ""
 
 # ── Output directories ──────────────────────────────────────────────────────
 
-# Shared ETL_B outputs (per-policy, reusable across configs)
-SHARED_DATA="$CB_SCRATCH/sweeps/s9_shared_${POLICY}"
+# Shared ETL_B outputs (per-policy AND per-seq-length — ETL_B truncates to max_length)
+SHARED_DATA="$CB_SCRATCH/sweeps/s9_shared_${POLICY}_seq${MAX_SEQ_LENGTH}"
 # Split outputs depend on resisted handling
 SPLIT_DIR="$SHARED_DATA/split_agentdojo_${RESISTED}"
 
@@ -287,27 +287,67 @@ done
 
 echo "  ETL_B done ($(( $(date +%s) - etl_start ))s)"
 
-# Lossmask coverage summary
+# Lossmask coverage + token length diagnostic
 echo ""
-echo "  Lossmask coverage:"
-for lm in "$SHARED_DATA/lossmasks"/*.jsonl; do
-    if [[ -f "$lm" ]]; then
-        python3 -c "
-import json
-total_samples = 0; zero_samples = 0; total_ratio = 0
-with open('$lm') as f:
+echo "  Lossmask coverage & token length check (max_seq_length=$MAX_SEQ_LENGTH):"
+for render_f in "$SHARED_DATA/renders"/*.jsonl; do
+    if [[ -f "$render_f" ]]; then
+        bn=$(basename "$render_f" .jsonl)
+        lm_f="$SHARED_DATA/lossmasks/${bn}.jsonl"
+        python3 - "$render_f" "$lm_f" "$MAX_SEQ_LENGTH" << 'DIAGCHECK'
+import json, sys
+
+render_path = sys.argv[1]
+lossmask_path = sys.argv[2]
+max_len = int(sys.argv[3])
+bn = render_path.rsplit("/", 1)[-1]
+
+# Render token lengths
+lengths = []
+at_max = 0
+with open(render_path) as f:
     for line in f:
         if not line.strip(): continue
         d = json.loads(line)
-        s = d.get('stats', {})
-        total_samples += 1
-        ratio = s.get('mask_ratio', 0)
-        total_ratio += ratio
-        if ratio == 0:
-            zero_samples += 1
-avg = total_ratio / total_samples if total_samples > 0 else 0
-print(f'    $(basename "$lm"): {total_samples} samples, avg_coverage={avg:.1%}, zero_mask={zero_samples}')
-" 2>/dev/null
+        n = len(d.get("input_ids", []))
+        lengths.append(n)
+        if n >= max_len:
+            at_max += 1
+
+total = len(lengths)
+if total == 0:
+    print(f"    {bn}: 0 samples")
+    sys.exit(0)
+
+avg_len = sum(lengths) / total
+max_actual = max(lengths)
+min_actual = min(lengths)
+pct_at_max = 100.0 * at_max / total
+
+# Lossmask coverage
+lm_total = lm_zero = lm_ratio_sum = 0.0
+try:
+    with open(lossmask_path) as f:
+        for line in f:
+            if not line.strip(): continue
+            d = json.loads(line)
+            s = d.get("stats", {})
+            lm_total += 1
+            ratio = s.get("mask_ratio", 0)
+            lm_ratio_sum += ratio
+            if ratio == 0:
+                lm_zero += 1
+except FileNotFoundError:
+    pass
+
+lm_avg = lm_ratio_sum / lm_total if lm_total > 0 else 0
+
+print(f"    {bn}: {total} samples, tokens avg={avg_len:.0f} min={min_actual} max={max_actual}")
+print(f"      at_max_length ({max_len}): {at_max}/{total} ({pct_at_max:.1f}%)"
+      f"{' ⚠ TRUNCATION HAPPENING' if pct_at_max > 5 else ''}")
+if lm_total > 0:
+    print(f"      lossmask: avg_coverage={lm_avg:.1%}, zero_mask={int(lm_zero)}")
+DIAGCHECK
     fi
 done
 
@@ -564,6 +604,129 @@ cat > "$RUN_DIR/run_config.json" << RUNCFG
   "job_id": "${SLURM_JOB_ID:-local}"
 }
 RUNCFG
+
+# =============================================================================
+# Step 3b: Frozen-rep sanity check
+# =============================================================================
+# Validates that disable_adapter() produces the same hidden states as the
+# base model (no LoRA). If they diverge, the frozen pass during training was
+# wrong — every loss that compares model vs frozen reps would be broken.
+#
+# Three checks per CB layer (10, 20):
+#   1. disabled vs base:     should be MATCH (disable_adapter = true base weights)
+#   2. disabled vs disabled: should be MATCH (deterministic across calls)
+#   3. enabled vs base:      should be MOVED (LoRA actually learned something)
+echo ""
+echo "========================================================"
+echo "Step 3b: Frozen-rep sanity check"
+echo "========================================================"
+
+# Resolve adapter path
+if [[ -d "$RUN_DIR/model/final" ]]; then
+    ADAPTER_PATH_CHECK="$RUN_DIR/model/final"
+elif [[ -f "$RUN_DIR/model/adapter_config.json" ]]; then
+    ADAPTER_PATH_CHECK="$RUN_DIR/model"
+else
+    ADAPTER_PATH_CHECK=""
+fi
+
+if [[ -z "$ADAPTER_PATH_CHECK" ]]; then
+    echo "  SKIPPING frozen-rep check (no adapter found)"
+else
+    python3 - "$TOKENIZER" "$ADAPTER_PATH_CHECK" << 'FROZEN_CHECK'
+import sys, torch
+
+model_path = sys.argv[1]
+adapter_path = sys.argv[2]
+
+print("  Loading base model (no LoRA)...")
+from transformers import AutoModelForCausalLM, AutoTokenizer
+tokenizer = AutoTokenizer.from_pretrained(model_path)
+base_model = AutoModelForCausalLM.from_pretrained(
+    model_path, torch_dtype=torch.bfloat16, device_map="cpu",
+    output_hidden_states=True,
+)
+base_model.eval()
+
+# Fixed probe input
+probe = tokenizer("The quick brown fox jumps over the lazy dog.", return_tensors="pt")
+input_ids = probe["input_ids"]
+attention_mask = probe["attention_mask"]
+
+print("  Running base model forward...")
+with torch.no_grad():
+    base_out = base_model(input_ids=input_ids, attention_mask=attention_mask,
+                          output_hidden_states=True, use_cache=False)
+    base_hs = {L: base_out.hidden_states[L+1].clone() for L in [10, 20]}
+
+del base_model, base_out
+torch.cuda.empty_cache()
+
+print("  Loading LoRA model...")
+from peft import PeftModel
+lora_model = AutoModelForCausalLM.from_pretrained(
+    model_path, torch_dtype=torch.bfloat16, device_map="cpu",
+    output_hidden_states=True,
+)
+lora_model = PeftModel.from_pretrained(lora_model, adapter_path)
+lora_model.eval()
+
+# Pass 1: adapter DISABLED (should match base)
+print("  Running LoRA model with adapter DISABLED...")
+with torch.no_grad():
+    with lora_model.disable_adapter():
+        dis_out = lora_model(input_ids=input_ids, attention_mask=attention_mask,
+                             output_hidden_states=True, use_cache=False)
+        dis_hs = {L: dis_out.hidden_states[L+1].clone() for L in [10, 20]}
+del dis_out
+
+# Pass 2: adapter ENABLED (should differ from base if training worked)
+print("  Running LoRA model with adapter ENABLED...")
+with torch.no_grad():
+    en_out = lora_model(input_ids=input_ids, attention_mask=attention_mask,
+                        output_hidden_states=True, use_cache=False)
+    en_hs = {L: en_out.hidden_states[L+1].clone() for L in [10, 20]}
+del en_out
+
+# Pass 3: adapter DISABLED again (should match pass 1 exactly)
+print("  Running LoRA model with adapter DISABLED again...")
+with torch.no_grad():
+    with lora_model.disable_adapter():
+        dis2_out = lora_model(input_ids=input_ids, attention_mask=attention_mask,
+                              output_hidden_states=True, use_cache=False)
+        dis2_hs = {L: dis2_out.hidden_states[L+1].clone() for L in [10, 20]}
+del dis2_out, lora_model
+
+print()
+all_ok = True
+for L in [10, 20]:
+    diff_base = (dis_hs[L] - base_hs[L]).abs().max().item()
+    diff_repeat = (dis_hs[L] - dis2_hs[L]).abs().max().item()
+    diff_lora = (en_hs[L] - base_hs[L]).abs().max().item()
+
+    base_ok = diff_base == 0.0
+    repeat_ok = diff_repeat == 0.0
+    lora_moved = diff_lora > 1e-4
+
+    status = "OK" if (base_ok and repeat_ok and lora_moved) else "FAIL"
+    if status == "FAIL":
+        all_ok = False
+
+    print(f"  Layer {L}: [{status}]")
+    print(f"    disabled vs base:     max_diff={diff_base:.2e} {'MATCH' if base_ok else 'MISMATCH <<<'}")
+    print(f"    disabled vs disabled: max_diff={diff_repeat:.2e} {'MATCH' if repeat_ok else 'MISMATCH <<<'}")
+    print(f"    enabled vs base:      max_diff={diff_lora:.2e} {'MOVED' if lora_moved else 'IDENTICAL (adapter did nothing) <<<'}")
+
+print()
+if all_ok:
+    print("  FROZEN-REP CHECK: PASSED — disable_adapter() matches base model")
+else:
+    print("  FROZEN-REP CHECK: FAILED — see mismatches above")
+    print("  This means the frozen pass during training may have been wrong.")
+FROZEN_CHECK
+fi
+
+echo ""
 
 # =============================================================================
 # Step 4: Evaluation
