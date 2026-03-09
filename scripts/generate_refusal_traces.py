@@ -92,8 +92,6 @@ def generate_refusal_traces(
                     "security_outcome": "safe",
                     "attack_succeeded": False,
                     "attack_present": trace.get("labels", {}).get("attack_present", True),
-                    "synthetic": True,
-                    "original_id": trace["id"],
                 },
             }
 
