@@ -893,56 +893,102 @@ if cb: print(f'    AD Benign: correct={cb.get(\"correct_tool_call_rate\",0):.0%}
 fi
 
 # =============================================================================
-# Examples (paired output comparisons)
+# Examples (paired output comparisons) — AD-focused
 # =============================================================================
 echo ""
 echo "========================================================"
 echo "EXAMPLES ($CONFIG)"
 echo "========================================================"
 
-# Fujitsu examples
-FUJITSU_PAIRED="$EVAL_DIR/fujitsu_eval.paired_outputs.jsonl"
-if [[ -f "$FUJITSU_PAIRED" ]]; then
-    python3 - "$FUJITSU_PAIRED" "$NUM_EXAMPLES" << 'FUJEX'
+# ── AD harmful examples (full traces) ─────────────────────────────────────
+AD_FULL_PAIRED="$EVAL_DIR/agentdojo_harmful_full_eval.paired_outputs.jsonl"
+if [[ -f "$AD_FULL_PAIRED" ]]; then
+    echo "  --- AD Harmful (full traces) ---"
+    python3 - "$AD_FULL_PAIRED" "$NUM_EXAMPLES" << 'AD_FULL_EX'
 import json, sys
 
 paired_path = sys.argv[1]
-num_ex = int(sys.argv[2]) if len(sys.argv) > 2 else 3
+num_ex = int(sys.argv[2]) if len(sys.argv) > 2 else 5
 
 with open(paired_path) as f:
     pairs = [json.loads(l) for l in f if l.strip()]
 
-def gib(r):
-    if not r: return False
-    w = r.split()
-    return len(w) > 10 and len(set(w))/len(w) < 0.15
+# Classify
+bl_mal = [p for p in pairs if p.get('baseline_observed_tool') in (p.get('reference_tools') or [])]
+cb_mal = [p for p in pairs if p.get('cb_observed_tool') in (p.get('reference_tools') or [])]
+changed = [p for p in pairs if p.get('baseline_observed_tool') != p.get('cb_observed_tool')]
+improved = [p for p in changed if p.get('baseline_observed_tool') in (p.get('reference_tools') or [])]
+regressed = [p for p in changed if p.get('cb_observed_tool') in (p.get('reference_tools') or [])
+             and p.get('baseline_observed_tool') not in (p.get('reference_tools') or [])]
 
-imps = [p for p in pairs if p.get('baseline_outcome')=='attack_success' and p.get('cb_outcome')!='attack_success']
-regs = [p for p in pairs if p.get('baseline_outcome')!='attack_success' and p.get('cb_outcome')=='attack_success']
-n_cor = sum(1 for p in pairs if p.get('cb_outcome')=='correct_behavior')
-n_atk = sum(1 for p in pairs if p.get('cb_outcome')=='attack_success')
-n_nt = sum(1 for p in pairs if p.get('cb_outcome')=='no_tool_call')
-n_gib = sum(1 for p in pairs if gib(p.get('cb_response','')))
-
-print(f'  Fujitsu: {len(pairs)} pairs | improved={len(imps)} regressed={len(regs)}')
-print(f'  CB outcomes: correct={n_cor} attack={n_atk} no_tool={n_nt} gib={n_gib}')
+print(f'  {len(pairs)} pairs | changed={len(changed)} improved={len(improved)} regressed={len(regressed)}')
+print(f'  BL malicious: {len(bl_mal)}/{len(pairs)} | CB malicious: {len(cb_mal)}/{len(pairs)}')
 print()
 
-for i, p in enumerate((imps+regs)[:num_ex], 1):
-    lbl = 'IMP' if p.get('baseline_outcome')=='attack_success' else 'REG'
-    g = ' [GIB]' if gib(p.get('cb_response','')) else ''
-    print(f'  [{i}] {lbl}: {p.get("baseline_outcome","?")} -> {p.get("cb_outcome","?")}{g}')
-    print(f'      expected={p.get("expected_tool","?")} simulated={p.get("simulated_tool","?")}')
-    print(f'  BASELINE: {(p.get("baseline_response") or "(empty)")[:250]}')
-    print(f'  CB MODEL: {(p.get("cb_response") or "(empty)")[:250]}')
+# Show improved first, then regressed, then random changed
+show = improved[:num_ex]
+if len(show) < num_ex:
+    show += regressed[:num_ex - len(show)]
+if len(show) < num_ex:
+    remaining = [p for p in changed if p not in show]
+    show += remaining[:num_ex - len(show)]
+# If no changes at all, show a few baseline=CB examples for inspection
+if not show:
+    show = pairs[:num_ex]
+    print(f'  (No behavior changes — showing first {len(show)} samples)')
+
+for i, p in enumerate(show, 1):
+    ref = p.get('reference_tools', [])
+    bl_tool = p.get('baseline_observed_tool', 'none')
+    cb_tool = p.get('cb_observed_tool', 'none')
+    lbl = 'IMP' if bl_tool in ref and cb_tool not in ref else \
+          'REG' if cb_tool in ref and bl_tool not in ref else \
+          'CHG' if bl_tool != cb_tool else 'SAME'
+    print(f'  [{i}] {lbl}: BL={bl_tool} -> CB={cb_tool}  (ref={ref})')
+    print(f'       BL: {(p.get("baseline_response") or "(empty)")[:200]}')
+    print(f'       CB: {(p.get("cb_response") or "(empty)")[:200]}')
     print()
-FUJEX
+AD_FULL_EX
 fi
 
-# AD examples (truncated — shows what the model trained on)
+# ── AD harmful examples (truncated — training format) ─────────────────────
 AD_TRUNC_PAIRED="$EVAL_DIR/agentdojo_harmful_trunc_eval.paired_outputs.jsonl"
 if [[ -f "$AD_TRUNC_PAIRED" ]]; then
-    python3 - "$AD_TRUNC_PAIRED" "$NUM_EXAMPLES" << 'ADEX'
+    echo "  --- AD Harmful (truncated — training format) ---"
+    python3 - "$AD_TRUNC_PAIRED" "$NUM_EXAMPLES" << 'AD_TRUNC_EX'
+import json, sys
+
+paired_path = sys.argv[1]
+num_ex = int(sys.argv[2]) if len(sys.argv) > 2 else 5
+
+with open(paired_path) as f:
+    pairs = [json.loads(l) for l in f if l.strip()]
+
+changed = [p for p in pairs if p.get('baseline_observed_tool') != p.get('cb_observed_tool')]
+print(f'  {len(pairs)} pairs | changed={len(changed)}')
+
+show = changed[:num_ex] if changed else pairs[:num_ex]
+if not changed:
+    print(f'  (No behavior changes — showing first {len(show)} samples)')
+print()
+
+for i, p in enumerate(show, 1):
+    ref = p.get('reference_tools', [])
+    bl_tool = p.get('baseline_observed_tool', 'none')
+    cb_tool = p.get('cb_observed_tool', 'none')
+    lbl = 'CHG' if bl_tool != cb_tool else 'SAME'
+    print(f'  [{i}] {lbl}: BL={bl_tool} -> CB={cb_tool}  (ref={ref})')
+    print(f'       BL: {(p.get("baseline_response") or "(empty)")[:200]}')
+    print(f'       CB: {(p.get("cb_response") or "(empty)")[:200]}')
+    print()
+AD_TRUNC_EX
+fi
+
+# ── AD benign examples ────────────────────────────────────────────────────
+AD_BENIGN_PAIRED="$EVAL_DIR/agentdojo_benign_eval.paired_outputs.jsonl"
+if [[ -f "$AD_BENIGN_PAIRED" ]]; then
+    echo "  --- AD Benign (capability preservation) ---"
+    python3 - "$AD_BENIGN_PAIRED" "$NUM_EXAMPLES" << 'AD_BEN_EX'
 import json, sys
 
 paired_path = sys.argv[1]
@@ -951,21 +997,39 @@ num_ex = int(sys.argv[2]) if len(sys.argv) > 2 else 3
 with open(paired_path) as f:
     pairs = [json.loads(l) for l in f if l.strip()]
 
-n_ok = sum(1 for p in pairs if p.get('cb_observed_tool'))
-n_brk = sum(1 for p in pairs if not p.get('cb_observed_tool'))
+broken = [p for p in pairs if p.get('baseline_observed_tool') and not p.get('cb_observed_tool')]
+wrong = [p for p in pairs if p.get('baseline_observed_tool') and p.get('cb_observed_tool')
+         and p.get('baseline_observed_tool') != p.get('cb_observed_tool')]
 
-print(f'  AD Harmful (trunc): {len(pairs)} pairs | tool_ok={n_ok} broken={n_brk}')
-print()
-
-# Show cases where CB changed behavior
-changed = [p for p in pairs if p.get('baseline_observed_tool') != p.get('cb_observed_tool')]
-if changed:
-    print(f'  Changed behavior ({len(changed)} cases):')
-    for i, p in enumerate(changed[:num_ex], 1):
-        print(f'  [{i}] {p.get("baseline_observed_tool","none")} -> {p.get("cb_observed_tool","none")}')
-        print(f'  CB MODEL: {(p.get("cb_response") or "(empty)")[:250]}')
+print(f'  {len(pairs)} pairs | broken={len(broken)} wrong_tool={len(wrong)}')
+show = broken[:num_ex] + wrong[:max(0, num_ex - len(broken))]
+if not show:
+    print(f'  (No regressions)')
+else:
+    print()
+    for i, p in enumerate(show, 1):
+        bl_tool = p.get('baseline_observed_tool', 'none')
+        cb_tool = p.get('cb_observed_tool', 'none')
+        print(f'  [{i}] BL={bl_tool} -> CB={cb_tool}')
+        print(f'       CB: {(p.get("cb_response") or "(empty)")[:200]}')
         print()
-ADEX
+AD_BEN_EX
+fi
+
+# ── Fujitsu examples (brief) ─────────────────────────────────────────────
+FUJITSU_PAIRED="$EVAL_DIR/fujitsu_eval.paired_outputs.jsonl"
+if [[ -f "$FUJITSU_PAIRED" ]]; then
+    echo "  --- Fujitsu (brief) ---"
+    python3 - "$FUJITSU_PAIRED" "2" << 'FUJEX'
+import json, sys
+
+with open(sys.argv[1]) as f:
+    pairs = [json.loads(l) for l in f if l.strip()]
+
+imps = sum(1 for p in pairs if p.get('baseline_outcome')=='attack_success' and p.get('cb_outcome')!='attack_success')
+regs = sum(1 for p in pairs if p.get('baseline_outcome')!='attack_success' and p.get('cb_outcome')=='attack_success')
+print(f'  {len(pairs)} pairs | improved={imps} regressed={regs}')
+FUJEX
 fi
 
 # Generate run summary if script exists
