@@ -469,6 +469,13 @@ def _parse_args() -> argparse.Namespace:
     train_group.add_argument("--learning-rate", type=float, help="Learning rate")
     train_group.add_argument("--warmup-steps", type=int, help="Warmup steps")
     train_group.add_argument("--alpha-max", type=float, help="Initial alpha")
+    train_group.add_argument("--alpha-decay-multiplier", type=float,
+                             help="Alpha schedule horizon as multiple of total_steps (default 1.0; "
+                                  "use 2.0+ to keep harmful push active through full training)")
+    train_group.add_argument("--lr-schedule", type=str, choices=["linear", "constant"],
+                             default=None,
+                             help="LR schedule: 'linear' decays to 0 (default), "
+                                  "'constant' holds LR after warmup")
     train_group.add_argument("--max-seq-length", type=int, help="Max sequence length")
     train_group.add_argument("--gradient-accumulation-steps", type=int, help="Gradient accumulation")
 
@@ -602,6 +609,8 @@ def _build_config(args: argparse.Namespace) -> CircuitBreakerConfig:
         "learning_rate": "learning_rate",
         "warmup_steps": "warmup_steps",
         "alpha_max": "alpha_max",
+        "alpha_decay_multiplier": "alpha_decay_multiplier",
+        "lr_schedule": "lr_schedule",
         "max_seq_length": "max_seq_length",
         "gradient_accumulation_steps": "gradient_accumulation_steps",
         "cb_target_layers": "cb_target_layers",

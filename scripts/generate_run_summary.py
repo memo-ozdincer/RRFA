@@ -320,10 +320,25 @@ def _format_eval_for_dir(eval_dir: Path, mode_label: str = "") -> list[str]:
     else:
         lines.append(f"{prefix}FUJITSU: (no eval data)")
 
-    # AgentDojo harmful
-    agentdojo = load_eval_json(eval_dir / "agentdojo_eval.json")
-    agentdojo_paired = eval_dir / "agentdojo_eval.paired_outputs.jsonl"
+    # AgentDojo harmful — try sweep 9 filenames first, then sweep 8
+    agentdojo = None
+    agentdojo_paired = None
+    for fname, pname in [
+        ("agentdojo_harmful_full_eval.json", "agentdojo_harmful_full_eval.paired_outputs.jsonl"),
+        ("agentdojo_harmful_trunc_eval.json", "agentdojo_harmful_trunc_eval.paired_outputs.jsonl"),
+        ("agentdojo_eval.json", "agentdojo_eval.paired_outputs.jsonl"),
+    ]:
+        candidate = load_eval_json(eval_dir / fname)
+        if candidate:
+            agentdojo = candidate
+            agentdojo_paired = eval_dir / pname
+            break
+    if agentdojo_paired is None:
+        agentdojo_paired = eval_dir / "agentdojo_eval.paired_outputs.jsonl"
     gib_a, total_a = count_gibberish(agentdojo_paired)
+
+    # Also try to load truncated results for train/eval gap display
+    agentdojo_trunc = load_eval_json(eval_dir / "agentdojo_harmful_trunc_eval.json")
 
     if agentdojo:
         lines.append("")
@@ -350,6 +365,19 @@ def _format_eval_for_dir(eval_dir: Path, mode_label: str = "") -> list[str]:
                 if isinstance(no, (int, float)):
                     parts.append(f"no_tool={no:.0%}")
                 lines.append(f"    {label}: {' '.join(parts)}")
+        # Show delta
+        bl_gc = agentdojo.get("baseline", {}).get("generation_comparison", {})
+        cb_gc = agentdojo.get("cb_model", {}).get("generation_comparison", {})
+        bl_mal = bl_gc.get("malicious_tool_call_rate")
+        cb_mal = cb_gc.get("malicious_tool_call_rate")
+        if isinstance(bl_mal, (int, float)) and isinstance(cb_mal, (int, float)):
+            lines.append(f"    Delta (mal):      {cb_mal - bl_mal:+.0%}")
+        # Show truncated results if available (train/eval gap)
+        if agentdojo_trunc:
+            cb_trunc = agentdojo_trunc.get("cb_model", {}).get("generation_comparison", {})
+            trunc_mal = cb_trunc.get("malicious_tool_call_rate")
+            if isinstance(trunc_mal, (int, float)):
+                lines.append(f"    CB Trunc mal:     {trunc_mal:.0%}")
         lines.append(f"    Gibberish:        {gib_a}/{total_a}")
     else:
         lines.append(f"\n{prefix}AGENTDOJO (harmful): (no eval data)")
@@ -494,19 +522,30 @@ def format_examples_section(run_dir: Path, max_examples: int = 5) -> str:
                     lines.append("")
                 shown += len(selected)
 
-    # AgentDojo examples (if room)
+    # AgentDojo examples (if room) — try sweep 9 filenames, then sweep 8
     remaining = max_examples - shown
     if remaining > 0:
-        agentdojo_paired = eval_dir / "agentdojo_eval.paired_outputs.jsonl"
-        if agentdojo_paired.exists():
-            with open(agentdojo_paired) as f:
+        ad_paired_path = None
+        for pname in [
+            "agentdojo_harmful_full_eval.paired_outputs.jsonl",
+            "agentdojo_harmful_trunc_eval.paired_outputs.jsonl",
+            "agentdojo_eval.paired_outputs.jsonl",
+        ]:
+            candidate = eval_dir / pname
+            if candidate.exists():
+                ad_paired_path = candidate
+                break
+
+        if ad_paired_path and ad_paired_path.exists():
+            with open(ad_paired_path) as f:
                 pairs = [json.loads(line) for line in f if line.strip()]
 
-            differ = [p for p in pairs if p.get("responses_differ")]
+            differ = [p for p in pairs if p.get("responses_differ")
+                      or p.get("baseline_observed_tool") != p.get("cb_observed_tool")]
             selected = differ[:remaining]
 
             if selected:
-                lines.append("  AGENTDOJO:")
+                lines.append(f"  AGENTDOJO ({ad_paired_path.stem}):")
                 for i, p in enumerate(selected, 1):
                     cat = p.get("category", "?")
                     b_tool = p.get("baseline_observed_tool") or "none"
@@ -523,6 +562,7 @@ def format_examples_section(run_dir: Path, max_examples: int = 5) -> str:
         found_any = any(
             (ed / "fujitsu_eval.paired_outputs.jsonl").exists()
             or (ed / "agentdojo_eval.paired_outputs.jsonl").exists()
+            or (ed / "agentdojo_harmful_full_eval.paired_outputs.jsonl").exists()
             for _, ed in eval_dirs
         )
         if not found_any:

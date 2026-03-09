@@ -3,54 +3,54 @@
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=24
-#SBATCH --time=06:00:00
+#SBATCH --time=10:00:00
 #SBATCH --output=/scratch/memoozd/cb-scratch/logs/%x_%j.out
 #SBATCH --error=/scratch/memoozd/cb-scratch/logs/%x_%j.err
 #SBATCH --account=def-zhijing
 
 # =============================================================================
-# SWEEP 9: AD-Focused Training Experiments
+# AD-Focused Training Experiments (Sweep 9 + 10)
 # =============================================================================
 #
-# Motivation: Sweep 8 showed AgentDojo is immune to CB (0% delta across 10+
-# configs). Fujitsu drowns AD 3:1, 200 steps = 16% data coverage, and
-# training on truncated traces while evaluating on full-length may prevent
-# transfer. This sweep isolates these variables.
+# Sweep 9: First AD signal (best: -5% trunc). All configs suffered from:
+#   1. alpha_decay_multiplier=1.0 — harmful push drops to 0 at training end
+#   2. margin_harmful=1.6 — saturates in ~10-50 steps, zero gradient thereafter
+#   3. KL constant while harmful push decays — actively fights the push
+#   4. LR decays to 0 on top of alpha decay — quadratic effective-learning decay
 #
-# All configs use the only loss that showed signal:
-#   per_token_cb + dl2rc + margin_free=false
-#
-# All configs eval on BOTH truncated AND full AD data (measures train/eval gap).
+# Sweep 10 (v2 configs): Fix all four. Same defaults otherwise.
+#   - alpha_decay_multiplier=2.0 (push stays at 50% at step=total_steps)
+#   - margin_harmful=20.0 (keeps gradient flowing through full training)
+#   - KL scheduled with retain coefficient (0→gamma_kl, not constant)
+#   - lr_schedule=constant (holds LR after warmup)
 #
 # Configs:
-#   CONFIG=ad_500           AD-only, 500 steps (~0.8 epochs)
-#   CONFIG=ad_1000          AD-only, 1000 steps (~1.6 epochs)
-#   CONFIG=ad_no_resisted   AD-only, 500 steps, resisted traces excluded from benign
-#   CONFIG=balanced_500     AD + Fujitsu (capped ~2500 each), 500 steps
-#   CONFIG=balanced_1000    AD + Fujitsu (capped ~2500 each), 1000 steps
+#   CONFIG=ad_1000_v2       1000 steps, all four fixes
+#   CONFIG=ad_3000_v2       3000 steps, all four fixes
+#   CONFIG=ad_5000_v2       5000 steps, all four fixes
+#   (Legacy sweep 9 configs still available: ad_500, ad_1000, etc.)
 #
 # Usage:
-#   sbatch --export=ALL,CONFIG=ad_500 slurm/pipeline/sweep_ad_focused.sbatch
-#
-# Submit all (recommended):
-#   for c in ad_500 ad_1000 ad_no_resisted balanced_500 balanced_1000; do
+#   for c in ad_1000_v2 ad_3000_v2 ad_5000_v2; do
 #     sbatch --export=ALL,CONFIG=$c slurm/pipeline/sweep_ad_focused.sbatch
 #   done
 #
 # Quick test:
-#   sbatch --export=ALL,CONFIG=ad_500,QUICK_TEST=true slurm/pipeline/sweep_ad_focused.sbatch
+#   sbatch --export=ALL,CONFIG=ad_1000_v2,QUICK_TEST=true slurm/pipeline/sweep_ad_focused.sbatch
 # =============================================================================
 
 set -euo pipefail
 
 # ── Config presets ──────────────────────────────────────────────────────────
 
-CONFIG="${CONFIG:?ERROR: CONFIG is required. Valid: ad_500, ad_1000, ad_no_resisted, balanced_500, balanced_1000, ad_2000_aggr, ad_500_wide, ad_1000_nokl}"
+CONFIG="${CONFIG:?ERROR: CONFIG is required. See case block below.}"
 
 # Per-config override vars (empty = use defaults below)
 _LR="" _ALPHA="" _KL="" _CB="" _LORA_R="" _LORA_ALPHA=""
+_MARGIN_H="" _MARGIN_B="" _DECAY_MULT="" _LR_SCHED=""
 
 case "$CONFIG" in
+  # --- Legacy sweep 9 configs (kept for reproducibility) ---
   ad_500)
     DATASET=ad_only;  TOTAL_STEPS=500;  RESISTED=retain;  FUJITSU_CAP=0    ;;
   ad_1000)
@@ -61,29 +61,50 @@ case "$CONFIG" in
     DATASET=balanced; TOTAL_STEPS=500;  RESISTED=retain;  FUJITSU_CAP=2500 ;;
   balanced_1000)
     DATASET=balanced; TOTAL_STEPS=1000; RESISTED=retain;  FUJITSU_CAP=2500 ;;
-
-  # --- Experimental configs (Sweep 9b) ---
-  # Brute force: 2000 steps (~3.2 epochs), 4x LR, 5x alpha. Ensures every AD
-  # sample is seen multiple times with a strong rerouting signal.
   ad_2000_aggr)
     DATASET=ad_only;  TOTAL_STEPS=2000; RESISTED=retain;  FUJITSU_CAP=0
     _LR=2e-4; _ALPHA=50.0; _KL=0.1 ;;
-
-  # Wide CB: target 5 layers instead of 2, LoRA r=64. Makes the representation
-  # perturbation span more of the network — harder for the model to route around.
   ad_500_wide)
     DATASET=ad_only;  TOTAL_STEPS=500;  RESISTED=retain;  FUJITSU_CAP=0
     _CB="5 10 15 20 25"; _LORA_R=64; _LORA_ALPHA=128 ;;
-
-  # No KL leash: gamma_kl=0, higher alpha. KL penalty keeps outputs close to
-  # base model — removing it lets CB fully reshape harmful representations.
   ad_1000_nokl)
     DATASET=ad_only;  TOTAL_STEPS=1000; RESISTED=retain;  FUJITSU_CAP=0
     _KL=0.0; _ALPHA=30.0 ;;
 
+  # ==========================================================================
+  # Sweep 10 — schedule & margin fixes (all four inefficiencies addressed)
+  # ==========================================================================
+  # Fixes applied to ALL v2 configs:
+  #   1. alpha_decay_multiplier=2.0 — push stays active through full training
+  #      (at step=total_steps, cs is still 50% of alpha_max, not 0)
+  #   2. margin_harmful=20.0 — prevents early saturation (was 1.6, saturated
+  #      in ~10-50 steps leaving no gradient for the rest of training)
+  #   3. KL scheduled with retain coeff — no longer fights harmful push
+  #      (code change in trainer.py: gamma_kl *= cr/alpha_max)
+  #   4. lr_schedule=constant — LR holds after warmup instead of decaying to 0
+  #      (eliminates quadratic effective-learning decay from LR*cs both → 0)
+  #
+  # Only difference between v2 configs: step count (epoch coverage).
+  # AD harmful ≈ 2500 samples. Effective batch = 8.
+  #   1000 steps = 8000 samples ≈ 3.2 epochs
+  #   3000 steps = 24000 samples ≈ 9.6 epochs
+  #   5000 steps = 40000 samples ≈ 16 epochs
+
+  ad_1000_v2)
+    DATASET=ad_only;  TOTAL_STEPS=1000; RESISTED=retain;  FUJITSU_CAP=0
+    _DECAY_MULT=2.0; _MARGIN_H=20.0; _MARGIN_B=3.0; _LR_SCHED=constant ;;
+
+  ad_3000_v2)
+    DATASET=ad_only;  TOTAL_STEPS=3000; RESISTED=retain;  FUJITSU_CAP=0
+    _DECAY_MULT=2.0; _MARGIN_H=20.0; _MARGIN_B=3.0; _LR_SCHED=constant ;;
+
+  ad_5000_v2)
+    DATASET=ad_only;  TOTAL_STEPS=5000; RESISTED=retain;  FUJITSU_CAP=0
+    _DECAY_MULT=2.0; _MARGIN_H=20.0; _MARGIN_B=3.0; _LR_SCHED=constant ;;
+
   *)
     echo "ERROR: Unknown CONFIG=$CONFIG"
-    echo "Valid: ad_500, ad_1000, ad_no_resisted, balanced_500, balanced_1000, ad_2000_aggr, ad_500_wide, ad_1000_nokl"
+    echo "Valid: ad_500 ad_1000 ad_1000_v2 ad_3000_v2 ad_5000_v2 ..."
     exit 1 ;;
 esac
 
@@ -141,7 +162,7 @@ BATCH_SIZE=4
 GRAD_ACCUM=2
 LEARNING_RATE=5e-5
 WARMUP_STEPS=20
-MAX_SEQ_LENGTH="${MAX_SEQ_LENGTH:-2048}"  # 2048 matches old working sweep (d086ec9), doubles signal density
+MAX_SEQ_LENGTH="${MAX_SEQ_LENGTH:-2048}"
 LORA_R=16
 LORA_ALPHA=32
 CB_LAYERS="10 20"
@@ -151,6 +172,10 @@ EVAL_MODE=next_tool_prediction
 PRESET=llama-3.1-8b-instruct
 ALPHA_MAX=10.0
 GAMMA_KL=0.3
+MARGIN_HARMFUL=1.6
+MARGIN_BENIGN=1.2
+ALPHA_DECAY_MULT=""
+LR_SCHEDULE=""
 
 # Apply per-config overrides (set in case block above)
 [[ -n "$_LR" ]]         && LEARNING_RATE="$_LR"
@@ -159,15 +184,21 @@ GAMMA_KL=0.3
 [[ -n "$_CB" ]]         && CB_LAYERS="$_CB"
 [[ -n "$_LORA_R" ]]     && LORA_R="$_LORA_R"
 [[ -n "$_LORA_ALPHA" ]] && LORA_ALPHA="$_LORA_ALPHA"
+[[ -n "$_MARGIN_H" ]]   && MARGIN_HARMFUL="$_MARGIN_H"
+[[ -n "$_MARGIN_B" ]]   && MARGIN_BENIGN="$_MARGIN_B"
+[[ -n "$_DECAY_MULT" ]] && ALPHA_DECAY_MULT="$_DECAY_MULT"
+[[ -n "$_LR_SCHED" ]]   && LR_SCHEDULE="$_LR_SCHED"
 
 echo "========================================================"
-echo "SWEEP 9: AD-Focused — $CONFIG"
+echo "SWEEP 10: AD-Focused — $CONFIG"
 echo "========================================================"
 echo "Job: ${SLURM_JOB_ID:-local} | $(date)"
 echo "Dataset: $DATASET | Steps: $TOTAL_STEPS | Resisted: $RESISTED"
 echo "Fujitsu cap: $FUJITSU_CAP | Seq len: $MAX_SEQ_LENGTH"
 echo "Loss: $LOSS_MODE | Distance: $DISTANCE | margin_free: $MARGIN_FREE"
-echo "LR: $LEARNING_RATE | alpha: $ALPHA_MAX | gamma_kl: $GAMMA_KL"
+echo "Margins: harmful=$MARGIN_HARMFUL benign=$MARGIN_BENIGN"
+echo "LR: $LEARNING_RATE | LR sched: ${LR_SCHEDULE:-linear} | alpha: $ALPHA_MAX | gamma_kl: $GAMMA_KL"
+echo "Alpha decay mult: ${ALPHA_DECAY_MULT:-1.0 (default)}"
 echo "CB layers: $CB_LAYERS | LoRA: r=$LORA_R alpha=$LORA_ALPHA"
 echo ""
 
@@ -539,8 +570,8 @@ python src/training/train_schema.py \
     --triplet-alpha-benign 0.5 \
     --triplet-beta-harmful 0.4 \
     --triplet-gamma-kl "$GAMMA_KL" \
-    --triplet-margin-benign 1.2 \
-    --triplet-margin-harmful 1.6 \
+    --triplet-margin-benign "$MARGIN_BENIGN" \
+    --triplet-margin-harmful "$MARGIN_HARMFUL" \
     --triplet-benign-positive-distance "$DISTANCE" \
     --triplet-benign-negative-distance "$DISTANCE" \
     --triplet-harmful-positive-distance "$DISTANCE" \
@@ -556,6 +587,8 @@ python src/training/train_schema.py \
     --save-steps 9999 \
     --no-wandb \
     --cb-target-layers $CB_LAYERS \
+    ${ALPHA_DECAY_MULT:+--alpha-decay-multiplier "$ALPHA_DECAY_MULT"} \
+    ${LR_SCHEDULE:+--lr-schedule "$LR_SCHEDULE"} \
     --mode mixed \
     --harmful-renders "${HARMFUL_RENDERS[@]}" \
     --harmful-lossmasks "${HARMFUL_LOSSMASKS[@]}" \
@@ -621,7 +654,7 @@ echo ""
 # Save run config
 cat > "$RUN_DIR/run_config.json" << RUNCFG
 {
-  "sweep": "9_ad_focused",
+  "sweep": "10_schedule_fix",
   "config": "$CONFIG",
   "dataset": "$DATASET",
   "loss_mode": "$LOSS_MODE",
@@ -634,8 +667,12 @@ cat > "$RUN_DIR/run_config.json" << RUNCFG
   "grad_accum": $GRAD_ACCUM,
   "effective_batch": $(( BATCH_SIZE * GRAD_ACCUM )),
   "learning_rate": "$LEARNING_RATE",
+  "lr_schedule": "${LR_SCHEDULE:-linear}",
   "gamma_kl": $GAMMA_KL,
   "alpha_max": $ALPHA_MAX,
+  "alpha_decay_multiplier": "${ALPHA_DECAY_MULT:-1.0}",
+  "margin_harmful": $MARGIN_HARMFUL,
+  "margin_benign": $MARGIN_BENIGN,
   "lora_r": $LORA_R,
   "lora_alpha": $LORA_ALPHA,
   "margin_free": false,

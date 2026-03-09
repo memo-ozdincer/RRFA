@@ -34,6 +34,7 @@ from tqdm import tqdm
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
+    get_constant_schedule_with_warmup,
     get_linear_schedule_with_warmup,
     get_cosine_schedule_with_warmup,
 )
@@ -1085,18 +1086,23 @@ class CircuitBreakerTrainer:
             weight_decay=self.config.weight_decay,
         )
         
-        # CRITICAL FIX: Use config.total_steps for scheduler, NOT min(total_steps, len(dataloader))
-        # The previous logic caused LR to decay to near-zero too early when training 
-        # for more steps than one epoch (i.e., multiple passes through the data).
-        # If we want to train for N steps but dataset has M < N samples, we'll loop,
-        # so the scheduler should use N to properly decay learning rate over the full training.
         total_steps = self.config.total_steps
-        
-        self.scheduler = get_linear_schedule_with_warmup(
-            self.optimizer,
-            num_warmup_steps=self.config.warmup_steps,
-            num_training_steps=total_steps,
-        )
+        lr_sched = getattr(self.config, "lr_schedule", "linear")
+
+        if lr_sched == "constant":
+            # Constant LR after warmup — preferred for CB training since the
+            # alpha schedule already handles explore/exploit. LR decay on top
+            # of alpha decay causes quadratic effective-learning decay.
+            self.scheduler = get_constant_schedule_with_warmup(
+                self.optimizer,
+                num_warmup_steps=self.config.warmup_steps,
+            )
+        else:
+            self.scheduler = get_linear_schedule_with_warmup(
+                self.optimizer,
+                num_warmup_steps=self.config.warmup_steps,
+                num_training_steps=total_steps,
+            )
     
     def _prepare_accelerator(self):
         """Prepare models and optimizer with accelerator for multi-GPU."""
@@ -1886,6 +1892,12 @@ class CircuitBreakerTrainer:
                                 f"b={getattr(self.config, 'triplet_margin_benign', 1.2)})"
                             )
 
+            # Schedule KL with retain coefficient so it doesn't fight harmful push.
+            # cr goes 0→alpha_max; dividing by alpha_max gives fraction 0→1.
+            _gamma_kl_config = float(getattr(self.config, "triplet_gamma_kl", 0.9))
+            _alpha_max = self.config.alpha_max if self.config.alpha_max > 0 else 1.0
+            _kl_coeff = (cr / _alpha_max) * _gamma_kl_config
+
             total_loss, ptcb_metrics = per_token_cb_loss(
                 harmful_model_reps=harmful_model_reps,
                 harmful_frozen_reps=harmful_frozen_reps,
@@ -1898,7 +1910,7 @@ class CircuitBreakerTrainer:
                 benign_mask=_benign_mask,
                 alpha_benign=cr * float(getattr(self.config, "triplet_alpha_benign", 0.5)),
                 beta_harmful=cs * float(getattr(self.config, "triplet_beta_harmful", 0.4)),
-                gamma_kl=float(getattr(self.config, "triplet_gamma_kl", 0.9)),
+                gamma_kl=_kl_coeff,
                 margin_benign=float(getattr(self.config, "triplet_margin_benign", 1.2)),
                 margin_harmful=float(getattr(self.config, "triplet_margin_harmful", 1.6)),
                 benign_attention_mask=benign_attention_mask,

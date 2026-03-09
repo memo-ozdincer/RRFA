@@ -62,6 +62,11 @@ class CircuitBreakerConfig:
     # This matches the reference implementation's behavior.
     alpha_decay_multiplier: float = 1.0
 
+    # LR schedule after warmup: "linear" decays to 0 (legacy), "constant" holds LR.
+    # "constant" is preferred for CB training since alpha schedule already handles
+    # the explore/exploit tradeoff; LR decay on top of alpha decay is redundant.
+    lr_schedule: str = "linear"
+
     # How to extract representations for the RR/retain losses.
     # - "hidden_states": use Transformers' output_hidden_states=True (preferred; robust)
     # - "hooks": forward hooks on transformer blocks (kept for backwards-compatibility)
