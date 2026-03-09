@@ -1,0 +1,281 @@
+         328385         memoozd    def-zhijing       sweep_ad   R    4:36:30           compute     1      gres/gpu:1 trig0015 (None)
+         328386         memoozd    def-zhijing       sweep_ad   R    4:36:34           compute     1      gres/gpu:1 trig0037 (None)
+         328387         memoozd    def-zhijing       sweep_ad   R    4:37:33           compute     1      gres/gpu:1 trig0033 (None)
+         328388         memoozd    def-zhijing       sweep_ad   R    4:39:01           compute     1      gres/gpu:1 trig0011 (None)
+         329032         memoozd    def-zhijing       sweep_ad   R    5:48:17           compute     1      gres/gpu:1 trig0017 (None)
+         329036         memoozd    def-zhijing       sweep_ad   R    5:53:47           compute     1      gres/gpu:1 trig0040 (None
+
+
+
+328385:
+
+========================================================
+Step 3: Training (ad_1000, 1000 steps)
+========================================================
+  Harmful files: 1
+    agentdojo_renders_harmful.jsonl: 2513 lines
+  Benign files: 1
+    agentdojo_renders_benign.jsonl: 3141 lines
+
+  Training SUCCESS (161m)
+
+  Training history:
+    Steps logged: 20
+    First (step    0): mode=per_token_cb | L_b=0.0000 L_h=1.5900 L_kl=-0.0001 d_h=0.012 d_b=0.011 grad=0.0101
+    Mid   (step  500): mode=per_token_cb | L_b=0.0801 L_h=0.0990 L_kl=0.0015 d_h=2.620 d_b=1.132 grad=2.1979
+    Last  (step  950): mode=per_token_cb | L_b=0.0130 L_h=0.1305 L_kl=0.0011 d_h=2.878 d_b=0.954 grad=1.5674
+
+========================================================
+Step 4: Evaluation
+========================================================
+  [4a] Fujitsu eval...
+    Baseline: ASR=86% correct=14% no_tool=0%
+    CB: ASR=72% correct=28% no_tool=0%
+
+  [4b] AD harmful eval (full traces)...
+    AD full split: 2738 harmful, 3144 benign
+    AD Harmful (full): resist=81% malicious=19%
+
+  [4c] AD harmful eval (truncated — matches training format)...
+    AD trunc split: 2513 harmful, 3144 benign
+    AD Harmful (trunc): resist=85% malicious=15%
+
+  [4d] AD benign eval...
+    AD Benign: correct=21% no_tool=0%
+
+4. EVALUATION METRICS
+------------------------------------------------------------
+
+  --- Eval mode: next_tool_prediction ---
+  FUJITSU:
+    Baseline ASR:     85.7%
+    CB ASR:           72.4%
+    CB Correct:       27.6%
+    CB No Tool:       0.0%
+    CB Other Tool:    0.0%
+    CB Malformed:     0.0%
+    Delta (ASR):      -13.3%
+    Gibberish:        0/98
+
+  AGENTDOJO (harmful): (no eval data)
+
+  AGENTDOJO (benign):
+    Baseline: correct_tool=21% no_tool=0%
+    CB Model: correct_tool=21% no_tool=0%
+    Gibberish:        0/97
+
+5. EXAMPLE COMPARISON
+
+  Fujitsu: BL=86% CB=72% Δ=-13%
+  AD Harmful (full):  BL_mal=19% CB_mal=19% Δ=+0%
+  AD Harmful (trunc): BL_mal=11% CB_mal=15% Δ=+4%
+  >>> Train/eval gap: +4% (full - trunc malicious rate)
+  AD Benign: correct=21% no_tool=0%
+S)
+
+
+
+AD NO RESISTED 500 STEPS:
+========================================================
+Step 3: Training (ad_no_resisted, 500 steps)
+========================================================
+  Harmful files: 1
+    agentdojo_renders_harmful.jsonl: 2513 lines
+  Benign files: 1
+    agentdojo_renders_benign.jsonl: 2893 lines
+
+  Training SUCCESS (80m)
+
+  Training history:
+    Steps logged: 10
+    First (step    0): mode=per_token_cb | L_b=0.0000 L_h=1.5900 L_kl=-0.0001 d_h=0.012 d_b=0.011 grad=0.0101
+    Mid   (step  250): mode=per_token_cb | L_b=0.1145 L_h=0.2123 L_kl=0.0038 d_h=1.703 d_b=1.158 grad=3.7423
+    Last  (step  450): mode=per_token_cb | L_b=0.0244 L_h=0.3452 L_kl=0.0025 d_h=1.451 d_b=1.041 grad=5.3606
+
+========================================================
+Step 4: Evaluation
+========================================================
+  [4a] Fujitsu eval...
+    Baseline: ASR=86% correct=14% no_tool=0%
+    CB: ASR=67% correct=33% no_tool=0%
+
+  [4b] AD harmful eval (full traces)...
+    AD full split: 2738 harmful, 3144 benign
+    AD Harmful (full): resist=79% malicious=21%
+
+  [4c] AD harmful eval (truncated — matches training format)...
+    AD trunc split: 2513 harmful, 3144 benign
+    AD Harmful (trunc): resist=85% malicious=15%
+
+  [4d] AD benign eval...
+    AD Benign: correct=21% no_tool=0%
+
+===================================================
+
+  First loss: 4.9761
+  Last loss:  0.0698
+  Min loss:   0.0698
+  Max loss:   4.9761
+  Triplet_H collapse: none (good)
+
+4. EVALUATION METRICS
+------------------------------------------------------------
+
+  --- Eval mode: next_tool_prediction ---
+  FUJITSU:
+    Baseline ASR:     85.7%
+    CB ASR:           67.3%
+    CB Correct:       32.7%
+    CB No Tool:       0.0%
+    CB Other Tool:    0.0%
+    CB Malformed:     0.0%
+    Delta (ASR):      -18.4%
+    Gibberish:        0/98
+
+  AGENTDOJO (harmful): (no eval data)
+
+  AGENTDOJO (benign):
+    Baseline: correct_tool=20% no_tool=0%
+    CB Model: correct_tool=21% no_tool=0%
+    Gibberish:        0/97
+
+============================================================
+END OF SUMMARY: run
+============================================================
+
+========================================================
+RESULTS SUMMARY — ad_no_resisted
+========================================================
+  Config: ad_no_resisted | dataset=ad_only | steps=500 | resisted=exclude | fuj_cap=0
+
+  Fujitsu: BL=86% CB=67% Δ=-18%
+  AD Harmful (full):  BL_mal=19% CB_mal=21% Δ=+2%
+  AD Harmful (trunc): BL_mal=12% CB_mal=15% Δ=+3%
+  >>> Train/eval gap: +6% (full - trunc malicious rate)
+  AD Benign: correct=21% no_tool=0%
+
+Output: /scratch/memoozd/cb-scratch/sweeps/s9_ad_no_resisted_20260308_220725/run
+Date: Sun 08 Mar 2026 11:41:41 PM EDT
+
+
+balanced_500:
+
+  Fujitsu: BL=85% CB=65% Δ=-19%
+  AD Harmful (full):  BL_mal=19% CB_mal=18% Δ=-1%
+  AD Harmful (trunc): BL_mal=12% CB_mal=12% Δ=+0%
+  >>> Train/eval gap: +6% (full - trunc malicious rate)
+  AD Benign: correct=21% no_tool=1%
+
+Output: /scratch/memoozd/cb-scratch/sweeps/s9_balanced_500_20260308_220824/run
+Date: Sun 08 Mar 2026 11:43:08 PM EDT
+
+========================================================
+Step 3: Training (balanced_1000, 1000 steps)
+========================================================
+  Harmful files: 2
+    agentdojo_renders_harmful.jsonl: 2513 lines
+    fujitsu_b4_ds_renders.jsonl: 2500 lines
+  Benign files: 2
+    agentdojo_renders_benign.jsonl: 3141 lines
+    fujitsu_b4_dr_renders.jsonl: 2500 lines
+
+  Training SUCCESS (160m)
+
+  Training history:
+    Steps logged: 20
+    First (step    0): mode=per_token_cb | L_b=0.0000 L_h=1.5896 L_kl=-0.0000 d_h=0.012 d_b=0.011 grad=0.0120
+    Mid   (step  500): mode=per_token_cb | L_b=0.0933 L_h=0.0013 L_kl=0.0038 d_h=2.763 d_b=1.156 grad=5.3229
+    Last  (step  950): mode=per_token_cb | L_b=0.0189 L_h=0.2388 L_kl=0.0014 d_h=1.893 d_b=0.973 grad=2.7071
+
+========================================================
+Step 4: Evaluation
+========================================================
+  [4a] Fujitsu eval...
+    Baseline: ASR=84% correct=16% no_tool=0%
+    CB: ASR=70% correct=30% no_tool=0%
+
+  [4b] AD harmful eval (full traces)...
+    AD full split: 2738 harmful, 3144 benign
+    AD Harmful (full): resist=79% malicious=21%
+
+  [4c] AD harmful eval (truncated — matches training format)...
+    AD trunc split: 2513 harmful, 3144 benign
+    AD Harmful (trunc): resist=87% malicious=13%
+
+  [4d] AD benign eval...
+
+
+
+  
+========================================================
+RESULTS SUMMARY — balanced_500
+========================================================
+  Config: balanced_500 | dataset=balanced | steps=500 | resisted=retain | fuj_cap=2500
+
+  Fujitsu: BL=86% CB=59% Δ=-27%
+  AD Harmful (full):  BL_mal=19% CB_mal=19% Δ=+0%
+  AD Harmful (trunc): BL_mal=12% CB_mal=13% Δ=+1%
+  >>> Train/eval gap: +6% (full - trunc malicious rate)
+  AD Benign: correct=20% no_tool=0%
+
+
+  
+========================================================
+RESULTS SUMMARY — balanced_500
+========================================================
+  Config: balanced_500 | dataset=balanced | steps=500 | resisted=retain | fuj_cap=2500
+
+  Fujitsu: BL=86% CB=59% Δ=-27%
+  AD Harmful (full):  BL_mal=19% CB_mal=19% Δ=+0%
+  AD Harmful (trunc): BL_mal=12% CB_mal=13% Δ=+1%
+  >>> Train/eval gap: +6% (full - trunc malicious rate)
+  AD Benign: correct=20% no_tool=0%
+
+Output: /scratch/memoozd/cb-scratch/sweeps/s9_balanced_500_20260308_231908/run
+Date: Mon 09 Mar 2026 12:09:52 AM EDT
+
+
+
+========================================================
+Step 3b: Frozen-rep sanity check
+========================================================
+  Loading base model (no LoRA)...
+  Running base model forward...
+  Loading LoRA model...
+  Running LoRA model with adapter DISABLED...
+  Running LoRA model with adapter ENABLED...
+  Running LoRA model with adapter DISABLED again...
+
+  Layer 10: [OK]
+    disabled vs base:     max_diff=0.00e+00 MATCH
+    disabled vs disabled: max_diff=0.00e+00 MATCH
+    enabled vs base:      max_diff=1.88e-01 MOVED
+  Layer 20: [OK]
+    disabled vs base:     max_diff=0.00e+00 MATCH
+    disabled vs disabled: max_diff=0.00e+00 MATCH
+    enabled vs base:      max_diff=2.50e-01 MOVED
+
+  FROZEN-REP CHECK: PASSED — disable_adapter() matches base model
+
+========================================================
+Step 4: Evaluation
+========================================================
+  [4a] Fujitsu eval...
+    Baseline: ASR=86% correct=14% no_tool=0%
+    CB: ASR=72% correct=28% no_tool=0%
+
+  [4b] AD harmful eval (full traces)...
+    AD full split: 2738 harmful, 3144 benign
+    AD Harmful (full): resist=81% malicious=19%
+
+  [4c] AD harmful eval (truncated — matches training format)...
+    AD trunc split: 2513 harmful, 3144 benign
+    AD Harmful (trunc): resist=85% malicious=15%
+
+  [4d] AD benign eval...
+    AD Benign: correct=21% no_tool=0%
+
+========================================================
+EXAMPLES (ad_500)
+========================================================
+  Fujitsu: 98 pairs | improved=13 regressed=0:wq

@@ -581,8 +581,20 @@ def _resolve_tools_for_sample(
         ]
         if filtered:
             return filtered, "per_sample_inferred"
-        # Sample has tool evidence, but not in provided schema; safest is no tools.
-        return [], "per_sample_inferred_empty"
+        # Build minimal tool definitions from inferred names (schema mismatch fallback).
+        # The proper fix is using the correct --tool-schema for this dataset.
+        synthetic_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": name.replace("_", " ").capitalize(),
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+            for name in inferred_names
+        ]
+        return synthetic_tools, "per_sample_inferred_synthetic"
 
     return schema_tools, "schema_fallback"
 
@@ -2129,12 +2141,31 @@ def evaluate_generation_comparison(
         "sample_embedded": 0,
         "per_sample_inferred": 0,
         "per_sample_inferred_empty": 0,
+        "per_sample_inferred_synthetic": 0,
         "schema_fallback": 0,
     }
     samples_with_embedded_tools = 0
     samples_with_inferred_tools = 0
 
     skipped_ntp = 0  # Samples skipped in next_tool_prediction mode
+
+    # Pre-scan: check tool resolution coverage on a small sample
+    _prescan_limit = min(50, len(eval_samples))
+    _prescan_sources: Dict[str, int] = {}
+    for _s in eval_samples[:_prescan_limit]:
+        _, _src = _resolve_tools_for_sample(_s, tools)
+        _prescan_sources[_src] = _prescan_sources.get(_src, 0) + 1
+    _empty = _prescan_sources.get("per_sample_inferred_empty", 0)
+    _synth = _prescan_sources.get("per_sample_inferred_synthetic", 0)
+    if (_empty + _synth) > _prescan_limit * 0.5:
+        logger.error(
+            "TOOL SCHEMA MISMATCH: %d/%d samples have inferred tools NOT in schema. "
+            "Results will be unreliable. Provide correct --tool-schema for this dataset. "
+            "(sources: %s)",
+            _empty + _synth,
+            _prescan_limit,
+            _prescan_sources,
+        )
 
     for sample in iterator:
         messages = sample.get("messages", [])
@@ -2192,8 +2223,15 @@ def evaluate_generation_comparison(
         tools_source_counts[tool_source] = tools_source_counts.get(tool_source, 0) + 1
         if tool_source == "sample_embedded":
             samples_with_embedded_tools += 1
-        elif tool_source in {"per_sample_inferred", "per_sample_inferred_empty"}:
+        elif tool_source in {"per_sample_inferred", "per_sample_inferred_empty", "per_sample_inferred_synthetic"}:
             samples_with_inferred_tools += 1
+        if tool_source == "per_sample_inferred_synthetic":
+            if tools_source_counts.get("per_sample_inferred_synthetic", 0) == 1:
+                logger.warning(
+                    "Tool schema mismatch: tools inferred from sample but none found "
+                    "in schema. Using synthetic definitions. "
+                    "Consider providing the correct --tool-schema for this dataset."
+                )
 
         try:
             response = generate_with_tools(model, tokenizer, messages, sample_tools)

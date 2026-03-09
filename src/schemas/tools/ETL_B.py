@@ -1134,6 +1134,57 @@ def _trace_has_tool_calls(trace: Trace) -> bool:
     return False
 
 
+def _enrich_trace_system_with_tools(
+    trace: Trace,
+    tokenizer,
+    tools: List[Dict[str, Any]],
+) -> None:
+    """Enrich trace's system message with tool definitions (in-place).
+
+    Uses the tokenizer's chat template to render tool definitions in the correct
+    format, then replaces the system message content. This ensures training data
+    includes tool definitions matching what eval produces via
+    ``tokenizer.apply_chat_template(messages, tools=tools)``.
+
+    Only modifies the trace if the tokenizer supports tool rendering.
+    """
+    # Find first system message
+    system_msg = None
+    for msg in trace.messages:
+        if msg.role == "system":
+            system_msg = msg
+            break
+    if system_msg is None:
+        return
+
+    original_content = system_msg.content or ""
+
+    try:
+        rendered = tokenizer.apply_chat_template(
+            [{"role": "system", "content": original_content}],
+            tools=tools,
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+    except TypeError:
+        return  # Tokenizer doesn't support tools=
+
+    # Extract enriched system content from rendered text.
+    # Llama format: <|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{content}<|eot_id|>
+    header_marker = f"{LLAMA_HEADER_END}\n\n"
+    header_pos = rendered.find(header_marker)
+    if header_pos < 0:
+        return
+
+    content_start = header_pos + len(header_marker)
+    eot_pos = rendered.rfind(LLAMA_EOT)
+    if eot_pos <= content_start:
+        return
+
+    enriched_content = rendered[content_start:eot_pos]
+    system_msg.content = enriched_content
+
+
 def render_trace(
     trace: Trace,
     tokenizer,
@@ -1143,6 +1194,7 @@ def render_trace(
     chat_template: Optional[str] = None,
     force_llama_format: bool = False,
     preserve_formatting: bool = False,
+    tools: Optional[List[Dict[str, Any]]] = None,
 ) -> RenderedView:
     """
     Render a trace for a specific tokenizer.
@@ -1177,17 +1229,32 @@ def render_trace(
         and chat_template is None  # Only use manual if no custom template provided
     )
 
+    # When tools are provided, enrich the system message to include tool definitions
+    # so that training data format matches eval (which passes tools= to apply_chat_template).
+    if tools and use_manual_llama_rendering:
+        _enrich_trace_system_with_tools(trace, tokenizer, tools)
+
     if use_manual_llama_rendering:
         rendered_text = _render_trace_llama31_manual(
             trace, add_generation_prompt, preserve_formatting=should_preserve
         )
     else:
-        rendered_text = tokenizer.apply_chat_template(
-            chat_messages,
-            tokenize=False,
-            add_generation_prompt=add_generation_prompt,
-            chat_template=chat_template,
-        )
+        try:
+            rendered_text = tokenizer.apply_chat_template(
+                chat_messages,
+                tools=tools if tools else None,
+                tokenize=False,
+                add_generation_prompt=add_generation_prompt,
+                chat_template=chat_template,
+            )
+        except TypeError:
+            # Tokenizer doesn't support tools= parameter
+            rendered_text = tokenizer.apply_chat_template(
+                chat_messages,
+                tokenize=False,
+                add_generation_prompt=add_generation_prompt,
+                chat_template=chat_template,
+            )
 
     encoding = tokenizer(
         rendered_text,
@@ -1306,6 +1373,14 @@ def main() -> None:
              "Use for same-model replay (high fidelity). Without this flag (default), "
              "tool calls are re-rendered for the target model (cross-model compatible)."
     )
+    parser.add_argument(
+        "--tool-schema",
+        type=Path,
+        default=None,
+        help="Tool schema JSON (same format as eval --tool-schema). When provided, "
+             "tool definitions are included in the rendered training data to match eval format. "
+             "Per-sample tool selection: only tools actually used in each trace are included.",
+    )
 
     args = parser.parse_args()
 
@@ -1358,9 +1433,23 @@ def main() -> None:
         except Exception:
             mwcs_registry = None
 
+    # Load tool schema for train/eval format consistency
+    schema_tools: List[Dict[str, Any]] = []
+    schema_tools_by_name: Dict[str, Dict[str, Any]] = {}
+    if args.tool_schema and args.tool_schema.exists():
+        with open(args.tool_schema) as f:
+            schema = json.load(f)
+        schema_tools = schema.get("tools", [])
+        schema_tools_by_name = {
+            (t.get("function") or {}).get("name"): t
+            for t in schema_tools
+            if (t.get("function") or {}).get("name")
+        }
+        logger.info("Loaded tool schema: %d tools from %s", len(schema_tools), args.tool_schema)
+
     renders: List[Dict[str, Any]] = []
     masks: List[Dict[str, Any]] = []
-    
+
     skipped_skeleton = 0
     processed = 0
 
@@ -1380,6 +1469,26 @@ def main() -> None:
             logger.debug("Skipping skeleton trace %s (use --allow-skeleton to process)", trace.id)
             continue
         
+        # Resolve per-sample tools from schema (match eval behavior)
+        sample_tools: Optional[List[Dict[str, Any]]] = None
+        if schema_tools_by_name:
+            used_names: set = set()
+            for msg in trace.messages:
+                if msg.tool_calls:
+                    for tc in msg.tool_calls:
+                        if tc.function and tc.function.name:
+                            used_names.add(tc.function.name)
+                if msg.role == "tool" and msg.name:
+                    used_names.add(msg.name)
+            if used_names:
+                sample_tools = [
+                    schema_tools_by_name[n]
+                    for n in sorted(used_names)
+                    if n in schema_tools_by_name
+                ]
+                if not sample_tools:
+                    sample_tools = None
+
         render = render_trace(
             trace,
             tokenizer,
@@ -1389,6 +1498,7 @@ def main() -> None:
             chat_template=chat_template,
             force_llama_format=args.force_llama_format,
             preserve_formatting=args.preserve_formatting,
+            tools=sample_tools,
         )
 
         # For skeleton traces with --allow-skeleton, override to skeleton_policy

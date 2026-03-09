@@ -139,6 +139,7 @@ FUJITSU_DR="$TRACES_DIR/fujitsu_b4_dr.jsonl"   # DR = retain set (benign counter
 AGENTDOJO_RAW="$TRACES_DIR/agentdojo_augmented.jsonl"
 PAIRS_SRC="$TRACES_DIR/contrastive_pairs.jsonl"
 TOOL_SCHEMA="$REPO_DIR/configs/tool_schemas/b4_standard_v1.json"
+AD_TOOL_SCHEMA="$REPO_DIR/configs/tool_schemas/agentdojo_v1.json"
 
 # Copy from repo if not on scratch yet (agentdojo)
 for src_name in agentdojo_augmented.jsonl; do
@@ -171,7 +172,8 @@ echo ""
 # Shared data directory (reused across concurrent loss-mode runs)
 # =============================================================================
 # Shared data is per-policy (lossmasks depend on policy; renders don't but are cheap)
-SHARED_DATA="$CB_SCRATCH/sweeps/shared_data_${POLICY}"
+# _ts suffix = tool-schema-aware rendering (invalidates old cache without tool defs)
+SHARED_DATA="$CB_SCRATCH/sweeps/shared_data_${POLICY}_ts"
 SWEEP_ID="s8_${LOSS_MODE}_${POLICY}_$(date +%Y%m%d_%H%M%S)"
 RUN_DIR="$CB_SCRATCH/sweeps/$SWEEP_ID/run"
 mkdir -p "$RUN_DIR"/{model,eval}
@@ -227,6 +229,14 @@ for src in "$FUJITSU_DS_SRC" "$FUJITSU_DR_SRC" "$AGENTDOJO_SRC"; do
     bn=$(basename "$src" .jsonl)
     render_out="$SHARED_DATA/renders/${bn}.jsonl"
     mask_out="$SHARED_DATA/lossmasks/${bn}.jsonl"
+
+    # Select correct tool schema per source (match eval --tool-schema)
+    if [[ "$bn" == *fujitsu* ]]; then
+        ETL_SCHEMA="$TOOL_SCHEMA"
+    else
+        ETL_SCHEMA="$AD_TOOL_SCHEMA"
+    fi
+
     if [[ -f "$render_out" ]] && [[ -s "$render_out" ]] && [[ -f "$mask_out" ]] && [[ -s "$mask_out" ]]; then
         echo "  $bn: REUSING existing ($(wc -l < "$render_out") renders)"
     else
@@ -238,7 +248,8 @@ for src in "$FUJITSU_DS_SRC" "$FUJITSU_DR_SRC" "$AGENTDOJO_SRC"; do
             --tokenizer "$TOKENIZER" \
             --max-length "$MAX_SEQ_LENGTH" \
             --policy-override "$POLICY" \
-            --pooling-policy-override "$POOLING_POLICY" 2>&1 | tail -3
+            --pooling-policy-override "$POOLING_POLICY" \
+            --tool-schema "$ETL_SCHEMA" 2>&1 | tail -3
     fi
 done
 
@@ -504,7 +515,7 @@ python src/evaluation/eval.py \
     --baseline "$TOKENIZER" \
     --cb-adapter "$ADAPTER_PATH" \
     --eval-data "$EVAL_DIR/ad_harmful_traces.jsonl" \
-    --tool-schema "$TOOL_SCHEMA" \
+    --tool-schema "$AD_TOOL_SCHEMA" \
     --output "$EVAL_DIR/agentdojo_eval.json" \
     --use-sample-context \
     --limit "$LIMIT_EVAL" \
@@ -526,7 +537,7 @@ python src/evaluation/eval.py \
     --baseline "$TOKENIZER" \
     --cb-adapter "$ADAPTER_PATH" \
     --eval-data "$EVAL_DIR/ad_benign_traces.jsonl" \
-    --tool-schema "$TOOL_SCHEMA" \
+    --tool-schema "$AD_TOOL_SCHEMA" \
     --output "$EVAL_DIR/agentdojo_benign_eval.json" \
     --use-sample-context \
     --limit "$LIMIT_EVAL" \
