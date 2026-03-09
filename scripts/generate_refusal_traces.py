@@ -85,7 +85,7 @@ def generate_refusal_traces(
             # Build new trace
             new_trace = {
                 "id": trace["id"] + "_refusal",
-                "source": {"dataset": "agentdojo_refusal_synthetic", "original_source": trace.get("source")},
+                "source": {"dataset": "synthetic", "tier": "derived", "subset": "refusal"},
                 "messages": context + [refusal_msg],
                 "labels": {
                     "category": "benign",
