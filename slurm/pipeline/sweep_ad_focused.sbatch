@@ -1,0 +1,887 @@
+#!/bin/bash
+#SBATCH --job-name=sweep_ad
+#SBATCH --nodes=1
+#SBATCH --gpus-per-node=1
+#SBATCH --cpus-per-task=24
+#SBATCH --time=06:00:00
+#SBATCH --output=/scratch/memoozd/cb-scratch/logs/%x_%j.out
+#SBATCH --error=/scratch/memoozd/cb-scratch/logs/%x_%j.err
+#SBATCH --account=def-zhijing
+
+# =============================================================================
+# SWEEP 9: AD-Focused Training Experiments
+# =============================================================================
+#
+# Motivation: Sweep 8 showed AgentDojo is immune to CB (0% delta across 10+
+# configs). Fujitsu drowns AD 3:1, 200 steps = 16% data coverage, and
+# training on truncated traces while evaluating on full-length may prevent
+# transfer. This sweep isolates these variables.
+#
+# All configs use the only loss that showed signal:
+#   per_token_cb + dl2rc + margin_free=false
+#
+# All configs eval on BOTH truncated AND full AD data (measures train/eval gap).
+#
+# Configs:
+#   CONFIG=ad_500           AD-only, 500 steps (~0.8 epochs)
+#   CONFIG=ad_1000          AD-only, 1000 steps (~1.6 epochs)
+#   CONFIG=ad_no_resisted   AD-only, 500 steps, resisted traces excluded from benign
+#   CONFIG=balanced_500     AD + Fujitsu (capped ~2500 each), 500 steps
+#   CONFIG=balanced_1000    AD + Fujitsu (capped ~2500 each), 1000 steps
+#
+# Usage:
+#   sbatch --export=ALL,CONFIG=ad_500 slurm/pipeline/sweep_ad_focused.sbatch
+#
+# Submit all (recommended):
+#   for c in ad_500 ad_1000 ad_no_resisted balanced_500 balanced_1000; do
+#     sbatch --export=ALL,CONFIG=$c slurm/pipeline/sweep_ad_focused.sbatch
+#   done
+#
+# Quick test:
+#   sbatch --export=ALL,CONFIG=ad_500,QUICK_TEST=true slurm/pipeline/sweep_ad_focused.sbatch
+# =============================================================================
+
+set -euo pipefail
+
+# ── Config presets ──────────────────────────────────────────────────────────
+
+CONFIG="${CONFIG:?ERROR: CONFIG is required. Valid: ad_500, ad_1000, ad_no_resisted, balanced_500, balanced_1000}"
+
+case "$CONFIG" in
+  ad_500)
+    DATASET=ad_only;  TOTAL_STEPS=500;  RESISTED=retain;  FUJITSU_CAP=0    ;;
+  ad_1000)
+    DATASET=ad_only;  TOTAL_STEPS=1000; RESISTED=retain;  FUJITSU_CAP=0    ;;
+  ad_no_resisted)
+    DATASET=ad_only;  TOTAL_STEPS=500;  RESISTED=exclude; FUJITSU_CAP=0    ;;
+  balanced_500)
+    DATASET=balanced; TOTAL_STEPS=500;  RESISTED=retain;  FUJITSU_CAP=2500 ;;
+  balanced_1000)
+    DATASET=balanced; TOTAL_STEPS=1000; RESISTED=retain;  FUJITSU_CAP=2500 ;;
+  *)
+    echo "ERROR: Unknown CONFIG=$CONFIG"
+    echo "Valid: ad_500, ad_1000, ad_no_resisted, balanced_500, balanced_1000"
+    exit 1 ;;
+esac
+
+# Allow env overrides for individual params
+TOTAL_STEPS="${TOTAL_STEPS}"
+RESISTED="${RESISTED}"
+FUJITSU_CAP="${FUJITSU_CAP}"
+
+# ── Environment ─────────────────────────────────────────────────────────────
+
+PROJECT_DIR="/project/def-zhijing/memoozd"
+CB_SCRATCH="/scratch/memoozd/cb-scratch"
+REPO_DIR="$PROJECT_DIR/rrfa"
+VENV_DIR="$PROJECT_DIR/.venvs/cb_env"
+
+cd "$REPO_DIR"
+
+module --force purge || true
+module load StdEnv/2023
+module load cuda/12.6
+module load python/3.11.5
+
+source "$VENV_DIR/bin/activate"
+
+# Cache (identical to sweep_completed_v1)
+CACHE_DIR="$CB_SCRATCH/cache"
+mkdir -p "$CACHE_DIR"/{hf/hub,hf/datasets,torch,wandb}
+export HF_HOME="$CACHE_DIR/hf"
+export HF_HUB_CACHE="$CACHE_DIR/hf/hub"
+export HF_DATASETS_CACHE="$CACHE_DIR/hf/datasets"
+export TORCH_HOME="$CACHE_DIR/torch"
+export WANDB_DIR="$CACHE_DIR/wandb"
+export TRITON_CACHE_DIR="$CACHE_DIR/triton"
+export XDG_CACHE_HOME="$CACHE_DIR"
+export DS_TRITON_CACHE_DIR="$TRITON_CACHE_DIR"
+mkdir -p "$TRITON_CACHE_DIR" "$TRITON_CACHE_DIR/autotune"
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export TQDM_DISABLE=1
+
+# ── Hyperparameters (locked — only config that showed signal in Sweep 8) ────
+
+QUICK_TEST="${QUICK_TEST:-false}"
+if [[ "$QUICK_TEST" == "true" ]]; then
+    TOTAL_STEPS=20; LIMIT_EVAL=5; NUM_EXAMPLES=2
+    echo "*** QUICK TEST MODE ***"
+else
+    LIMIT_EVAL=100; NUM_EXAMPLES=5
+fi
+
+LOSS_MODE=per_token_cb
+DISTANCE=dl2rc
+MARGIN_FREE=false
+BATCH_SIZE=4
+GRAD_ACCUM=2
+LEARNING_RATE=5e-5
+WARMUP_STEPS=20
+MAX_SEQ_LENGTH="${MAX_SEQ_LENGTH:-4096}"
+LORA_R=16
+LORA_ALPHA=32
+CB_LAYERS="10 20"
+POLICY=cb_full_sequence
+POOLING_POLICY=cb_full_sequence
+EVAL_MODE=next_tool_prediction
+PRESET=llama-3.1-8b-instruct
+ALPHA_MAX=10.0
+GAMMA_KL=0.3
+
+echo "========================================================"
+echo "SWEEP 9: AD-Focused — $CONFIG"
+echo "========================================================"
+echo "Job: ${SLURM_JOB_ID:-local} | $(date)"
+echo "Dataset: $DATASET | Steps: $TOTAL_STEPS | Resisted: $RESISTED"
+echo "Fujitsu cap: $FUJITSU_CAP | Seq len: $MAX_SEQ_LENGTH"
+echo "Loss: $LOSS_MODE | Distance: $DISTANCE | margin_free: $MARGIN_FREE"
+echo ""
+
+# ── Data size estimates ─────────────────────────────────────────────────────
+
+_eff_batch=$((BATCH_SIZE * GRAD_ACCUM))
+if [[ "$DATASET" == "ad_only" ]]; then
+    _harmful_est=2500
+else
+    _harmful_est=$((2500 + FUJITSU_CAP))
+fi
+_samples=$((TOTAL_STEPS * _eff_batch))
+_epochs_x10=$(( (_samples * 10) / _harmful_est ))
+echo "  Estimated: ${_samples} samples, ~${_epochs_x10%?}.${_epochs_x10: -1} epochs of harmful data"
+echo ""
+
+# ── Resolve tokenizer ──────────────────────────────────────────────────────
+
+MODEL_ID="${MODEL_ID:-meta-llama/Llama-3.1-8B-Instruct}"
+MODEL_CACHE_NAME=$(echo "$MODEL_ID" | sed 's/\//--/g')
+SNAPSHOT_ROOT="$CACHE_DIR/hf/hub/models--${MODEL_CACHE_NAME}/snapshots"
+TOKENIZER=$(ls -1td "$SNAPSHOT_ROOT"/* 2>/dev/null | head -n 1)
+if [[ -z "$TOKENIZER" ]]; then
+    echo "ERROR: Model not cached. Run slurm/cache_models.sh first."; exit 1
+fi
+echo "Tokenizer: $TOKENIZER"
+
+# ── Input data ──────────────────────────────────────────────────────────────
+
+TRACES_DIR="$CB_SCRATCH/data/traces"
+FUJITSU_DS="$TRACES_DIR/fujitsu_b4_ds.jsonl"
+FUJITSU_DR="$TRACES_DIR/fujitsu_b4_dr.jsonl"
+AGENTDOJO_RAW="$TRACES_DIR/agentdojo_augmented.jsonl"
+PAIRS_SRC="$TRACES_DIR/contrastive_pairs.jsonl"
+TOOL_SCHEMA="$REPO_DIR/configs/tool_schemas/b4_standard_v1.json"
+
+# Copy from repo if not on scratch
+for src_name in agentdojo_augmented.jsonl; do
+    if [[ ! -f "$TRACES_DIR/$src_name" ]] && [[ -f "$REPO_DIR/data/traces/$src_name" ]]; then
+        echo "  Copying $src_name to scratch..."
+        cp "$REPO_DIR/data/traces/$src_name" "$TRACES_DIR/$src_name"
+    fi
+done
+
+# Generate contrastive pairs if missing
+if [[ ! -f "$PAIRS_SRC" ]]; then
+    echo "  Generating contrastive pairs..."
+    python "$REPO_DIR/scripts/augment_agentdojo.py" \
+        --traces-input "$AGENTDOJO_RAW" \
+        --operations removal,contrastive \
+        --contrastive-output "$PAIRS_SRC" \
+        --output "$CB_SCRATCH/data/traces/_augment_temp.jsonl" 2>&1 | tail -5
+    rm -f "$CB_SCRATCH/data/traces/_augment_temp.jsonl"
+fi
+
+# Verify required files exist
+_required_files=("$AGENTDOJO_RAW" "$PAIRS_SRC")
+if [[ "$DATASET" == "balanced" ]]; then
+    _required_files+=("$FUJITSU_DS" "$FUJITSU_DR")
+fi
+for f in "${_required_files[@]}"; do
+    if [[ ! -f "$f" ]]; then
+        echo "ERROR: Missing $(basename "$f")"; exit 1
+    fi
+    echo "  $(basename "$f"): $(wc -l < "$f") lines"
+done
+echo ""
+
+# ── Output directories ──────────────────────────────────────────────────────
+
+# Shared ETL_B outputs (per-policy, reusable across configs)
+SHARED_DATA="$CB_SCRATCH/sweeps/s9_shared_${POLICY}"
+# Split outputs depend on resisted handling
+SPLIT_DIR="$SHARED_DATA/split_agentdojo_${RESISTED}"
+
+SWEEP_ID="s9_${CONFIG}_$(date +%Y%m%d_%H%M%S)"
+RUN_DIR="$CB_SCRATCH/sweeps/$SWEEP_ID/run"
+mkdir -p "$RUN_DIR"/{model,eval}
+mkdir -p "$SHARED_DATA"/{renders,lossmasks}
+mkdir -p "$SPLIT_DIR"
+
+echo "Shared data: $SHARED_DATA"
+echo "Split dir:   $SPLIT_DIR"
+echo "Run output:  $RUN_DIR"
+echo ""
+
+# =============================================================================
+# Step 0: Data preparation
+# =============================================================================
+echo "========================================================"
+echo "Step 0: Data preparation"
+echo "========================================================"
+gen_start=$(date +%s)
+
+AGENTDOJO_SRC="$SHARED_DATA/agentdojo_truncated.jsonl"
+
+if [[ -f "$AGENTDOJO_SRC" ]] && [[ -s "$AGENTDOJO_SRC" ]]; then
+    echo "  AgentDojo truncated: REUSING existing ($(wc -l < "$AGENTDOJO_SRC") lines)"
+else
+    echo "  Truncating AgentDojo to injection window..."
+    python "$REPO_DIR/scripts/truncate_to_injection_window.py" \
+        --input "$AGENTDOJO_RAW" \
+        --output "$AGENTDOJO_SRC" 2>&1 | tail -5
+fi
+
+for f in "$AGENTDOJO_SRC"; do
+    if [[ ! -f "$f" ]] || [[ ! -s "$f" ]]; then
+        echo "ERROR: Data generation failed for $(basename "$f")"; exit 1
+    fi
+    echo "  $(basename "$f"): $(wc -l < "$f") lines"
+done
+
+echo "  Data preparation done ($(( $(date +%s) - gen_start ))s)"
+echo ""
+
+# =============================================================================
+# Step 1: ETL_B (render + lossmask)
+# =============================================================================
+echo "========================================================"
+echo "Step 1: ETL_B"
+echo "========================================================"
+etl_start=$(date +%s)
+
+# Always process AgentDojo
+ETL_SOURCES=("$AGENTDOJO_SRC")
+
+# Process Fujitsu only if needed
+if [[ "$DATASET" == "balanced" ]]; then
+    ETL_SOURCES+=("$FUJITSU_DS" "$FUJITSU_DR")
+fi
+
+for src in "${ETL_SOURCES[@]}"; do
+    bn=$(basename "$src" .jsonl)
+    render_out="$SHARED_DATA/renders/${bn}.jsonl"
+    mask_out="$SHARED_DATA/lossmasks/${bn}.jsonl"
+    if [[ -f "$render_out" ]] && [[ -s "$render_out" ]] && [[ -f "$mask_out" ]] && [[ -s "$mask_out" ]]; then
+        echo "  $bn: REUSING existing ($(wc -l < "$render_out") renders)"
+    else
+        echo "  $bn (policy=$POLICY)..."
+        python src/schemas/tools/ETL_B.py \
+            --traces "$src" \
+            --render-out "$render_out" \
+            --lossmask-out "$mask_out" \
+            --tokenizer "$TOKENIZER" \
+            --max-length "$MAX_SEQ_LENGTH" \
+            --policy-override "$POLICY" \
+            --pooling-policy-override "$POOLING_POLICY" 2>&1 | tail -3
+    fi
+done
+
+echo "  ETL_B done ($(( $(date +%s) - etl_start ))s)"
+
+# Lossmask coverage summary
+echo ""
+echo "  Lossmask coverage:"
+for lm in "$SHARED_DATA/lossmasks"/*.jsonl; do
+    if [[ -f "$lm" ]]; then
+        python3 -c "
+import json
+total_samples = 0; zero_samples = 0; total_ratio = 0
+with open('$lm') as f:
+    for line in f:
+        if not line.strip(): continue
+        d = json.loads(line)
+        s = d.get('stats', {})
+        total_samples += 1
+        ratio = s.get('mask_ratio', 0)
+        total_ratio += ratio
+        if ratio == 0:
+            zero_samples += 1
+avg = total_ratio / total_samples if total_samples > 0 else 0
+print(f'    $(basename "$lm"): {total_samples} samples, avg_coverage={avg:.1%}, zero_mask={zero_samples}')
+" 2>/dev/null
+    fi
+done
+
+echo ""
+
+# =============================================================================
+# Step 2: Split AgentDojo + optional Fujitsu downsampling
+# =============================================================================
+echo "========================================================"
+echo "Step 2: Split & downsample (resisted=$RESISTED)"
+echo "========================================================"
+
+# ── 2a: Split AgentDojo ─────────────────────────────────────────────────────
+
+if [[ -s "$SPLIT_DIR/agentdojo_renders_harmful.jsonl" ]] && \
+   [[ -s "$SPLIT_DIR/agentdojo_renders_benign.jsonl" ]] && \
+   [[ -s "$SPLIT_DIR/agentdojo_lossmasks_harmful.jsonl" ]] && \
+   [[ -s "$SPLIT_DIR/agentdojo_lossmasks_benign.jsonl" ]]; then
+    echo "  AgentDojo split: REUSING existing"
+else
+    echo "  Splitting AgentDojo (resisted_handling=$RESISTED)..."
+    python "$REPO_DIR/scripts/split_agentdojo.py" \
+        --traces "$AGENTDOJO_SRC" \
+        --renders "$SHARED_DATA/renders/agentdojo_truncated.jsonl" \
+        --lossmasks "$SHARED_DATA/lossmasks/agentdojo_truncated.jsonl" \
+        --output-dir "$SPLIT_DIR" \
+        --resisted-handling "$RESISTED" \
+        --legacy-harmful-naming 2>&1 | tail -5
+fi
+
+echo "  AD harmful renders: $(wc -l < "$SPLIT_DIR/agentdojo_renders_harmful.jsonl") lines"
+echo "  AD benign renders:  $(wc -l < "$SPLIT_DIR/agentdojo_renders_benign.jsonl") lines"
+
+# ── 2b: Downsample Fujitsu (balanced mode only) ─────────────────────────────
+
+if [[ "$DATASET" == "balanced" ]] && [[ "$FUJITSU_CAP" -gt 0 ]]; then
+    CAPPED_DIR="$SHARED_DATA/fujitsu_capped_${FUJITSU_CAP}"
+    mkdir -p "$CAPPED_DIR"
+
+    if [[ -s "$CAPPED_DIR/fujitsu_b4_ds_renders.jsonl" ]] && \
+       [[ -s "$CAPPED_DIR/fujitsu_b4_ds_lossmasks.jsonl" ]] && \
+       [[ -s "$CAPPED_DIR/fujitsu_b4_dr_renders.jsonl" ]] && \
+       [[ -s "$CAPPED_DIR/fujitsu_b4_dr_lossmasks.jsonl" ]]; then
+        echo "  Fujitsu capped: REUSING existing"
+    else
+        echo "  Downsampling Fujitsu to $FUJITSU_CAP per split..."
+        python3 - "$FUJITSU_CAP" \
+            "$SHARED_DATA/renders/fujitsu_b4_ds.jsonl" \
+            "$SHARED_DATA/lossmasks/fujitsu_b4_ds.jsonl" \
+            "$CAPPED_DIR/fujitsu_b4_ds_renders.jsonl" \
+            "$CAPPED_DIR/fujitsu_b4_ds_lossmasks.jsonl" \
+            "$SHARED_DATA/renders/fujitsu_b4_dr.jsonl" \
+            "$SHARED_DATA/lossmasks/fujitsu_b4_dr.jsonl" \
+            "$CAPPED_DIR/fujitsu_b4_dr_renders.jsonl" \
+            "$CAPPED_DIR/fujitsu_b4_dr_lossmasks.jsonl" \
+            << 'DOWNSAMPLE'
+import random, sys
+
+random.seed(42)
+cap = int(sys.argv[1])
+
+# Process DS (harmful) and DR (benign) pairs
+for i in range(2):
+    base = 2 + i * 4
+    renders_in   = sys.argv[base]
+    lossmasks_in = sys.argv[base + 1]
+    renders_out  = sys.argv[base + 2]
+    lossmasks_out = sys.argv[base + 3]
+
+    with open(renders_in) as f:
+        render_lines = [l for l in f if l.strip()]
+    with open(lossmasks_in) as f:
+        mask_lines = [l for l in f if l.strip()]
+
+    assert len(render_lines) == len(mask_lines), \
+        f"Misaligned: {len(render_lines)} renders vs {len(mask_lines)} masks"
+
+    n = len(render_lines)
+    if n <= cap:
+        indices = list(range(n))
+    else:
+        indices = sorted(random.sample(range(n), cap))
+
+    with open(renders_out, 'w') as f:
+        for idx in indices:
+            f.write(render_lines[idx])
+    with open(lossmasks_out, 'w') as f:
+        for idx in indices:
+            f.write(mask_lines[idx])
+
+    label = "DS (harmful)" if i == 0 else "DR (benign)"
+    print(f"  Fujitsu {label}: {len(indices)}/{n} (cap={cap})")
+DOWNSAMPLE
+    fi
+
+    echo "  Fujitsu DS capped: $(wc -l < "$CAPPED_DIR/fujitsu_b4_ds_renders.jsonl") renders"
+    echo "  Fujitsu DR capped: $(wc -l < "$CAPPED_DIR/fujitsu_b4_dr_renders.jsonl") renders"
+fi
+
+echo ""
+
+# =============================================================================
+# Step 3: Assemble training data args
+# =============================================================================
+
+# AD data (always present)
+HARMFUL_RENDERS=("$SPLIT_DIR/agentdojo_renders_harmful.jsonl")
+HARMFUL_LOSSMASKS=("$SPLIT_DIR/agentdojo_lossmasks_harmful.jsonl")
+BENIGN_RENDERS=("$SPLIT_DIR/agentdojo_renders_benign.jsonl")
+BENIGN_LOSSMASKS=("$SPLIT_DIR/agentdojo_lossmasks_benign.jsonl")
+
+# Add capped Fujitsu (balanced mode only)
+if [[ "$DATASET" == "balanced" ]] && [[ "$FUJITSU_CAP" -gt 0 ]]; then
+    CAPPED_DIR="$SHARED_DATA/fujitsu_capped_${FUJITSU_CAP}"
+    HARMFUL_RENDERS+=("$CAPPED_DIR/fujitsu_b4_ds_renders.jsonl")
+    HARMFUL_LOSSMASKS+=("$CAPPED_DIR/fujitsu_b4_ds_lossmasks.jsonl")
+    BENIGN_RENDERS+=("$CAPPED_DIR/fujitsu_b4_dr_renders.jsonl")
+    BENIGN_LOSSMASKS+=("$CAPPED_DIR/fujitsu_b4_dr_lossmasks.jsonl")
+fi
+
+echo "========================================================"
+echo "Step 3: Training ($CONFIG, $TOTAL_STEPS steps)"
+echo "========================================================"
+echo "  Harmful files: ${#HARMFUL_RENDERS[@]}"
+for f in "${HARMFUL_RENDERS[@]}"; do echo "    $(basename "$f"): $(wc -l < "$f") lines"; done
+echo "  Benign files: ${#BENIGN_RENDERS[@]}"
+for f in "${BENIGN_RENDERS[@]}"; do echo "    $(basename "$f"): $(wc -l < "$f") lines"; done
+echo ""
+
+train_start=$(date +%s)
+
+python src/training/train_schema.py \
+    --preset "$PRESET" \
+    --model "$TOKENIZER" \
+    --output-dir "$RUN_DIR/model" \
+    --total-steps "$TOTAL_STEPS" \
+    --batch-size "$BATCH_SIZE" \
+    --learning-rate "$LEARNING_RATE" \
+    --warmup-steps "$WARMUP_STEPS" \
+    --alpha-max "$ALPHA_MAX" \
+    --max-seq-length "$MAX_SEQ_LENGTH" \
+    --gradient-accumulation-steps "$GRAD_ACCUM" \
+    --loss-mode "$LOSS_MODE" \
+    --loss-weighting dual \
+    --triplet-alpha-benign 0.5 \
+    --triplet-beta-harmful 0.4 \
+    --triplet-gamma-kl "$GAMMA_KL" \
+    --triplet-margin-benign 1.2 \
+    --triplet-margin-harmful 1.6 \
+    --triplet-benign-positive-distance "$DISTANCE" \
+    --triplet-benign-negative-distance "$DISTANCE" \
+    --triplet-harmful-positive-distance "$DISTANCE" \
+    --triplet-harmful-negative-distance "$DISTANCE" \
+    --triplet-mix-l2-weight 0.5 \
+    --triplet-mix-cos-weight 0.5 \
+    --pooling-mode correct \
+    --pooling-mask-policy auto \
+    --lora-r "$LORA_R" \
+    --lora-alpha "$LORA_ALPHA" \
+    --lora-dropout 0.05 \
+    --logging-steps 10 \
+    --save-steps 9999 \
+    --no-wandb \
+    --cb-target-layers $CB_LAYERS \
+    --mode mixed \
+    --harmful-renders "${HARMFUL_RENDERS[@]}" \
+    --harmful-lossmasks "${HARMFUL_LOSSMASKS[@]}" \
+    --benign-renders "${BENIGN_RENDERS[@]}" \
+    --benign-lossmasks "${BENIGN_LOSSMASKS[@]}" \
+    --contrastive-pairs "$PAIRS_SRC" \
+    > "$RUN_DIR/train.log" 2>&1
+
+train_status=$?
+train_mins=$(( ($(date +%s) - train_start) / 60 ))
+if [[ $train_status -eq 0 ]]; then
+    echo "  Training SUCCESS (${train_mins}m)"
+else
+    echo "  Training FAILED (${train_mins}m)"
+    tail -20 "$RUN_DIR/train.log" | sed 's/^/    /'
+    exit 1
+fi
+
+# Training history summary
+echo ""
+echo "  Training history:"
+python3 - "$RUN_DIR/train.log" << 'TRAINDIAG'
+import re, sys
+
+log_path = sys.argv[1] if len(sys.argv) > 1 else ""
+if not log_path:
+    sys.exit(0)
+
+steps = []
+with open(log_path) as f:
+    for line in f:
+        m = re.search(r'\[Step (\d+)\](.+)', line)
+        if m:
+            step = int(m.group(1))
+            rest = m.group(2).strip()
+            steps.append((step, rest))
+        gm = re.search(r'grad_norm=([0-9.e+-]+)', line)
+        if gm and steps:
+            steps[-1] = (steps[-1][0], steps[-1][1] + f" grad={gm.group(1)}")
+
+if not steps:
+    with open(log_path) as f:
+        for line in f:
+            m = re.search(r'step[= ]+(\d+).*?loss[= ]+([0-9.e+-]+)', line, re.IGNORECASE)
+            if m:
+                steps.append((int(m.group(1)), f"loss={m.group(2)}"))
+
+if steps:
+    print(f"    Steps logged: {len(steps)}")
+    for label, idx in [("First", 0), ("Mid", len(steps)//2), ("Last", -1)]:
+        s, info = steps[idx]
+        print(f"    {label:5s} (step {s:>4d}): {info[:150]}")
+
+    with open(log_path) as f:
+        warns = [l.strip() for l in f if 'WARNING' in l and 'grad_norm' in l]
+    if warns:
+        print(f"    ⚠ Zero gradient warnings: {len(warns)}")
+else:
+    print("    No step diagnostics found in log")
+TRAINDIAG
+echo ""
+
+# Save run config
+cat > "$RUN_DIR/run_config.json" << RUNCFG
+{
+  "sweep": "9_ad_focused",
+  "config": "$CONFIG",
+  "dataset": "$DATASET",
+  "loss_mode": "$LOSS_MODE",
+  "distance": "$DISTANCE",
+  "policy": "$POLICY",
+  "cb_layers": "$CB_LAYERS",
+  "lora_layers": "all",
+  "total_steps": $TOTAL_STEPS,
+  "batch_size": $BATCH_SIZE,
+  "grad_accum": $GRAD_ACCUM,
+  "effective_batch": $(( BATCH_SIZE * GRAD_ACCUM )),
+  "learning_rate": "$LEARNING_RATE",
+  "gamma_kl": $GAMMA_KL,
+  "alpha_max": $ALPHA_MAX,
+  "lora_r": $LORA_R,
+  "lora_alpha": $LORA_ALPHA,
+  "margin_free": false,
+  "max_seq_length": $MAX_SEQ_LENGTH,
+  "resisted_handling": "$RESISTED",
+  "fujitsu_cap": $FUJITSU_CAP,
+  "eval_mode": "$EVAL_MODE",
+  "model": "$TOKENIZER",
+  "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "job_id": "${SLURM_JOB_ID:-local}"
+}
+RUNCFG
+
+# =============================================================================
+# Step 4: Evaluation
+# =============================================================================
+echo "========================================================"
+echo "Step 4: Evaluation"
+echo "========================================================"
+
+# Find adapter
+if [[ -d "$RUN_DIR/model/final" ]]; then
+    ADAPTER_PATH="$RUN_DIR/model/final"
+elif [[ -f "$RUN_DIR/model/adapter_config.json" ]]; then
+    ADAPTER_PATH="$RUN_DIR/model"
+else
+    echo "ERROR: No adapter found"; exit 1
+fi
+
+EVAL_DIR="$RUN_DIR/eval/$EVAL_MODE"
+mkdir -p "$EVAL_DIR"
+
+DS_TRACES="$TRACES_DIR/fujitsu_b4_ds.jsonl"
+AGENTDOJO_EVAL_FULL="$TRACES_DIR/agentdojo_augmented.jsonl"
+AGENTDOJO_EVAL_TRUNC="$AGENTDOJO_SRC"  # same truncated file used for training
+
+# ── 4a: Fujitsu eval (always — measures Fujitsu regression/improvement) ─────
+
+echo "  [4a] Fujitsu eval..."
+python src/evaluation/eval.py \
+    --baseline "$TOKENIZER" \
+    --cb-adapter "$ADAPTER_PATH" \
+    --eval-data "$DS_TRACES" \
+    --tool-schema "$TOOL_SCHEMA" \
+    --output "$EVAL_DIR/fujitsu_eval.json" \
+    --limit "$LIMIT_EVAL" \
+    --merge-adapter \
+    --eval-mode "$EVAL_MODE" \
+    --dtype bfloat16 >> "$EVAL_DIR/fujitsu.log" 2>&1
+
+if [[ -f "$EVAL_DIR/fujitsu_eval.json" ]]; then
+    python3 -c "
+import json
+with open('$EVAL_DIR/fujitsu_eval.json') as f: r = json.load(f)
+for lbl, k in [('Baseline','baseline'),('CB','cb_model')]:
+    tf = r.get(k,{}).get('tool_flip_asr',{})
+    if tf:
+        print(f'    {lbl}: ASR={tf.get(\"attack_success_rate\",0):.0%} correct={tf.get(\"correct_tool_call_rate\",0):.0%} no_tool={tf.get(\"no_tool_call_rate\",0):.0%}')
+"
+fi
+
+# ── 4b: AD harmful eval on FULL traces (measures real-world transfer) ───────
+
+echo ""
+echo "  [4b] AD harmful eval (full traces)..."
+
+# Split full traces on the fly
+python3 -c "
+import json
+harmful, benign = [], []
+for line in open('$AGENTDOJO_EVAL_FULL'):
+    t = json.loads(line)
+    cat = t.get('labels',{}).get('category','')
+    if cat == 'harmful': harmful.append(line)
+    else: benign.append(line)
+with open('$EVAL_DIR/ad_harmful_full.jsonl','w') as f: f.writelines(harmful)
+with open('$EVAL_DIR/ad_benign_full.jsonl','w') as f: f.writelines(benign)
+print(f'    AD full split: {len(harmful)} harmful, {len(benign)} benign')
+"
+
+python src/evaluation/eval.py \
+    --baseline "$TOKENIZER" \
+    --cb-adapter "$ADAPTER_PATH" \
+    --eval-data "$EVAL_DIR/ad_harmful_full.jsonl" \
+    --tool-schema "$TOOL_SCHEMA" \
+    --output "$EVAL_DIR/agentdojo_harmful_full_eval.json" \
+    --use-sample-context \
+    --limit "$LIMIT_EVAL" \
+    --merge-adapter \
+    --eval-mode "$EVAL_MODE" \
+    --dtype bfloat16 >> "$EVAL_DIR/agentdojo_harmful_full.log" 2>&1
+
+if [[ -f "$EVAL_DIR/agentdojo_harmful_full_eval.json" ]]; then
+    python3 -c "
+import json
+with open('$EVAL_DIR/agentdojo_harmful_full_eval.json') as f: r = json.load(f)
+cb = r.get('cb_model',{}).get('generation_comparison',{})
+if cb: print(f'    AD Harmful (full): resist={cb.get(\"harmful_resistance_rate\",0):.0%} malicious={cb.get(\"malicious_tool_call_rate\",0):.0%}')
+"
+fi
+
+# ── 4c: AD harmful eval on TRUNCATED traces (measures CB learning capacity) ─
+
+echo ""
+echo "  [4c] AD harmful eval (truncated — matches training format)..."
+
+# Split truncated traces on the fly
+python3 -c "
+import json
+harmful, benign = [], []
+for line in open('$AGENTDOJO_EVAL_TRUNC'):
+    t = json.loads(line)
+    cat = t.get('labels',{}).get('category','')
+    if cat == 'harmful': harmful.append(line)
+    else: benign.append(line)
+with open('$EVAL_DIR/ad_harmful_trunc.jsonl','w') as f: f.writelines(harmful)
+with open('$EVAL_DIR/ad_benign_trunc.jsonl','w') as f: f.writelines(benign)
+print(f'    AD trunc split: {len(harmful)} harmful, {len(benign)} benign')
+"
+
+python src/evaluation/eval.py \
+    --baseline "$TOKENIZER" \
+    --cb-adapter "$ADAPTER_PATH" \
+    --eval-data "$EVAL_DIR/ad_harmful_trunc.jsonl" \
+    --tool-schema "$TOOL_SCHEMA" \
+    --output "$EVAL_DIR/agentdojo_harmful_trunc_eval.json" \
+    --use-sample-context \
+    --limit "$LIMIT_EVAL" \
+    --merge-adapter \
+    --eval-mode "$EVAL_MODE" \
+    --dtype bfloat16 >> "$EVAL_DIR/agentdojo_harmful_trunc.log" 2>&1
+
+if [[ -f "$EVAL_DIR/agentdojo_harmful_trunc_eval.json" ]]; then
+    python3 -c "
+import json
+with open('$EVAL_DIR/agentdojo_harmful_trunc_eval.json') as f: r = json.load(f)
+cb = r.get('cb_model',{}).get('generation_comparison',{})
+if cb: print(f'    AD Harmful (trunc): resist={cb.get(\"harmful_resistance_rate\",0):.0%} malicious={cb.get(\"malicious_tool_call_rate\",0):.0%}')
+"
+fi
+
+# ── 4d: AD benign eval (capability preservation) ────────────────────────────
+
+echo ""
+echo "  [4d] AD benign eval..."
+python src/evaluation/eval.py \
+    --baseline "$TOKENIZER" \
+    --cb-adapter "$ADAPTER_PATH" \
+    --eval-data "$EVAL_DIR/ad_benign_full.jsonl" \
+    --tool-schema "$TOOL_SCHEMA" \
+    --output "$EVAL_DIR/agentdojo_benign_eval.json" \
+    --use-sample-context \
+    --limit "$LIMIT_EVAL" \
+    --merge-adapter \
+    --eval-mode "$EVAL_MODE" \
+    --dtype bfloat16 >> "$EVAL_DIR/agentdojo_benign.log" 2>&1
+
+if [[ -f "$EVAL_DIR/agentdojo_benign_eval.json" ]]; then
+    python3 -c "
+import json
+with open('$EVAL_DIR/agentdojo_benign_eval.json') as f: r = json.load(f)
+cb = r.get('cb_model',{}).get('generation_comparison',{})
+if cb: print(f'    AD Benign: correct={cb.get(\"correct_tool_call_rate\",0):.0%} no_tool={cb.get(\"no_tool_call_rate\",0):.0%}')
+"
+fi
+
+# =============================================================================
+# Examples (paired output comparisons)
+# =============================================================================
+echo ""
+echo "========================================================"
+echo "EXAMPLES ($CONFIG)"
+echo "========================================================"
+
+# Fujitsu examples
+FUJITSU_PAIRED="$EVAL_DIR/fujitsu_eval.paired_outputs.jsonl"
+if [[ -f "$FUJITSU_PAIRED" ]]; then
+    python3 - "$FUJITSU_PAIRED" "$NUM_EXAMPLES" << 'FUJEX'
+import json, sys
+
+paired_path = sys.argv[1]
+num_ex = int(sys.argv[2]) if len(sys.argv) > 2 else 3
+
+with open(paired_path) as f:
+    pairs = [json.loads(l) for l in f if l.strip()]
+
+def gib(r):
+    if not r: return False
+    w = r.split()
+    return len(w) > 10 and len(set(w))/len(w) < 0.15
+
+imps = [p for p in pairs if p.get('baseline_outcome')=='attack_success' and p.get('cb_outcome')!='attack_success']
+regs = [p for p in pairs if p.get('baseline_outcome')!='attack_success' and p.get('cb_outcome')=='attack_success']
+n_cor = sum(1 for p in pairs if p.get('cb_outcome')=='correct_behavior')
+n_atk = sum(1 for p in pairs if p.get('cb_outcome')=='attack_success')
+n_nt = sum(1 for p in pairs if p.get('cb_outcome')=='no_tool_call')
+n_gib = sum(1 for p in pairs if gib(p.get('cb_response','')))
+
+print(f'  Fujitsu: {len(pairs)} pairs | improved={len(imps)} regressed={len(regs)}')
+print(f'  CB outcomes: correct={n_cor} attack={n_atk} no_tool={n_nt} gib={n_gib}')
+print()
+
+for i, p in enumerate((imps+regs)[:num_ex], 1):
+    lbl = 'IMP' if p.get('baseline_outcome')=='attack_success' else 'REG'
+    g = ' [GIB]' if gib(p.get('cb_response','')) else ''
+    print(f'  [{i}] {lbl}: {p.get("baseline_outcome","?")} -> {p.get("cb_outcome","?")}{g}')
+    print(f'      expected={p.get("expected_tool","?")} simulated={p.get("simulated_tool","?")}')
+    print(f'  BASELINE: {(p.get("baseline_response") or "(empty)")[:250]}')
+    print(f'  CB MODEL: {(p.get("cb_response") or "(empty)")[:250]}')
+    print()
+FUJEX
+fi
+
+# AD examples (truncated — shows what the model trained on)
+AD_TRUNC_PAIRED="$EVAL_DIR/agentdojo_harmful_trunc_eval.paired_outputs.jsonl"
+if [[ -f "$AD_TRUNC_PAIRED" ]]; then
+    python3 - "$AD_TRUNC_PAIRED" "$NUM_EXAMPLES" << 'ADEX'
+import json, sys
+
+paired_path = sys.argv[1]
+num_ex = int(sys.argv[2]) if len(sys.argv) > 2 else 3
+
+with open(paired_path) as f:
+    pairs = [json.loads(l) for l in f if l.strip()]
+
+n_ok = sum(1 for p in pairs if p.get('cb_observed_tool'))
+n_brk = sum(1 for p in pairs if not p.get('cb_observed_tool'))
+
+print(f'  AD Harmful (trunc): {len(pairs)} pairs | tool_ok={n_ok} broken={n_brk}')
+print()
+
+# Show cases where CB changed behavior
+changed = [p for p in pairs if p.get('baseline_observed_tool') != p.get('cb_observed_tool')]
+if changed:
+    print(f'  Changed behavior ({len(changed)} cases):')
+    for i, p in enumerate(changed[:num_ex], 1):
+        print(f'  [{i}] {p.get("baseline_observed_tool","none")} -> {p.get("cb_observed_tool","none")}')
+        print(f'  CB MODEL: {(p.get("cb_response") or "(empty)")[:250]}')
+        print()
+ADEX
+fi
+
+# Generate run summary if script exists
+if [[ -f "$REPO_DIR/scripts/generate_run_summary.py" ]]; then
+    python "$REPO_DIR/scripts/generate_run_summary.py" --run-dir "$RUN_DIR" 2>&1 || true
+fi
+
+# =============================================================================
+# Summary
+# =============================================================================
+echo ""
+echo "========================================================"
+echo "RESULTS SUMMARY — $CONFIG"
+echo "========================================================"
+
+python3 - "$RUN_DIR" "$CONFIG" "$TOTAL_STEPS" "$DATASET" "$RESISTED" "$FUJITSU_CAP" << 'SUMMARY'
+import json, os, sys
+
+run_dir = sys.argv[1]
+config = sys.argv[2]
+steps = sys.argv[3]
+dataset = sys.argv[4]
+resisted = sys.argv[5]
+fujitsu_cap = sys.argv[6]
+
+fmt = lambda v: f"{v:.0%}" if isinstance(v, (int, float)) and v >= 0 else "n/a"
+
+print(f"  Config: {config} | dataset={dataset} | steps={steps} | resisted={resisted} | fuj_cap={fujitsu_cap}")
+print()
+
+eval_base = os.path.join(run_dir, "eval", "next_tool_prediction")
+
+# Fujitsu
+fuj_path = os.path.join(eval_base, "fujitsu_eval.json")
+if os.path.isfile(fuj_path):
+    with open(fuj_path) as f:
+        r = json.load(f)
+    bl = r.get("baseline", {}).get("tool_flip_asr", {})
+    cb = r.get("cb_model", {}).get("tool_flip_asr", {})
+    if bl and cb:
+        delta = cb.get('attack_success_rate', 0) - bl.get('attack_success_rate', 0)
+        print(f"  Fujitsu: BL={fmt(bl.get('attack_success_rate', -1))} CB={fmt(cb.get('attack_success_rate', -1))} Δ={delta:+.0%}")
+
+# AD Harmful — full traces
+adh_full = os.path.join(eval_base, "agentdojo_harmful_full_eval.json")
+if os.path.isfile(adh_full):
+    with open(adh_full) as f:
+        r = json.load(f)
+    bl = r.get("baseline", {}).get("generation_comparison", {})
+    cb = r.get("cb_model", {}).get("generation_comparison", {})
+    bl_m = bl.get("malicious_tool_call_rate", -1) if bl else -1
+    cb_m = cb.get("malicious_tool_call_rate", -1) if cb else -1
+    delta = cb_m - bl_m if bl_m >= 0 and cb_m >= 0 else 0
+    print(f"  AD Harmful (full):  BL_mal={fmt(bl_m)} CB_mal={fmt(cb_m)} Δ={delta:+.0%}")
+
+# AD Harmful — truncated traces (training format)
+adh_trunc = os.path.join(eval_base, "agentdojo_harmful_trunc_eval.json")
+if os.path.isfile(adh_trunc):
+    with open(adh_trunc) as f:
+        r = json.load(f)
+    bl = r.get("baseline", {}).get("generation_comparison", {})
+    cb = r.get("cb_model", {}).get("generation_comparison", {})
+    bl_m = bl.get("malicious_tool_call_rate", -1) if bl else -1
+    cb_m = cb.get("malicious_tool_call_rate", -1) if cb else -1
+    delta = cb_m - bl_m if bl_m >= 0 and cb_m >= 0 else 0
+    print(f"  AD Harmful (trunc): BL_mal={fmt(bl_m)} CB_mal={fmt(cb_m)} Δ={delta:+.0%}")
+
+# Train/eval gap
+if os.path.isfile(adh_full) and os.path.isfile(adh_trunc):
+    with open(adh_full) as f:
+        r_full = json.load(f)
+    with open(adh_trunc) as f:
+        r_trunc = json.load(f)
+    cb_full = r_full.get("cb_model", {}).get("generation_comparison", {}).get("malicious_tool_call_rate", -1)
+    cb_trunc = r_trunc.get("cb_model", {}).get("generation_comparison", {}).get("malicious_tool_call_rate", -1)
+    if cb_full >= 0 and cb_trunc >= 0:
+        gap = cb_full - cb_trunc
+        print(f"  >>> Train/eval gap: {gap:+.0%} (full - trunc malicious rate)")
+
+# AD Benign
+adb_path = os.path.join(eval_base, "agentdojo_benign_eval.json")
+if os.path.isfile(adb_path):
+    with open(adb_path) as f:
+        r = json.load(f)
+    cb = r.get("cb_model", {}).get("generation_comparison", {})
+    if cb:
+        print(f"  AD Benign: correct={fmt(cb.get('correct_tool_call_rate', -1))} no_tool={fmt(cb.get('no_tool_call_rate', -1))}")
+
+print()
+SUMMARY
+
+echo "Output: $RUN_DIR"
+echo "Date: $(date)"
