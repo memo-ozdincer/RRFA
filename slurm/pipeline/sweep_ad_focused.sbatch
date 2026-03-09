@@ -45,7 +45,10 @@ set -euo pipefail
 
 # ── Config presets ──────────────────────────────────────────────────────────
 
-CONFIG="${CONFIG:?ERROR: CONFIG is required. Valid: ad_500, ad_1000, ad_no_resisted, balanced_500, balanced_1000}"
+CONFIG="${CONFIG:?ERROR: CONFIG is required. Valid: ad_500, ad_1000, ad_no_resisted, balanced_500, balanced_1000, ad_2000_aggr, ad_500_wide, ad_1000_nokl}"
+
+# Per-config override vars (empty = use defaults below)
+_LR="" _ALPHA="" _KL="" _CB="" _LORA_R="" _LORA_ALPHA=""
 
 case "$CONFIG" in
   ad_500)
@@ -58,9 +61,29 @@ case "$CONFIG" in
     DATASET=balanced; TOTAL_STEPS=500;  RESISTED=retain;  FUJITSU_CAP=2500 ;;
   balanced_1000)
     DATASET=balanced; TOTAL_STEPS=1000; RESISTED=retain;  FUJITSU_CAP=2500 ;;
+
+  # --- Experimental configs (Sweep 9b) ---
+  # Brute force: 2000 steps (~3.2 epochs), 4x LR, 5x alpha. Ensures every AD
+  # sample is seen multiple times with a strong rerouting signal.
+  ad_2000_aggr)
+    DATASET=ad_only;  TOTAL_STEPS=2000; RESISTED=retain;  FUJITSU_CAP=0
+    _LR=2e-4; _ALPHA=50.0; _KL=0.1 ;;
+
+  # Wide CB: target 5 layers instead of 2, LoRA r=64. Makes the representation
+  # perturbation span more of the network — harder for the model to route around.
+  ad_500_wide)
+    DATASET=ad_only;  TOTAL_STEPS=500;  RESISTED=retain;  FUJITSU_CAP=0
+    _CB="5 10 15 20 25"; _LORA_R=64; _LORA_ALPHA=128 ;;
+
+  # No KL leash: gamma_kl=0, higher alpha. KL penalty keeps outputs close to
+  # base model — removing it lets CB fully reshape harmful representations.
+  ad_1000_nokl)
+    DATASET=ad_only;  TOTAL_STEPS=1000; RESISTED=retain;  FUJITSU_CAP=0
+    _KL=0.0; _ALPHA=30.0 ;;
+
   *)
     echo "ERROR: Unknown CONFIG=$CONFIG"
-    echo "Valid: ad_500, ad_1000, ad_no_resisted, balanced_500, balanced_1000"
+    echo "Valid: ad_500, ad_1000, ad_no_resisted, balanced_500, balanced_1000, ad_2000_aggr, ad_500_wide, ad_1000_nokl"
     exit 1 ;;
 esac
 
@@ -129,6 +152,14 @@ PRESET=llama-3.1-8b-instruct
 ALPHA_MAX=10.0
 GAMMA_KL=0.3
 
+# Apply per-config overrides (set in case block above)
+[[ -n "$_LR" ]]         && LEARNING_RATE="$_LR"
+[[ -n "$_ALPHA" ]]      && ALPHA_MAX="$_ALPHA"
+[[ -n "$_KL" ]]         && GAMMA_KL="$_KL"
+[[ -n "$_CB" ]]         && CB_LAYERS="$_CB"
+[[ -n "$_LORA_R" ]]     && LORA_R="$_LORA_R"
+[[ -n "$_LORA_ALPHA" ]] && LORA_ALPHA="$_LORA_ALPHA"
+
 echo "========================================================"
 echo "SWEEP 9: AD-Focused — $CONFIG"
 echo "========================================================"
@@ -136,6 +167,8 @@ echo "Job: ${SLURM_JOB_ID:-local} | $(date)"
 echo "Dataset: $DATASET | Steps: $TOTAL_STEPS | Resisted: $RESISTED"
 echo "Fujitsu cap: $FUJITSU_CAP | Seq len: $MAX_SEQ_LENGTH"
 echo "Loss: $LOSS_MODE | Distance: $DISTANCE | margin_free: $MARGIN_FREE"
+echo "LR: $LEARNING_RATE | alpha: $ALPHA_MAX | gamma_kl: $GAMMA_KL"
+echo "CB layers: $CB_LAYERS | LoRA: r=$LORA_R alpha=$LORA_ALPHA"
 echo ""
 
 # ── Data size estimates ─────────────────────────────────────────────────────
