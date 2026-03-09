@@ -47,7 +47,7 @@ CONFIG="${CONFIG:?ERROR: CONFIG is required. See case block below.}"
 
 # Per-config override vars (empty = use defaults below)
 _LR="" _ALPHA="" _KL="" _CB="" _LORA_R="" _LORA_ALPHA=""
-_MARGIN_H="" _MARGIN_B="" _DECAY_MULT="" _LR_SCHED=""
+_MARGIN_H="" _MARGIN_B="" _DECAY_MULT="" _LR_SCHED="" _USE_REFUSAL=""
 
 case "$CONFIG" in
   # --- Legacy sweep 9 configs (kept for reproducibility) ---
@@ -101,6 +101,22 @@ case "$CONFIG" in
   ad_5000_v2)
     DATASET=ad_only;  TOTAL_STEPS=5000; RESISTED=retain;  FUJITSU_CAP=0
     _DECAY_MULT=2.0; _MARGIN_H=20.0; _MARGIN_B=3.0; _LR_SCHED=constant ;;
+
+  # ==========================================================================
+  # Sweep 10r — v2 fixes + synthetic refusal data in benign set
+  # ==========================================================================
+  # Same 4 fixes as v2, plus 1000 synthetic refusal traces added to benign.
+  # These are harmful contexts where the last assistant message is replaced
+  # with a refusal. Gives the retain loss a directed target: "when you see
+  # injection, produce refusal-like representations."
+
+  ad_1000_v2r)
+    DATASET=ad_only;  TOTAL_STEPS=1000; RESISTED=retain;  FUJITSU_CAP=0
+    _DECAY_MULT=2.0; _MARGIN_H=20.0; _MARGIN_B=3.0; _LR_SCHED=constant; _USE_REFUSAL=true ;;
+
+  ad_3000_v2r)
+    DATASET=ad_only;  TOTAL_STEPS=3000; RESISTED=retain;  FUJITSU_CAP=0
+    _DECAY_MULT=2.0; _MARGIN_H=20.0; _MARGIN_B=3.0; _LR_SCHED=constant; _USE_REFUSAL=true ;;
 
   *)
     echo "ERROR: Unknown CONFIG=$CONFIG"
@@ -188,6 +204,7 @@ LR_SCHEDULE=""
 [[ -n "$_MARGIN_B" ]]   && MARGIN_BENIGN="$_MARGIN_B"
 [[ -n "$_DECAY_MULT" ]] && ALPHA_DECAY_MULT="$_DECAY_MULT"
 [[ -n "$_LR_SCHED" ]]   && LR_SCHEDULE="$_LR_SCHED"
+USE_REFUSAL="${_USE_REFUSAL:-false}"
 
 echo "========================================================"
 echo "SWEEP 10: AD-Focused — $CONFIG"
@@ -198,7 +215,7 @@ echo "Fujitsu cap: $FUJITSU_CAP | Seq len: $MAX_SEQ_LENGTH"
 echo "Loss: $LOSS_MODE | Distance: $DISTANCE | margin_free: $MARGIN_FREE"
 echo "Margins: harmful=$MARGIN_HARMFUL benign=$MARGIN_BENIGN"
 echo "LR: $LEARNING_RATE | LR sched: ${LR_SCHEDULE:-linear} | alpha: $ALPHA_MAX | gamma_kl: $GAMMA_KL"
-echo "Alpha decay mult: ${ALPHA_DECAY_MULT:-1.0 (default)}"
+echo "Alpha decay mult: ${ALPHA_DECAY_MULT:-1.0 (default)} | Refusal data: $USE_REFUSAL"
 echo "CB layers: $CB_LAYERS | LoRA: r=$LORA_R alpha=$LORA_ALPHA"
 echo ""
 
@@ -313,6 +330,22 @@ for f in "$AGENTDOJO_SRC"; do
     echo "  $(basename "$f"): $(wc -l < "$f") lines"
 done
 
+# Generate synthetic refusal traces (only for v2r configs)
+REFUSAL_SRC="$SHARED_DATA/agentdojo_refusal_synthetic.jsonl"
+if [[ "$USE_REFUSAL" == "true" ]]; then
+    if [[ -f "$REFUSAL_SRC" ]] && [[ -s "$REFUSAL_SRC" ]]; then
+        echo "  Refusal traces: REUSING existing ($(wc -l < "$REFUSAL_SRC") lines)"
+    else
+        echo "  Generating synthetic refusal traces..."
+        python "$REPO_DIR/scripts/generate_refusal_traces.py" \
+            --traces "$AGENTDOJO_SRC" \
+            --output "$REFUSAL_SRC" \
+            --seed 42 2>&1 | tail -3
+    fi
+else
+    echo "  Refusal traces: SKIPPED (USE_REFUSAL=$USE_REFUSAL)"
+fi
+
 echo "  Data preparation done ($(( $(date +%s) - gen_start ))s)"
 echo ""
 
@@ -324,8 +357,11 @@ echo "Step 1: ETL_B"
 echo "========================================================"
 etl_start=$(date +%s)
 
-# Always process AgentDojo
+# Always process AgentDojo; refusal only if enabled
 ETL_SOURCES=("$AGENTDOJO_SRC")
+if [[ "$USE_REFUSAL" == "true" ]] && [[ -f "$REFUSAL_SRC" ]]; then
+    ETL_SOURCES+=("$REFUSAL_SRC")
+fi
 
 # Process Fujitsu only if needed
 if [[ "$DATASET" == "balanced" ]]; then
@@ -534,6 +570,19 @@ HARMFUL_LOSSMASKS=("$SPLIT_DIR/agentdojo_lossmasks_harmful.jsonl")
 BENIGN_RENDERS=("$SPLIT_DIR/agentdojo_renders_benign.jsonl")
 BENIGN_LOSSMASKS=("$SPLIT_DIR/agentdojo_lossmasks_benign.jsonl")
 
+# Synthetic refusal traces (only for v2r configs)
+if [[ "$USE_REFUSAL" == "true" ]]; then
+    REFUSAL_RENDERS="$SHARED_DATA/renders/agentdojo_refusal_synthetic.jsonl"
+    REFUSAL_LOSSMASKS="$SHARED_DATA/lossmasks/agentdojo_refusal_synthetic.jsonl"
+    if [[ -f "$REFUSAL_RENDERS" ]] && [[ -s "$REFUSAL_RENDERS" ]]; then
+        BENIGN_RENDERS+=("$REFUSAL_RENDERS")
+        BENIGN_LOSSMASKS+=("$REFUSAL_LOSSMASKS")
+        echo "  + Refusal synthetic: $(wc -l < "$REFUSAL_RENDERS") benign renders"
+    else
+        echo "  WARNING: USE_REFUSAL=true but refusal renders not found"
+    fi
+fi
+
 # Add capped Fujitsu (balanced mode only)
 if [[ "$DATASET" == "balanced" ]] && [[ "$FUJITSU_CAP" -gt 0 ]]; then
     CAPPED_DIR="$SHARED_DATA/fujitsu_capped_${FUJITSU_CAP}"
@@ -673,6 +722,7 @@ cat > "$RUN_DIR/run_config.json" << RUNCFG
   "alpha_decay_multiplier": "${ALPHA_DECAY_MULT:-1.0}",
   "margin_harmful": $MARGIN_HARMFUL,
   "margin_benign": $MARGIN_BENIGN,
+  "use_refusal": "$USE_REFUSAL",
   "lora_r": $LORA_R,
   "lora_alpha": $LORA_ALPHA,
   "margin_free": false,
