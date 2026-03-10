@@ -83,6 +83,9 @@
 
 set -euo pipefail
 
+# ── Paths (needed early — some config presets reference CB_SCRATCH) ────────
+CB_SCRATCH="/scratch/memoozd/cb-scratch"
+
 # ── Config presets ──────────────────────────────────────────────────────────
 
 CONFIG="${CONFIG:?ERROR: CONFIG is required. See case block below.}"
