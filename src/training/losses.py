@@ -561,11 +561,16 @@ def _per_token_directional_loss(
     margin: float,
     direction: str,
     distance: str = "dl2rc",
+    importance_masks: Optional[Dict[int, torch.Tensor]] = None,
 ) -> Tuple[torch.Tensor, float]:
     """Per-token distance with margin.
 
     direction="push": harmful — loss when dist < margin (push apart)
     direction="pull": benign  — loss when dist > margin (keep close)
+
+    When importance_masks is provided, representations are element-wise
+    multiplied by the mask before computing distance (SRMU-style
+    feature-selective rerouting). When None, behavior is unchanged.
 
     Returns (loss, mean_masked_distance) for diagnostics.
     """
@@ -579,8 +584,17 @@ def _per_token_directional_loss(
         if layer_idx not in model_reps or layer_idx not in frozen_reps:
             continue
 
+        h_model = model_reps[layer_idx]
+        h_frozen = frozen_reps[layer_idx]
+
+        # Apply importance mask if provided (SRMU-style feature-selective rerouting)
+        if importance_masks is not None and layer_idx in importance_masks:
+            imp = importance_masks[layer_idx]  # (H,) tensor
+            h_model = h_model * imp
+            h_frozen = h_frozen * imp
+
         # Per-token distance: [B, T]
-        d = _per_token_distance(model_reps[layer_idx], frozen_reps[layer_idx], distance)
+        d = _per_token_distance(h_model, h_frozen, distance)
 
         if direction == "push":
             per_token_loss = F.relu(margin - d)
@@ -603,6 +617,7 @@ def _per_token_expscale_loss(
     mask: torch.Tensor,
     direction: str,
     distance: str = "dl2rc",
+    importance_masks: Optional[Dict[int, torch.Tensor]] = None,
 ) -> Tuple[torch.Tensor, float]:
     """Per-token margin-free loss (Option C).
 
@@ -610,6 +625,11 @@ def _per_token_expscale_loss(
     direction="pull": benign  — d.mean(), direct penalty on drift
 
     Scale is auto-computed from frozen rep norms so it works at any layer.
+
+    When importance_masks is provided, representations are element-wise
+    multiplied by the mask before computing distance (SRMU-style
+    feature-selective rerouting). When None, behavior is unchanged.
+
     Returns (loss, mean_masked_distance) for diagnostics.
     """
     total = torch.tensor(0.0, device=mask.device)
@@ -622,7 +642,16 @@ def _per_token_expscale_loss(
         if layer_idx not in model_reps or layer_idx not in frozen_reps:
             continue
 
-        d = _per_token_distance(model_reps[layer_idx], frozen_reps[layer_idx], distance)
+        h_model = model_reps[layer_idx]
+        h_frozen = frozen_reps[layer_idx]
+
+        # Apply importance mask if provided (SRMU-style feature-selective rerouting)
+        if importance_masks is not None and layer_idx in importance_masks:
+            imp = importance_masks[layer_idx]  # (H,) tensor
+            h_model = h_model * imp
+            h_frozen = h_frozen * imp
+
+        d = _per_token_distance(h_model, h_frozen, distance)
 
         if direction == "push":
             # Auto-scale from frozen norm so exp() is well-calibrated
@@ -660,6 +689,7 @@ def per_token_cb_loss(
     kl_temperature: float = 1.0,
     distance: str = "dl2rc",
     margin_free: bool = False,
+    importance_masks: Optional[Dict[int, torch.Tensor]] = None,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """Per-token circuit breaker loss (Option A from technical plan).
 
@@ -672,24 +702,32 @@ def per_token_cb_loss(
 
     When margin_free=True (Option C): uses exp(-d/scale) for harmful and
     d.mean() for benign. No margins needed — eliminates margin tuning.
+
+    When importance_masks is provided, representations are element-wise
+    multiplied by the mask before computing distance (SRMU-style
+    feature-selective rerouting). When None, behavior is unchanged.
     """
     if margin_free:
         harmful_loss, mean_harmful_dist = _per_token_expscale_loss(
             harmful_model_reps, harmful_frozen_reps, target_layers,
             harmful_mask, "push", distance=distance,
+            importance_masks=importance_masks,
         )
         benign_loss, mean_benign_dist = _per_token_expscale_loss(
             benign_model_reps, benign_frozen_reps, target_layers,
             benign_mask, "pull", distance=distance,
+            importance_masks=importance_masks,
         )
     else:
         harmful_loss, mean_harmful_dist = _per_token_directional_loss(
             harmful_model_reps, harmful_frozen_reps, target_layers,
             harmful_mask, margin_harmful, "push", distance=distance,
+            importance_masks=importance_masks,
         )
         benign_loss, mean_benign_dist = _per_token_directional_loss(
             benign_model_reps, benign_frozen_reps, target_layers,
             benign_mask, margin_benign, "pull", distance=distance,
+            importance_masks=importance_masks,
         )
 
     kl_loss = kl_divergence_loss(

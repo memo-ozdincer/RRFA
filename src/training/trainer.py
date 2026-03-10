@@ -972,7 +972,24 @@ class CircuitBreakerTrainer:
         
         # Setup representation extractors
         self._setup_extractors()
-        
+
+        # Load importance mask for SRMU-style feature-selective rerouting
+        self.importance_masks = None
+        mask_path = getattr(self.config, "importance_mask_path", None)
+        if mask_path:
+            self.accelerator.print(f"Loading importance mask from {mask_path}")
+            mask_data = torch.load(mask_path, map_location="cpu")
+            imp = mask_data["importance"]  # (H,) tensor in [0, 1]
+            # Create per-layer dict (same mask for all CB target layers)
+            self.importance_masks = {
+                layer_idx: imp.to(self.accelerator.device)
+                for layer_idx in self.config.cb_target_layers
+            }
+            self.accelerator.print(
+                f"  Importance mask: {imp.shape}, sparsity={((imp < 0.1).sum() / imp.numel()):.1%}, "
+                f"top-100 mean={imp.topk(100).values.mean():.3f}"
+            )
+
         self.global_step = 0
     
     def _config_to_dict(self) -> dict:
@@ -1917,6 +1934,7 @@ class CircuitBreakerTrainer:
                 kl_temperature=kl_temp,
                 distance=getattr(self.config, "triplet_harmful_positive_distance", "dl2rc"),
                 margin_free=_margin_free,
+                importance_masks=self.importance_masks,
             )
 
             metrics = {
