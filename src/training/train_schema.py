@@ -535,6 +535,11 @@ def _parse_args() -> argparse.Namespace:
                           help="Use margin-free loss (Option C): exp(-d/scale) for harmful, d for benign. No margin tuning.")
     cb_group.add_argument("--importance-mask", type=Path, default=None,
                           help="Path to .pt probe direction file for importance-weighted CB loss (SRMU-style)")
+    cb_group.add_argument("--importance-mask-mode", type=str, default=None,
+                          choices=["both", "harmful_only"],
+                          help="How to apply importance mask: 'both' (default) or 'harmful_only' (mask push only, retain full benign)")
+    cb_group.add_argument("--importance-mask-topk", type=float, default=None,
+                          help="Sparsity threshold: keep top-k%% of dims (e.g., 0.1 = top 10%%). 0 = continuous.")
 
     lora_group = parser.add_argument_group("LoRA")
     lora_group.add_argument("--lora-r", type=int, help="LoRA rank")
@@ -634,6 +639,8 @@ def _build_config(args: argparse.Namespace) -> CircuitBreakerConfig:
         "beta_kl": "beta_kl",
         "margin_free": "margin_free",
         "importance_mask": "importance_mask_path",
+        "importance_mask_mode": "importance_mask_mode",
+        "importance_mask_topk": "importance_mask_topk",
         "wandb_project": "wandb_project",
         "wandb_run_name": "wandb_run_name",
         "logging_steps": "logging_steps",

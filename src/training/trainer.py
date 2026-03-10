@@ -975,19 +975,35 @@ class CircuitBreakerTrainer:
 
         # Load importance mask for SRMU-style feature-selective rerouting
         self.importance_masks = None
+        self.importance_mask_mode = getattr(self.config, "importance_mask_mode", "both")
         mask_path = getattr(self.config, "importance_mask_path", None)
         if mask_path:
             self.accelerator.print(f"Loading importance mask from {mask_path}")
             mask_data = torch.load(mask_path, map_location="cpu")
             imp = mask_data["importance"]  # (H,) tensor in [0, 1]
+
+            # Apply sparsity threshold: keep only top-k% of dimensions
+            topk_frac = getattr(self.config, "importance_mask_topk", 0.0)
+            if topk_frac > 0:
+                k = max(1, int(imp.numel() * topk_frac))
+                threshold = imp.topk(k).values[-1].item()
+                imp = torch.where(imp >= threshold, imp, torch.zeros_like(imp))
+                self.accelerator.print(
+                    f"  Sparsity threshold: top-{topk_frac:.0%} ({k} dims), "
+                    f"threshold={threshold:.4f}"
+                )
+
             # Create per-layer dict (same mask for all CB target layers)
             self.importance_masks = {
                 layer_idx: imp.to(self.accelerator.device)
                 for layer_idx in self.config.cb_target_layers
             }
             self.accelerator.print(
-                f"  Importance mask: {imp.shape}, sparsity={((imp < 0.1).sum() / imp.numel()):.1%}, "
-                f"top-100 mean={imp.topk(100).values.mean():.3f}"
+                f"  Importance mask: {imp.shape}, "
+                f"nonzero={int((imp > 0).sum())}/{imp.numel()}, "
+                f"sparsity(<0.1)={((imp < 0.1).sum() / imp.numel()):.1%}, "
+                f"top-100 mean={imp.topk(min(100, imp.numel())).values.mean():.3f}, "
+                f"mode={self.importance_mask_mode}"
             )
 
         self.global_step = 0
@@ -1935,6 +1951,7 @@ class CircuitBreakerTrainer:
                 distance=getattr(self.config, "triplet_harmful_positive_distance", "dl2rc"),
                 margin_free=_margin_free,
                 importance_masks=self.importance_masks,
+                importance_mask_mode=self.importance_mask_mode,
             )
 
             metrics = {

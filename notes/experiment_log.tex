@@ -1563,6 +1563,177 @@ that simply sweeping step counts may not find a better operating point without
 additional data augmentation.
 
 % ===================================================================
+\section{Sweep 11: Multi-Intervention Expansion (Mar 9--10, 2026)}
+\label{sec:sweep11-full}
+% ===================================================================
+
+Following the Sweep~10 analysis (Section~\ref{sec:sweep11}), we implemented
+five intervention groups targeting the selectivity problem from different
+angles.  All configs inherit the v2 fixes (decay\_mult=2.0, margin\_h=20.0,
+margin\_b=3.0, constant~LR, KL scheduled with~$c_r$).
+
+\subsection{SRMU: Feature-Selective Rerouting (Novel Contribution)}
+
+\textbf{Motivation.} The selectivity problem (AUC~0.83) means CB pushes all
+4096 hidden dimensions equally.  Most dimensions are irrelevant to injection
+detection, so pushing them disrupts benign representations for no gain.
+Inspired by SRMU (Selective Representation Misdirection for Unlearning,
+Jin~et~al.\ 2024), we apply an importance mask derived from a linear probe
+trained on harmful-vs-benign hidden states.
+
+\textbf{Implementation.}
+\begin{enumerate}
+  \item \textbf{Probe extraction} (\texttt{scripts/extract\_probe\_direction.py}):
+        Train logistic regression on layer-10, last-token hidden states from
+        the truncated AD traces.  Extract weight vector $\mathbf{w} \in
+        \mathbb{R}^{4096}$.  Importance mask: $m_i = |w_i| / \max_j |w_j|$,
+        so $m \in [0,1]^{4096}$.
+
+  \item \textbf{Masked loss} (\texttt{src/training/losses.py}): Before
+        computing dl2rc distance, apply element-wise masking:
+        \[
+          d = \mathrm{dl2rc}(\mathbf{h}_{\text{lora}} \odot \mathbf{m},\;
+                             \mathbf{h}_{\text{frozen}} \odot \mathbf{m})
+        \]
+        Dimensions with small $|w_i|$ contribute negligibly to $d$, so the
+        optimizer concentrates weight updates on the $\sim$20--30\% of
+        dimensions that discriminate harmful from benign.
+
+  \item \textbf{Pipeline integration} (\texttt{sweep\_ad\_focused.sbatch}):
+        Step~0b auto-extracts the probe direction on the first SRMU job
+        (requires GPU forward pass through base model).  The \texttt{.pt}
+        file is cached at \texttt{configs/probe\_directions/layer10\_last\_token.pt}
+        and reused by subsequent SRMU jobs.
+\end{enumerate}
+
+\textbf{Configs:}
+\begin{center}
+\small
+\begin{tabular}{llll}
+\toprule
+Config & Steps & Data & Mask \\
+\midrule
+ad\_750\_v2\_srmu  & 750  & AD only & layer10 last\_token \\
+ad\_1000\_v2\_srmu & 1000 & AD only & layer10 last\_token \\
+ad\_1500\_v2\_srmu & 1500 & AD only & layer10 last\_token \\
+ad\_1000\_bal\_srmu & 1000 & balanced & layer10 last\_token \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Key comparison:} \texttt{ad\_1000\_v2\_srmu} vs \texttt{ad\_1000\_v2}.
+If benign improves from 41\% toward the theoretical ceiling of 83\% without
+sacrificing AD reduction, SRMU is the paper's flagship result.
+
+\textbf{Theoretical prediction:} The importance mask concentrates the push on
+probe-discriminative features.  Benign representations share fewer of these
+features (by definition of the probe), so benign damage should decrease.  We
+predict benign preservation $\geq$55\% at 1000 steps (vs.\ 41\% without mask),
+closing approximately half the gap to the 83\% ceiling.
+
+\subsection{Balanced Configs (Fujitsu + AD)}
+
+\textbf{Motivation.} Fujitsu CB outputs are clean correct tool calls (zero
+gibberish across all Sweep~10 runs).  Adding Fujitsu data provides:
+(1)~structural injection signal (HTML comments) that may transfer to AD,
+(2)~diverse benign data (Fujitsu DR traces) to strengthen capability anchoring.
+
+\textbf{Configs:} \texttt{ad\_500\_bal}, \texttt{ad\_750\_bal},
+\texttt{ad\_1000\_bal}.  All use \texttt{FUJITSU\_CAP=2500} ($\sim$2500
+harmful + $\sim$2500 benign Fujitsu, balanced against $\sim$2500 AD harmful
++ $\sim$3100 AD benign).
+
+\textbf{Sweep~9 baseline:} \texttt{balanced\_500} showed Fujitsu $\Delta =
+-27\%$ (best in Sweep~9) but \emph{hurt} AD ($+5\%$).  The v2 fixes may
+change this dynamic since the four training inefficiencies were the dominant
+bottleneck, not the data mix.
+
+\subsection{Balanced + Refusal}
+
+\textbf{Config:} \texttt{ad\_750\_bal\_r} --- balanced data plus 1225 synthetic
+refusal traces added to the benign retain set.
+
+\textbf{Hypothesis:} The gibberish problem is the central quality issue.
+Adding refusal traces gives CB a directed target: when the model sees injection
+context, its representations should approach refusal-like states rather than
+degenerate regions.  This addresses both gibberish and benign preservation.
+
+\subsection{Alpha/Margin Tuning}
+
+\textbf{ad\_1000\_a5} ($\alpha_{\max}=5.0$): Halving alpha slows Phase~1 push
+(expect 60--100 steps to saturate margin instead of 30), reducing Phase~3
+destructiveness.  Lower $c_s$ ceiling means less collateral damage to benign.
+
+\textbf{ad\_1000\_m40} ($m_h=40.0$, $m_b=5.0$): Higher margin means harmful
+reps must drift further to re-enter the active zone during Phase~2, potentially
+delaying or preventing Phase~3 entirely.
+
+\subsection{Injection Amplification}
+
+\textbf{Configs:} \texttt{ad\_750\_amp}, \texttt{ad\_750\_bal\_amp}.
+Script \texttt{scripts/amplify\_injections.py} repeats
+\texttt{<INFORMATION>} blocks 2$\times$ in harmful tool outputs, amplifying
+the injection signal.
+
+\textbf{Caveat:} Most speculative intervention.  If the model already encodes
+``injection present'' from one occurrence, repetition may not change
+high-level features.
+
+\subsection{Jobs Submitted (Mar 10, 2026)}
+
+\textbf{Batch 1 (Tier~1 --- non-SRMU):}
+\begin{verbatim}
+  331766  ad_750_bal_r    (balanced + refusal)
+  331767  ad_1000_bal     (balanced, Fujitsu signal transfer)
+  331768  ad_1000_a5      (alpha=5.0)
+\end{verbatim}
+
+\textbf{Batch 2 (SRMU):}
+\begin{verbatim}
+  331776  ad_750_v2_srmu   (SRMU short, + probe extraction)
+  331777  ad_1000_v2_srmu  (SRMU key experiment)
+  331778  ad_1500_v2_srmu  (SRMU longer)
+  331779  ad_1000_bal_srmu (SRMU + balanced)
+\end{verbatim}
+
+\textbf{Note:} Job 331776 runs Step~0b (probe extraction) first.  If that
+step fails, all four SRMU jobs produce standard (non-masked) training ---
+functionally identical to \texttt{ad\_*\_v2} configs.  Check 331776 logs
+first.
+
+\textbf{Not yet submitted:} \texttt{ad\_1000\_m40}, \texttt{ad\_750\_amp},
+\texttt{ad\_750\_bal\_amp}, \texttt{ad\_500\_bal}, \texttt{ad\_750\_bal} ---
+lower priority, submit if GPU budget allows.
+
+\subsection{Analysis Plan}
+
+\textbf{Primary comparisons} (in order of importance):
+\begin{enumerate}
+  \item \texttt{ad\_1000\_v2\_srmu} vs \texttt{ad\_1000\_v2}: Does importance
+        masking improve benign without sacrificing AD reduction?
+  \item \texttt{ad\_750\_bal\_r} gibberish counts: Does refusal data reduce
+        gibberish below 5/97 on benign?
+  \item \texttt{ad\_1000\_bal} vs \texttt{ad\_1000\_v2}: Does balanced data
+        help AD (unlike Sweep~9 where it hurt)?
+  \item \texttt{ad\_1000\_bal\_srmu} vs both \texttt{ad\_1000\_bal} and
+        \texttt{ad\_1000\_v2\_srmu}: Do interventions stack?
+  \item \texttt{ad\_1500\_v2\_srmu} vs \texttt{ad\_5000\_v2}: Can SRMU at
+        1500 steps match or beat 5000 steps standard?
+\end{enumerate}
+
+\textbf{Success criteria:}
+\begin{itemize}
+  \item \textbf{Home run:} Any config with benign $>72\%$, AD trunc mal
+        $<24\%$, gibberish $<5$ (benign). This would be a new Pareto point
+        dominating ad\_5000\_v2 at fewer steps.
+  \item \textbf{Solid result:} SRMU benign $>55\%$ at 1000 steps (from 41\%
+        baseline), demonstrating importance masking closes the selectivity gap.
+  \item \textbf{Diagnostic value:} Even if no config beats ad\_5000\_v2, the
+        factorial comparisons (data $\times$ loss $\times$ hyperparams) reveal
+        which interventions move which metrics, informing the next sweep.
+\end{itemize}
+
+% ===================================================================
 \section{Lessons Learned (Cumulative)}
 % ===================================================================
 

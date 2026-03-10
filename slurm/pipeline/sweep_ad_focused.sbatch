@@ -92,6 +92,8 @@ _LR="" _ALPHA="" _KL="" _CB="" _LORA_R="" _LORA_ALPHA=""
 _MARGIN_H="" _MARGIN_B="" _DECAY_MULT="" _LR_SCHED="" _USE_REFUSAL=""
 _AMPLIFY="" _AMP_REPEATS=""
 _IMPORTANCE_MASK=""
+_IMPORTANCE_MASK_MODE=""
+_IMPORTANCE_MASK_TOPK=""
 
 case "$CONFIG" in
   # --- Legacy sweep 9 configs (kept for reproducibility) ---
@@ -277,12 +279,93 @@ case "$CONFIG" in
     _DECAY_MULT=2.0; _MARGIN_H=20.0; _MARGIN_B=3.0; _LR_SCHED=constant
     _IMPORTANCE_MASK=auto ;;
 
+  # ==========================================================================
+  # Sweep 11g — SRMU ablations: mask mode, sparsity, Test 2 probe direction
+  # ==========================================================================
+
+  # A4: Asymmetric masking — mask harmful push only, full benign retain
+  ad_1000_v2_srmu_asym)
+    DATASET=ad_only;  TOTAL_STEPS=1000; RESISTED=retain;  FUJITSU_CAP=0
+    _DECAY_MULT=2.0; _MARGIN_H=20.0; _MARGIN_B=3.0; _LR_SCHED=constant
+    _IMPORTANCE_MASK=auto; _IMPORTANCE_MASK_MODE=harmful_only ;;
+
+  # A3: Sparse mask — top 10% of dimensions (binary)
+  ad_1000_v2_srmu_s10)
+    DATASET=ad_only;  TOTAL_STEPS=1000; RESISTED=retain;  FUJITSU_CAP=0
+    _DECAY_MULT=2.0; _MARGIN_H=20.0; _MARGIN_B=3.0; _LR_SCHED=constant
+    _IMPORTANCE_MASK=auto; _IMPORTANCE_MASK_TOPK=0.1 ;;
+
+  # A3: Sparse mask — top 30% of dimensions
+  ad_1000_v2_srmu_s30)
+    DATASET=ad_only;  TOTAL_STEPS=1000; RESISTED=retain;  FUJITSU_CAP=0
+    _DECAY_MULT=2.0; _MARGIN_H=20.0; _MARGIN_B=3.0; _LR_SCHED=constant
+    _IMPORTANCE_MASK=auto; _IMPORTANCE_MASK_TOPK=0.3 ;;
+
+  # A4+A3 combo: asymmetric + sparse top 10%
+  ad_1000_v2_srmu_asym_s10)
+    DATASET=ad_only;  TOTAL_STEPS=1000; RESISTED=retain;  FUJITSU_CAP=0
+    _DECAY_MULT=2.0; _MARGIN_H=20.0; _MARGIN_B=3.0; _LR_SCHED=constant
+    _IMPORTANCE_MASK=auto; _IMPORTANCE_MASK_MODE=harmful_only; _IMPORTANCE_MASK_TOPK=0.1 ;;
+
+  # A1: Test 2 probe direction (comply-vs-refuse) — requires separate probe .pt
+  # Must extract with: --class1 harmful.jsonl --class0 refusal.jsonl
+  ad_1000_v2_srmu_t2)
+    DATASET=ad_only;  TOTAL_STEPS=1000; RESISTED=retain;  FUJITSU_CAP=0
+    _DECAY_MULT=2.0; _MARGIN_H=20.0; _MARGIN_B=3.0; _LR_SCHED=constant
+    _IMPORTANCE_MASK="$CB_SCRATCH/probe_directions/layer10_test2_last_token.pt" ;;
+
+  # A1+A4: Test 2 probe + asymmetric masking
+  ad_1000_v2_srmu_t2_asym)
+    DATASET=ad_only;  TOTAL_STEPS=1000; RESISTED=retain;  FUJITSU_CAP=0
+    _DECAY_MULT=2.0; _MARGIN_H=20.0; _MARGIN_B=3.0; _LR_SCHED=constant
+    _IMPORTANCE_MASK="$CB_SCRATCH/probe_directions/layer10_test2_last_token.pt"
+    _IMPORTANCE_MASK_MODE=harmful_only ;;
+
+  # ==========================================================================
+  # Sweep 11h — Full combo configs (Fujitsu-perfect targets)
+  # ==========================================================================
+  # These combine ALL interventions: balanced data (Fujitsu included),
+  # SRMU importance masking, refusal traces, and asymmetric masking.
+  # Goal: 0% Fujitsu ASR, >75% AD benign, <20% AD trunc malicious.
+
+  # The full combo: balanced + SRMU + refusal
+  ad_1000_bal_srmu_r)
+    DATASET=balanced; TOTAL_STEPS=1000; RESISTED=retain;  FUJITSU_CAP=2500
+    _DECAY_MULT=2.0; _MARGIN_H=20.0; _MARGIN_B=3.0; _LR_SCHED=constant
+    _IMPORTANCE_MASK=auto; _USE_REFUSAL=true ;;
+
+  # Full combo + asymmetric masking
+  ad_1000_bal_srmu_r_asym)
+    DATASET=balanced; TOTAL_STEPS=1000; RESISTED=retain;  FUJITSU_CAP=2500
+    _DECAY_MULT=2.0; _MARGIN_H=20.0; _MARGIN_B=3.0; _LR_SCHED=constant
+    _IMPORTANCE_MASK=auto; _USE_REFUSAL=true; _IMPORTANCE_MASK_MODE=harmful_only ;;
+
+  # Full combo with Test 2 probe (behavioral direction)
+  ad_1000_bal_srmu_t2_r)
+    DATASET=balanced; TOTAL_STEPS=1000; RESISTED=retain;  FUJITSU_CAP=2500
+    _DECAY_MULT=2.0; _MARGIN_H=20.0; _MARGIN_B=3.0; _LR_SCHED=constant
+    _IMPORTANCE_MASK="$CB_SCRATCH/probe_directions/layer10_test2_last_token.pt"
+    _USE_REFUSAL=true; _IMPORTANCE_MASK_MODE=harmful_only ;;
+
+  # Longer balanced+SRMU runs (if 1000 steps works, scale up)
+  ad_3000_bal_srmu)
+    DATASET=balanced; TOTAL_STEPS=3000; RESISTED=retain;  FUJITSU_CAP=2500
+    _DECAY_MULT=2.0; _MARGIN_H=20.0; _MARGIN_B=3.0; _LR_SCHED=constant
+    _IMPORTANCE_MASK=auto ;;
+
+  ad_5000_bal_srmu)
+    DATASET=balanced; TOTAL_STEPS=5000; RESISTED=retain;  FUJITSU_CAP=2500
+    _DECAY_MULT=2.0; _MARGIN_H=20.0; _MARGIN_B=3.0; _LR_SCHED=constant
+    _IMPORTANCE_MASK=auto ;;
+
   *)
     echo "ERROR: Unknown CONFIG=$CONFIG"
     echo "Valid: ad_300_v2 ad_500_v2 ad_750_v2 ad_1000_v2 ad_1500_v2 ad_3000_v2"
     echo "       ad_500_bal ad_750_bal ad_1000_bal ad_750_bal_r"
     echo "       ad_1000_a5 ad_1000_m40 ad_750_amp ad_750_bal_amp"
     echo "       ad_750_v2_srmu ad_1000_v2_srmu ad_1500_v2_srmu ad_1000_bal_srmu"
+    echo "       ad_1000_v2_srmu_asym ad_1000_v2_srmu_s10 ad_1000_v2_srmu_s30"
+    echo "       ad_1000_v2_srmu_asym_s10 ad_1000_v2_srmu_t2 ad_1000_v2_srmu_t2_asym"
     echo "       ad_1000_v2r ad_3000_v2r"
     exit 1 ;;
 esac
@@ -382,6 +465,10 @@ if [[ "$_IMPORTANCE_MASK" == "auto" ]]; then
 elif [[ -n "$_IMPORTANCE_MASK" ]]; then
     IMPORTANCE_MASK_PATH="$_IMPORTANCE_MASK"
 fi
+
+# Importance mask mode and sparsity (only relevant when mask is set)
+IMPORTANCE_MASK_MODE="${_IMPORTANCE_MASK_MODE:-}"
+IMPORTANCE_MASK_TOPK="${_IMPORTANCE_MASK_TOPK:-}"
 
 echo "========================================================"
 echo "SWEEP 11: AD-Focused Step Sweep — $CONFIG"
@@ -581,7 +668,37 @@ if [[ -n "$IMPORTANCE_MASK_PATH" ]]; then
 
     if [[ -f "$IMPORTANCE_MASK_PATH" ]]; then
         echo "  Importance mask: REUSING existing ($IMPORTANCE_MASK_PATH)"
+    elif [[ "$IMPORTANCE_MASK_PATH" == *"test2"* ]]; then
+        # Test 2 probe: harmful-comply vs harmful-refuse (same context, different response)
+        # This captures the BEHAVIORAL signal (intent to comply) not the LEXICAL signal
+        echo "  Extracting TEST 2 probe direction (comply-vs-refuse)..."
+        echo "  class1=harmful (comply), class0=refusal (refuse)"
+
+        # Need refusal traces — generate if not present
+        _T2_REFUSAL="$SHARED_DATA/agentdojo_refusal_synthetic.jsonl"
+        if [[ ! -f "$_T2_REFUSAL" ]] || [[ ! -s "$_T2_REFUSAL" ]]; then
+            echo "  Generating refusal traces for Test 2 probe..."
+            python "$REPO_DIR/scripts/generate_refusal_traces.py" \
+                --traces "$AGENTDOJO_SRC" \
+                --output "$_T2_REFUSAL" \
+                --seed 42 2>&1 | tail -3
+        fi
+
+        python "$REPO_DIR/scripts/extract_probe_direction.py" \
+            --class1 "$AGENTDOJO_SRC" --class1-label harmful \
+            --class0 "$_T2_REFUSAL" \
+            --model "$TOKENIZER" \
+            --layer 10 \
+            --pooling last_token \
+            --output "$IMPORTANCE_MASK_PATH" 2>&1 | tail -10
+
+        if [[ ! -f "$IMPORTANCE_MASK_PATH" ]]; then
+            echo "ERROR: Test 2 probe extraction failed"
+            exit 1
+        fi
+        echo "  Test 2 probe direction saved to $IMPORTANCE_MASK_PATH"
     else
+        # Default Test 1 probe: harmful vs benign (different contexts)
         echo "  Extracting probe direction for importance mask..."
         echo "  Layer 10, pooling=last_token, traces=$AGENTDOJO_SRC"
         python "$REPO_DIR/scripts/extract_probe_direction.py" \
@@ -904,6 +1021,8 @@ python src/training/train_schema.py \
     ${ALPHA_DECAY_MULT:+--alpha-decay-multiplier "$ALPHA_DECAY_MULT"} \
     ${LR_SCHEDULE:+--lr-schedule "$LR_SCHEDULE"} \
     ${IMPORTANCE_MASK_PATH:+--importance-mask "$IMPORTANCE_MASK_PATH"} \
+    ${IMPORTANCE_MASK_MODE:+--importance-mask-mode "$IMPORTANCE_MASK_MODE"} \
+    ${IMPORTANCE_MASK_TOPK:+--importance-mask-topk "$IMPORTANCE_MASK_TOPK"} \
     --mode mixed \
     --harmful-renders "${HARMFUL_RENDERS[@]}" \
     --harmful-lossmasks "${HARMFUL_LOSSMASKS[@]}" \

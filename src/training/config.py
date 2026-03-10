@@ -141,6 +141,17 @@ class CircuitBreakerConfig:
     # When None, standard (uniform) CB loss is used.
     importance_mask_path: Optional[str] = None
 
+    # How the importance mask is applied to harmful/benign loss terms:
+    #   "both": mask on both harmful push and benign retain (default)
+    #   "harmful_only": mask only harmful push; benign retain uses full
+    #     representation so all dims are anchored (stronger benign preservation)
+    importance_mask_mode: str = "both"
+
+    # Sparsity threshold for importance mask (0.0 = use continuous weights).
+    # When > 0, only the top-k fraction of dimensions are kept (rest zeroed).
+    # E.g., 0.1 = keep top 10% of dimensions, zero the rest.
+    importance_mask_topk: float = 0.0
+
     # === Training ===
     total_steps: int = 1100              # Paper: 1100 steps
     batch_size: int = 16                 # Paper: batch_size=16
