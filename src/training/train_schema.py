@@ -533,6 +533,8 @@ def _parse_args() -> argparse.Namespace:
                           help="KL divergence coefficient for legacy_cb mode (default: 0.5 from config)")
     cb_group.add_argument("--margin-free", action="store_true", default=False,
                           help="Use margin-free loss (Option C): exp(-d/scale) for harmful, d for benign. No margin tuning.")
+    cb_group.add_argument("--importance-mask", type=Path, default=None,
+                          help="Path to .pt probe direction file for importance-weighted CB loss (SRMU-style)")
 
     lora_group = parser.add_argument_group("LoRA")
     lora_group.add_argument("--lora-r", type=int, help="LoRA rank")
@@ -631,6 +633,7 @@ def _build_config(args: argparse.Namespace) -> CircuitBreakerConfig:
         "pooling_mask_policy": "pooling_mask_policy",
         "beta_kl": "beta_kl",
         "margin_free": "margin_free",
+        "importance_mask": "importance_mask_path",
         "wandb_project": "wandb_project",
         "wandb_run_name": "wandb_run_name",
         "logging_steps": "logging_steps",

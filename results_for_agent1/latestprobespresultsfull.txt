@@ -1,0 +1,292 @@
+Generating refusal traces...
+Loaded 5882 traces, 2738 harmful
+Generated 1225 refusal traces, skipped 1513
+Output: /scratch/memoozd/cb-scratch/data/traces/agentdojo_refusal_synthetic.jsonl
+========================================================
+Probe Diagnostic — Extended
+========================================================
+Model: /scratch/memoozd/cb-scratch/cache/hf/hub/models--meta-llama--Llama-3.1-8B-Instruct/snapshots/0e9e39f249a16976918f6564b8830bc894c89659
+Date: Mon 09 Mar 2026 04:37:12 PM EDT
+
+
+################################################################
+TEST 1: Harmful vs Benign (different context)
+################################################################
+
+======================================================================
+pooling=mean | probe=linear
+======================================================================
+  Samples: 200 class-1, 200 class-0
+  Chance baseline: 50.0%
+  Probe: linear
+
+    Layer   Accuracy     AUC   C1 Recall   C0 Recall     Verdict
+    -----  ---------  ------  ----------  ----------  ----------
+        5      92.2%   0.975       91.5%       93.0%   SEPARABLE
+       10      92.7%   0.973       92.0%       93.5%   SEPARABLE
+       15      92.8%   0.969       90.5%       95.0%   SEPARABLE
+       20      92.2%   0.968       90.5%       94.0%   SEPARABLE
+       25      92.7%   0.966       91.5%       94.0%   SEPARABLE
+       30      91.8%   0.967       90.0%       93.5%   SEPARABLE
+      all      91.8%   0.968       90.0%       93.5%   SEPARABLE
+
+======================================================================
+pooling=mean | probe=mlp
+======================================================================
+  Samples: 200 class-1, 200 class-0
+  Chance baseline: 50.0%
+  Probe: mlp
+
+    Layer   Accuracy     AUC   C1 Recall   C0 Recall     Verdict
+    -----  ---------  ------  ----------  ----------  ----------
+        5      91.0%   0.966       89.5%       92.5%   SEPARABLE
+       10      91.8%   0.969       90.0%       93.5%   SEPARABLE
+       15      90.8%   0.959       89.0%       92.5%   SEPARABLE
+       20      91.8%   0.951       90.0%       93.5%   SEPARABLE
+       25      92.2%   0.959       90.5%       94.0%   SEPARABLE
+       30      90.5%   0.967       87.0%       94.0%   SEPARABLE
+      all      90.2%   0.960       87.5%       93.0%   SEPARABLE
+======================================================================
+pooling=last_token | probe=linear
+======================================================================
+  Samples: 200 class-1, 200 class-0
+  Chance baseline: 50.0%
+  Probe: linear
+
+    Layer   Accuracy     AUC   C1 Recall   C0 Recall     Verdict
+    -----  ---------  ------  ----------  ----------  ----------
+        5      78.8%   0.872       77.0%       80.5%   SEPARABLE
+       10      78.0%   0.844       75.0%       81.0%        WEAK
+       15      79.2%   0.869       77.0%       81.5%   SEPARABLE
+       20      75.2%   0.826       70.5%       80.0%        WEAK
+       25      78.5%   0.846       75.5%       81.5%        WEAK
+       30      76.2%   0.817       71.0%       81.5%        WEAK
+      all      80.5%   0.845       78.0%       83.0%        WEAK
+
+======================================================================
+pooling=last_token | probe=mlp
+======================================================================
+  Samples: 200 class-1, 200 class-0
+  Chance baseline: 50.0%
+  Probe: mlp
+
+    Layer   Accuracy     AUC   C1 Recall   C0 Recall     Verdict
+    -----  ---------  ------  ----------  ----------  ----------
+        5      73.0%   0.787       75.0%       71.0%        WEAK
+       10      72.8%   0.775       73.5%       72.0%        WEAK
+       15      76.0%   0.837       77.5%       74.5%        WEAK
+       20      76.0%   0.830       76.5%       75.5%        WEAK
+       25      76.0%   0.817       76.5%       75.5%        WEAK
+       30      77.8%   0.814       76.0%       79.5%        WEAK
+      all      78.0%   0.826       76.5%       79.5%        WEAK
+
+======================================================================
+pooling=last_quarter | probe=linear
+======================================================================
+  Samples: 200 class-1, 200 class-0
+  Chance baseline: 50.0%
+  Probe: linear
+
+    Layer   Accuracy     AUC   C1 Recall   C0 Recall     Verdict
+    -----  ---------  ------  ----------  ----------  ----------
+        5      87.0%   0.929       87.5%       86.5%   SEPARABLE
+       10      86.5%   0.929       86.0%       87.0%   SEPARABLE
+       15      84.2%   0.900       84.0%       84.5%   SEPARABLE
+       20      83.5%   0.896       82.0%       85.0%   SEPARABLE
+       25      85.5%   0.906       85.5%       85.5%   SEPARABLE
+       30      87.8%   0.910       86.5%       89.0%   SEPARABLE
+      all      86.5%   0.923       84.5%       88.5%   SEPARABLE
+
+======================================================================
+pooling=last_quarter | probe=mlp
+======================================================================
+  Samples: 200 class-1, 200 class-0
+  Chance baseline: 50.0%
+  Probe: mlp
+
+    Layer   Accuracy     AUC   C1 Recall   C0 Recall     Verdict
+    -----  ---------  ------  ----------  ----------  ----------
+        5      72.0%   0.799       70.5%       73.5%        WEAK
+       10      75.0%   0.835       74.5%       75.5%        WEAK
+       15      76.5%   0.826       73.0%       80.0%        WEAK
+       20      72.2%   0.797       70.5%       74.0%        WEAK
+       25      73.5%   0.793       71.5%       75.5%        WEAK
+       30      76.2%   0.836       76.5%       76.0%        WEAK
+      all      76.0%   0.821       75.0%       77.0%        WEAK
+
+Interpretation:
+  SEPARABLE (AUC>=0.85): CB rerouting CAN work at this layer
+  WEAK (AUC 0.70-0.85): Some signal, but CB may struggle
+  MARGINAL (AUC 0.55-0.70): Barely above chance
+  NO SIGNAL (AUC<0.55): CB cannot work at this layer
+
+
+################################################################
+TEST 2: Harmful vs Refusal (same injection context)
+################################################################
+
+======================================================================
+pooling=mean | probe=linear
+======================================================================
+  Samples: 200 class-1, 200 class-0
+  Chance baseline: 50.0%
+  Probe: linear
+
+    Layer   Accuracy     AUC   C1 Recall   C0 Recall     Verdict
+    -----  ---------  ------  ----------  ----------  ----------
+        5      77.8%   0.863       78.0%       77.5%   SEPARABLE
+       10      79.8%   0.889       80.5%       79.0%   SEPARABLE
+       15      78.3%   0.865       80.0%       76.5%   SEPARABLE
+       20      77.5%   0.862       78.0%       77.0%   SEPARABLE
+       25      75.5%   0.852       75.5%       75.5%   SEPARABLE
+       30      74.5%   0.836       73.5%       75.5%        WEAK
+      all      77.8%   0.865       77.5%       78.0%   SEPARABLE
+
+======================================================================
+pooling=mean | probe=mlp
+======================================================================
+  Samples: 200 class-1, 200 class-0
+  Chance baseline: 50.0%
+  Probe: mlp
+
+    Layer   Accuracy     AUC   C1 Recall   C0 Recall     Verdict
+    -----  ---------  ------  ----------  ----------  ----------
+        5      62.5%   0.694       64.0%       61.0%    MARGINAL
+       10      67.8%   0.753       65.0%       70.5%        WEAK
+       15      66.3%   0.757       65.0%       67.5%        WEAK
+       20      66.5%   0.759       64.0%       69.0%        WEAK
+       25      62.0%   0.685       56.5%       67.5%    MARGINAL
+       30      57.0%   0.604       55.5%       58.5%    MARGINAL
+      all      67.5%   0.751       66.0%       69.0%        WEAK
+
+======================================================================
+pooling=last_token | probe=linear
+======================================================================
+  Samples: 200 class-1, 200 class-0
+  Chance baseline: 50.0%
+  Probe: linear
+
+    Layer   Accuracy     AUC   C1 Recall   C0 Recall     Verdict
+    -----  ---------  ------  ----------  ----------  ----------
+        5      85.0%   0.952       83.5%       86.5%   SEPARABLE
+       10      85.8%   0.962       85.5%       86.0%   SEPARABLE
+       15      85.2%   0.951       84.5%       86.0%   SEPARABLE
+       20      85.5%   0.934       84.5%       86.5%   SEPARABLE
+       25      86.0%   0.922       85.5%       86.5%   SEPARABLE
+       30      86.2%   0.927       86.0%       86.5%   SEPARABLE
+      all      86.0%   0.926       85.5%       86.5%   SEPARABLE
+
+======================================================================
+pooling=last_token | probe=mlp
+======================================================================
+  Samples: 200 class-1, 200 class-0
+  Chance baseline: 50.0%
+  Probe: mlp
+
+    Layer   Accuracy     AUC   C1 Recall   C0 Recall     Verdict
+    -----  ---------  ------  ----------  ----------  ----------
+        5      86.5%   0.966       84.5%       88.5%   SEPARABLE
+       10      88.8%   0.967       89.5%       88.0%   SEPARABLE
+       15      86.8%   0.962       86.5%       87.0%   SEPARABLE
+       20      87.2%   0.948       84.5%       90.0%   SEPARABLE
+       25      89.0%   0.943       85.5%       92.5%   SEPARABLE
+       30      88.5%   0.926       89.0%       88.0%   SEPARABLE
+      all      92.5%   0.933       96.0%       89.0%   SEPARABLE
+
+======================================================================
+pooling=last_quarter | probe=linear
+======================================================================
+  Samples: 200 class-1, 200 class-0
+  Chance baseline: 50.0%
+  Probe: linear
+
+    Layer   Accuracy     AUC   C1 Recall   C0 Recall     Verdict
+    -----  ---------  ------  ----------  ----------  ----------
+        5      82.8%   0.929       83.0%       82.5%   SEPARABLE
+       10      83.2%   0.926       83.0%       83.5%   SEPARABLE
+       15      82.0%   0.922       81.0%       83.0%   SEPARABLE
+       20      81.8%   0.926       81.5%       82.0%   SEPARABLE
+       25      81.2%   0.922       81.0%       81.5%   SEPARABLE
+       30      80.0%   0.915       79.0%       81.0%   SEPARABLE
+      all      81.5%   0.923       81.5%       81.5%   SEPARABLE
+
+======================================================================
+pooling=last_quarter | probe=mlp
+======================================================================
+  Samples: 200 class-1, 200 class-0
+  Chance baseline: 50.0%
+  Probe: mlp
+
+    Layer   Accuracy     AUC   C1 Recall   C0 Recall     Verdict
+    -----  ---------  ------  ----------  ----------  ----------
+        5      73.0%   0.826       75.5%       70.5%        WEAK
+       10      77.2%   0.884       82.5%       72.0%   SEPARABLE
+       15      79.8%   0.886       78.5%       81.0%   SEPARABLE
+       20      77.8%   0.867       79.0%       76.5%   SEPARABLE
+       25      74.8%   0.881       79.0%       70.5%   SEPARABLE
+       30      73.2%   0.831       70.5%       76.0%        WEAK
+      all      81.2%   0.886       83.0%       79.5%   SEPARABLE
+
+Interpretation:
+  SEPARABLE (AUC>=0.85): CB rerouting CAN work at this layer
+  WEAK (AUC 0.70-0.85): Some signal, but CB may struggle
+  MARGINAL (AUC 0.55-0.70): Barely above chance
+  NO SIGNAL (AUC<0.55): CB cannot work at this layer
+
+
+################################################################
+TEST 3: All 32 layers — last_token + MLP (find where signal is)
+################################################################
+
+======================================================================
+pooling=last_token | probe=mlp
+======================================================================
+  Samples: 200 class-1, 200 class-0
+  Chance baseline: 50.0%
+  Probe: mlp
+
+    Layer   Accuracy     AUC   C1 Recall   C0 Recall     Verdict
+    -----  ---------  ------  ----------  ----------  ----------
+        0      87.0%   0.890       89.0%       85.0%   SEPARABLE
+        1      73.0%   0.777       78.0%       68.0%        WEAK
+        2      76.8%   0.830       79.5%       74.0%        WEAK
+        3      74.0%   0.791       76.0%       72.0%        WEAK
+        4      70.8%   0.764       73.5%       68.0%        WEAK
+        5      73.0%   0.787       75.0%       71.0%        WEAK
+        6      68.8%   0.747       71.0%       66.5%        WEAK
+        7      65.5%   0.706       64.5%       66.5%        WEAK
+        8      68.8%   0.756       72.0%       65.5%        WEAK
+        9      69.0%   0.760       72.0%       66.0%        WEAK
+       10      72.8%   0.775       73.5%       72.0%        WEAK
+       11      71.2%   0.771       68.5%       74.0%        WEAK
+       12      72.5%   0.789       72.5%       72.5%        WEAK
+       13      76.0%   0.823       78.5%       73.5%        WEAK
+       14      76.2%   0.803       74.0%       78.5%        WEAK
+       15      76.0%   0.837       77.5%       74.5%        WEAK
+       16      74.2%   0.814       69.5%       79.0%        WEAK
+       17      76.2%   0.836       76.5%       76.0%        WEAK
+       18      74.5%   0.841       76.5%       72.5%        WEAK
+       19      74.0%   0.817       74.5%       73.5%        WEAK
+       20      76.0%   0.830       76.5%       75.5%        WEAK
+       21      75.5%   0.827       78.0%       73.0%        WEAK
+       22      73.5%   0.811       72.0%       75.0%        WEAK
+       23      75.0%   0.833       77.0%       73.0%        WEAK
+       24      76.2%   0.831       78.0%       74.5%        WEAK
+       25      76.0%   0.817       76.5%       75.5%        WEAK
+       26      73.8%   0.796       71.0%       76.5%        WEAK
+       27      75.0%   0.816       80.0%       70.0%        WEAK
+       28      77.0%   0.827       78.0%       76.0%        WEAK
+       29      75.5%   0.826       77.0%       74.0%        WEAK
+       30      77.8%   0.814       76.0%       79.5%        WEAK
+       31      75.2%   0.825       78.5%       72.0%        WEAK
+      all      74.8%   0.788       74.0%       75.5%        WEAK
+
+Interpretation:
+  SEPARABLE (AUC>=0.85): CB rerouting CAN work at this layer
+  WEAK (AUC 0.70-0.85): Some signal, but CB may struggle
+  MARGINAL (AUC 0.55-0.70): Barely above chance
+  NO SIGNAL (AUC<0.55): CB cannot work at this layer
+
+
+All probes done: Mon 09 Mar 2026 05:25:29 PM EDT
+

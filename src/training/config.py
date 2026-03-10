@@ -136,6 +136,11 @@ class CircuitBreakerConfig:
     # - Eliminates margin tuning (no triplet_margin_benign/harmful needed)
     margin_free: bool = False
 
+    # Path to .pt file with importance mask for SRMU-style feature-selective rerouting.
+    # The file should contain a dict with key "importance" -> (H,) tensor in [0, 1].
+    # When None, standard (uniform) CB loss is used.
+    importance_mask_path: Optional[str] = None
+
     # === Training ===
     total_steps: int = 1100              # Paper: 1100 steps
     batch_size: int = 16                 # Paper: batch_size=16
@@ -148,12 +153,12 @@ class CircuitBreakerConfig:
     # === Data ===
     data_path: str = "data/circuit_breakers/cb_training_batches.jsonl"
     max_seq_length: int = 2048           # Max sequence length for tokenization
-    
+
     # === Multi-GPU (8 x H100) ===
     num_gpus: int = 8
     deepspeed_config: Optional[str] = None  # Path to DeepSpeed config if using
     gradient_checkpointing: bool = True     # Save memory on large model
-    
+
     # === Logging ===
     output_dir: str = "outputs/circuit_breaker"
     logging_steps: int = 10
@@ -173,7 +178,7 @@ class CircuitBreakerConfig:
     # Artifact logging policy: "none" | "final"
     wandb_log_artifacts: str = "none"
     wandb_artifact_type: str = "model"
-    
+
     # === Evaluation ===
     eval_data_path: Optional[str] = None  # Separate eval set if available
     eval_batch_size: int = 8
@@ -237,11 +242,11 @@ class CircuitBreakerConfigMistral_7B(CircuitBreakerConfig):
     beta_kl: float = 0.5
 
 
-@dataclass  
+@dataclass
 class CircuitBreakerConfigLlama4Scout(CircuitBreakerConfig):
     """
     Configuration for Llama-4-Scout-17B-16E-Instruct (MoE model).
-    
+
     Notes:
     - This is a Mixture of Experts model with 16 experts
     - Has 48 transformer layers
@@ -249,7 +254,7 @@ class CircuitBreakerConfigLlama4Scout(CircuitBreakerConfig):
     - We target router/gate projections in addition to attention
     """
     base_model: str = "meta-llama/Llama-4-Scout-17B-16E-Instruct"
-    
+
     # MoE-specific: include router weights
     lora: LoRAConfig = field(default_factory=lambda: LoRAConfig(
         r=16,
@@ -262,10 +267,10 @@ class CircuitBreakerConfigLlama4Scout(CircuitBreakerConfig):
         ],
         target_layers=list(range(0, 30))  # First 30 of 48 layers
     ))
-    
+
     # More layers to target for CB (48 total)
     cb_target_layers: List[int] = field(default_factory=lambda: [12, 24, 36])
-    
+
     # Adjusted hyperparameters for larger model
     alpha_max: float = 8.0               # Slightly lower for stability
     total_steps: int = 300               # More steps for larger model
@@ -291,27 +296,27 @@ CONFIG_PRESETS = {
 def get_config(preset: str = "llama-4-scout", **overrides) -> CircuitBreakerConfig:
     """
     Get a configuration preset with optional overrides.
-    
+
     Args:
         preset: One of "llama-4-scout", "llama-3-8b",
                 "llama-3.1-8b-instruct", "mistral-7b", "default"
         **overrides: Any config fields to override
-    
+
     Returns:
         CircuitBreakerConfig instance
     """
     if preset not in CONFIG_PRESETS:
         raise ValueError(f"Unknown preset: {preset}. Available: {list(CONFIG_PRESETS.keys())}")
-    
+
     config = CONFIG_PRESETS[preset]()
-    
+
     # Apply overrides
     for key, value in overrides.items():
         if hasattr(config, key):
             setattr(config, key, value)
         else:
             raise ValueError(f"Unknown config field: {key}")
-    
+
     return config
 
 

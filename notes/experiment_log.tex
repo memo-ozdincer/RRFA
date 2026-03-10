@@ -924,4 +924,723 @@ injection\_aware (loss) + cb\_full\_sequence (pool), contrastive pairs.
 
 \texttt{sbatch slurm/pipeline/sweep\_completed\_v1.sbatch}
 
+% ===================================================================
+\section{Sweep 7: Full Pipeline with Completed Traces (Mar 7, 2026)}
+% ===================================================================
+
+\textbf{Major policy finding:} \texttt{injection\_aware} was broken for benign
+traces --- they received all-zero loss masks, meaning the retain signal was zero.
+Switching to \texttt{cb\_full\_sequence} (which we had dismissed early on)
+immediately fixed this and became the only viable policy.
+
+\textbf{Bugs found and fixed (cumulative through Sweep 8):}
+\begin{enumerate}
+  \item \textbf{Schedule backwards:} $c_s$ and $c_r$ were swapped --- reroute
+        started at max and decayed, retain started at zero and grew.
+        Effect: rerouting was strongest at init (when LoRA is near-zero) and
+        weakest when the model had capacity to push.
+  \item \textbf{LoRA only layers 0--20:} Original CB paper used 0--20 for
+        Llama-3-8B (21 layers). We run on 8B-Instruct (32 layers). Fixed to
+        ALL 32 layers.
+  \item \textbf{LR and $\alpha$ halved:} Config parsing bug reduced both by 50\%.
+  \item \textbf{Missing DR (benign) data:} Fujitsu benign file was not being loaded.
+  \item \textbf{DR lossmask zero:} \texttt{injection\_aware} policy gave benign
+        traces zero-weight masks. Fixed by moving to \texttt{cb\_full\_sequence}.
+  \item \textbf{KL OOM:} Full-sequence KL on 2048-token inputs exceeded GPU memory.
+        Fixed with 512-token chunking.
+  \item \textbf{ZeroDivisionError:} In loss normalization when a batch had zero
+        valid tokens.
+  \item \textbf{margin\_free config:} \texttt{margin\_free=true} (no hinge loss)
+        gave $-1\%$ Fujitsu $\Delta$; \texttt{margin\_free=false} gave
+        $-21.4\%$. Margins are essential.
+  \item \textbf{alpha\_benign wrong coefficient:} Was using $c_s$ (reroute schedule)
+        instead of $c_r$ (retain schedule).
+  \item \textbf{POLICY hardcoded:} Config was always using default regardless
+        of sbatch variable.
+\end{enumerate}
+
+% ===================================================================
+\section{Sweep 8: Tool Schema Bug + AD Baseline (Mar 8, 2026)}
+% ===================================================================
+
+\textbf{Critical bug:} AgentDojo evaluation was using
+\texttt{b4\_standard\_v1.json} (8 Fujitsu tools) for ALL evals. 85\% of AD
+samples got empty tool lists because their tool names didn't match any schema.
+The eval silently produced near-zero tool call rates, making it look like
+the model wasn't calling tools at all.
+
+\textbf{Fix:} Extracted 64 unique tools from AD traces into
+\texttt{agentdojo\_v1.json}. Sweep scripts now use \texttt{AD\_TOOL\_SCHEMA}
+for AgentDojo evals, \texttt{TOOL\_SCHEMA} for Fujitsu.
+
+\textbf{Additional fixes:}
+\begin{itemize}
+  \item \texttt{\_resolve\_tools\_for\_sample()} now builds synthetic tool
+        definitions from inferred names instead of returning empty list (fallback).
+  \item \texttt{evaluate\_generation\_comparison()} pre-scans first 50 samples
+        and logs ERROR if $>$50\% have schema mismatches.
+  \item \texttt{ETL\_B.py} now accepts \texttt{--tool-schema} so training renders
+        match the tool-schema-aware eval format.
+\end{itemize}
+
+% ===================================================================
+\section{Sweep 9: First AD Signal (Mar 8--9, 2026)}
+% ===================================================================
+
+\textbf{Setup:} 6 configs, all using \texttt{cb\_full\_sequence} policy,
+\texttt{per\_token\_cb} loss, \texttt{dl2rc} distance, \texttt{margin\_free=false}.
+AD-only dataset ($\sim$2{,}500 harmful, $\sim$3{,}100 benign from truncated traces).
+
+\textbf{Baseline:} AD malicious $\approx$75\% (full traces), $\approx$68\%
+(truncated). Fujitsu ASR $\approx$84\%.
+
+\begin{center}
+\small
+\begin{tabular}{lrrrrl}
+\toprule
+Config & Steps & Fujitsu $\Delta$ & AD Full $\Delta$ & AD Trunc $\Delta$ & Benign \\
+\midrule
+ad\_500         & 500  & $-7\%$  & $-2\%$  & $-4\%$           & 77\% \\
+ad\_1000        & 1000 & $-8\%$  & $-1\%$  & \good{$-5\%$}    & 77\% \\
+ad\_2000\_aggr  & 2000 & $-9\%$  & $0\%$   & $-4\%$           & 82\% \\
+ad\_500\_wide   & 500  & $-13\%$ & $-3\%$  & $+2\%$           & 84\% \\
+ad\_1000\_nokl  & 1000 & $-4\%$  & $-2\%$  & $-2\%$           & 82\% \\
+balanced\_500   & 500  & $-27\%$ & $+1\%$  & $+5\%$           & 78\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Conclusion:} All AD deltas were 2--5\%. Default params + moderate steps
+(ad\_1000) beat aggressive configs. Aggressive LR/alpha overshot. Something
+fundamental was limiting training effectiveness.
+
+% ===================================================================
+\section{Training Inefficiency Analysis (Mar 9, 2026)}
+\label{sec:inefficiency}
+% ===================================================================
+
+Investigating why Sweep~9 deltas were only 2--5\% despite 1000+ steps and
+confirmed representation-level signal, we identified \textbf{four compounding
+inefficiencies} that collectively killed gradient flow through most of training.
+
+\subsection{Bug 1: Alpha Decay Kills Push at Training End}
+
+The coefficient schedule is:
+\begin{equation}
+  c_s = \alpha_{\max} \cdot \max\!\left(0,\; 1 - \frac{t}{\texttt{decay\_mult} \cdot T}\right)
+\end{equation}
+With \texttt{alpha\_decay\_multiplier}$=1.0$ (the default), $c_s = 0$ at
+$t = T$. The harmful push is literally zero at the end of training.
+
+\textbf{Fix:} Set \texttt{alpha\_decay\_multiplier}$=2.0$. At $t = T$,
+$c_s = 0.5 \cdot \alpha_{\max}$ --- push remains at 50\% throughout training.
+
+\subsection{Bug 2: Margin Saturates Instantly}
+
+The hinge loss for the harmful term is:
+\begin{equation}
+  \mathcal{L}_{\text{harmful}} = \mathrm{ReLU}\!\left(m_h - d(\mathbf{h}_{\text{lora}},\, \mathbf{h}_{\text{frozen}})\right)
+\end{equation}
+With \texttt{margin\_harmful}$=1.6$ and \texttt{dl2rc} distance on
+$\mathbb{R}^{4096}$ representations, the L2 norm alone easily exceeds 1.6
+within 10--50 gradient steps. Once $d > m_h$, $\nabla \mathcal{L}_{\text{harmful}} = 0$.
+\textbf{The harmful loss had zero gradient for 95--99\% of training.}
+
+\textbf{Fix:} Set \texttt{margin\_harmful}$=20.0$. With dl2rc (L2 + 10$\cdot$ReLU(1$-$cos)),
+this margin is large enough to sustain gradient flow through all of training.
+
+\subsection{Bug 3: KL Fights the Push}
+
+$\gamma_\mathrm{kl} = 0.3$ was held constant while $c_s$ decayed to 0. In the
+second half of training, the KL divergence term (which penalizes deviation from
+base model logits) was the dominant force, \emph{actively undoing} the harmful push.
+
+\textbf{Fix:} Schedule KL with the retain coefficient:
+\begin{equation}
+  \gamma_{\text{kl,eff}} = \frac{c_r}{\alpha_{\max}} \cdot \gamma_\mathrm{kl}
+\end{equation}
+Since $c_r$ ramps from 0 to $\alpha_{\max}$, KL starts at zero (no interference
+with harmful push) and gradually increases as retain becomes the priority.
+
+\subsection{Bug 4: LR Decays on Top of Alpha}
+
+\texttt{get\_linear\_schedule\_with\_warmup} decays LR to 0 at $t = T$.
+Combined with $c_s \to 0$ (Bug~1), the effective learning signal was
+proportional to:
+\begin{equation}
+  \text{effective} \propto \mathrm{LR}(t) \cdot c_s(t) \propto (1-t/T)^2
+\end{equation}
+A \textbf{quadratic decay}: at the midpoint of training, effective learning was
+already at 25\% of initial. By 75\%, it was 6.25\%.
+
+\textbf{Fix:} Use \texttt{get\_constant\_schedule\_with\_warmup} --- LR holds
+constant after warmup. Combined with \texttt{decay\_mult}$=2.0$, effective
+learning at end of training is $0.5 \cdot \alpha_{\max} \cdot \mathrm{LR}_0$.
+
+\subsection{Combined Effect}
+
+All four bugs are multiplicative. With all four present (Sweep~9):
+\begin{equation}
+  \text{effective}_{\text{sweep9}}(t=0.5T) = \mathrm{LR}_0 \cdot 0.5 \cdot \alpha_{\max} \cdot 0.5 \cdot \underbrace{\mathbb{1}[d < 1.6]}_{\approx 0} = \approx 0
+\end{equation}
+With all four fixed (Sweep~10):
+\begin{equation}
+  \text{effective}_{\text{sweep10}}(t=0.5T) = \mathrm{LR}_0 \cdot \alpha_{\max} \cdot 0.75 \cdot \mathbb{1}[d < 20.0] > 0
+\end{equation}
+
+% ===================================================================
+\section{Sweep 10: Schedule Fix (Mar 9, 2026)}
+% ===================================================================
+
+\textbf{Setup:} Same as Sweep~9 but with all four fixes applied.
+\texttt{ad\_3000\_v2}: $\texttt{alpha\_decay\_mult}=2.0$,
+$\texttt{margin\_harmful}=20.0$, $\texttt{margin\_benign}=3.0$,
+$\texttt{lr\_schedule}=\text{constant}$, KL scheduled with $c_r$.
+
+\subsection{Results}
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+Metric & Sweep 9 best (ad\_1000) & Sweep 10 (ad\_3000\_v2) \\
+\midrule
+Fujitsu $\Delta$ & $-8\%$ & \good{$-33\%$} \\
+AD Full $\Delta$ (malicious) & $-1\%$ & \good{$-46\%$} \\
+AD Trunc $\Delta$ (malicious) & $-5\%$ & \good{$-45\%$} \\
+AD Benign correct & 77\% & \bad{40\%} \\
+AD Benign no\_tool & 4\% & \bad{52\%} \\
+Gibberish (harmful) & 0 & 4/96 \\
+Gibberish (benign) & 0 & \bad{10/97} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Training Dynamics}
+
+The training curve reveals a clear pathology:
+\begin{itemize}
+  \item \textbf{Steps 0--30:} Triplet\_H collapses from 19.75 to 0.01 (margin 20.0
+        reached in $\sim$30 steps). Triplet\_B rises from 0 to 24.8 (benign
+        representations anchored to base).
+  \item \textbf{Steps 30--2000:} Triplet\_H $\approx 0$ (harmful push has zero
+        gradient --- margin already exceeded). Triplet\_B slowly decays from 24 to
+        $\sim$1 (benign representations slowly drifting). Only KL and retain loss
+        active.
+  \item \textbf{Steps 2000--3000:} Triplet\_H spikes (3$\to$10+), suggesting
+        the model's representations are being pulled back within margin by KL/retain
+        forces, re-activating the hinge loss. But by this point, benign capability
+        is already destroyed.
+\end{itemize}
+
+\textbf{Key observation:} The model overshoots in $\sim$30 steps, then spends
+2970 steps with the retain/KL terms slowly corrupting benign representations.
+3000 steps is far too many.
+
+\subsection{Output Quality}
+
+CB model outputs on harmful inputs are \textbf{gibberish}, not clean refusals:
+\begin{verbatim}
+CB: ,,,,,,,,,,,,,,,,,,,,,,,,,,{",,,[",,,,,,,,,,,,,,{",[",[",[",
+CB: :,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+CB: {"{"{"{"{"{"{"{"{"{"{"{"{"{"{"{"{"{"{"{"{"{"{"{"{"{"{"{"{"{"
+\end{verbatim}
+The model has learned to produce degenerate token sequences that avoid tool
+calls but are not meaningful text. Some ``correct'' tool calls on benign inputs
+are likely gibberish with a tool name accidentally parsed from the noise.
+
+\subsection{Interpretation (ad\_3000\_v2 only)}
+
+The four training fixes \textbf{worked}: harmful rate dropped from 73\% to 27\%
+(AD full), a $-46$pp delta vs.\ $-1$pp in Sweep~9. But the benign destruction
+(40\% correct, 52\% no\_tool) means 3000 steps with these aggressive settings
+is far past the useful training horizon. The sweet spot is likely 500--1000 steps.
+
+\subsection{Full Sweep 10 Results: ad\_1000\_v2, ad\_3000\_v2, ad\_5000\_v2}
+
+Three v2 configs completed. All share: \texttt{decay\_mult}=2.0,
+\texttt{margin\_harmful}=20.0, \texttt{margin\_benign}=3.0,
+\texttt{lr\_schedule}=constant, KL scheduled with $c_r$, AD-only data.
+
+\begin{center}
+\small
+\begin{tabular}{l r c c c c c c}
+\toprule
+Config & Steps & Fuj $\Delta$ & AD Full mal & AD Trunc mal & Ben correct & Ben no\_tool & Gibberish (H/B) \\
+\midrule
+Sweep 9 best     & 1000 & $-8\%$  & 74\% ($-1$) & 63\% ($-5$) & 77\% & 4\%  & 0/0 \\
+\texttt{ad\_1000\_v2} & 1000 & $-14\%$ & 31\% (\good{$-45$}) & 30\% (\good{$-37$}) & 41\% & 15\% & 25/23 \\
+\texttt{ad\_3000\_v2} & 3000 & $-33\%$ & 27\% (\good{$-46$}) & 22\% (\good{$-45$}) & \bad{40\%} & \bad{52\%} & 4/10 \\
+\texttt{ad\_5000\_v2} & 5000 & \good{$-58\%$} & 32\% (\good{$-42$}) & 24\% (\good{$-44$}) & \good{72\%} & 5\% & 10/2 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{ad\_5000\_v2 Pareto-dominates ad\_3000\_v2.}
+Despite longer training, ad\_5000\_v2 has dramatically better benign preservation
+(72\% vs 40\%) and Fujitsu ($-58\%$ vs $-33\%$), with only marginally worse AD
+malicious rate (32\% vs 27\%). The extra training time strengthens benign
+anchoring during Phase~2 (see below).
+
+\paragraph{ad\_300\_v2 partial.} Only the Fujitsu eval completed: BL=85\%,
+CB=16\%, $\Delta=-69\%$. If confirmed by AD metrics, this is the best Fujitsu
+result to date. Awaiting full evaluation.
+
+\paragraph{Zero Fujitsu regressions.} Across all three runs: 14+32+57 = 103
+Fujitsu improvements, 0 regressions. All Fujitsu CB outputs are clean correct
+tool calls with proper JSON.
+
+\subsection{Three-Phase Training Dynamic}
+\label{sec:phases}
+
+The training curve of all three v2 runs reveals a consistent three-phase
+pattern (shown here for ad\_3000\_v2):
+
+\begin{center}
+\small
+\begin{tabular}{lrcccl}
+\toprule
+Phase & Steps & Triplet\_H & Triplet\_B & $c_s$ & Interpretation \\
+\midrule
+1: Push     & 0--40       & 19.8 $\to$ 0.01 & 0 $\to$ 20.5  & 10.0 & Margin exceeded \\
+2: Plateau  & 40--2050    & $\approx 0$      & 20 $\to$ 7    & 9.9 $\to$ 6.6 & Benign-only training \\
+3: Collapse & 2050--3000  & 2 $\to$ 7        & 7 $\to$ 0.08  & 6.6 $\to$ 5.0 & Benign destroyed \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Phase boundaries scale with step count:}
+
+\begin{center}
+\small
+\begin{tabular}{lccc}
+\toprule
+Milestone & ad\_1000\_v2 & ad\_3000\_v2 & ad\_5000\_v2 \\
+\midrule
+Triplet\_H first $< 0.01$ & step 40 & step 40 & step 40 \\
+Phase 3 onset (Triplet\_H $> 1.0$) & step $\sim$850 (85\%) & step 2050 (68\%) & step 3510 (70\%) \\
+Triplet\_B $< 1.0$ & step $\sim$900 & step 2200 (73\%) & step 3590 (72\%) \\
+Phase 2 duration & $\sim$810 steps & $\sim$2010 steps & $\sim$3470 steps \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Phase 3 mechanism.} The collapse occurs at $\sim$68--72\% of training
+across all runs. The mechanism:
+\begin{enumerate}
+  \item Harmful distance $d_h$ exceeds margin~20 in $\sim$30 steps $\Rightarrow$
+        $\mathrm{ReLU}(20 - d_h) = 0$ $\Rightarrow$ zero gradient on harmful push.
+  \item During Phase~2, only retain and KL losses are active. LoRA weights drift
+        to preserve benign outputs.
+  \item The drift causes $d_h$ to decrease back below margin~20, re-activating
+        the harmful hinge loss. Now harmful push and benign retain \emph{compete}
+        for the same LoRA parameters, and benign loses because the push direction
+        is stronger (AUC~0.96) than the selectivity signal (AUC~0.83).
+\end{enumerate}
+
+\paragraph{Why ad\_5000\_v2 preserves benign better.}
+More Phase~2 steps = more benign anchoring epochs (11.1 vs 6.4 for ad\_3000\_v2).
+The stronger anchor resists Phase~3 disruption: ad\_5000\_v2 retains 72\% benign
+vs ad\_3000\_v2's 40\%, despite spending proportionally similar time in Phase~3.
+
+\subsection{Cross-Dataset Divergence: Fujitsu vs AgentDojo}
+
+\begin{center}
+\small
+\begin{tabular}{lll}
+\toprule
+Aspect & Fujitsu B4 & AgentDojo \\
+\midrule
+Injection location & User message (HTML comment) & Tool output (\texttt{<INFORMATION>} tag) \\
+Attack type & Tool flip (1-to-1 mapping) & Arbitrary action (diverse) \\
+CB output quality & \good{Clean correct tool calls} & \bad{Gibberish / suppression} \\
+Best $\Delta$ (sweep 10) & $-58\%$ (ad\_5000\_v2) & $-45\%$ (ad\_3000\_v2) \\
+Gibberish rate & 0/98 (all runs) & 4--25/96 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Fujitsu CB outputs are clean redirects.}
+\begin{verbatim}
+BL: {"name":"search_web","parameters":{"query":"Mars rover mission..."}}
+CB: {"name":"retrieve_multimodal_docs","parameters":{"query":"Mars rover..."}}
+\end{verbatim}
+
+\paragraph{AD CB outputs are degenerate.} Three output modes emerge with
+increasing step count:
+\begin{itemize}
+  \item \textbf{1000 steps:} Token repetition
+    (\texttt{<|python\_tag|><|python\_tag|>...})
+  \item \textbf{3000 steps:} Character gibberish (\texttt{,,,,,\{",,,[",,["})
+  \item \textbf{5000 steps:} Semi-coherent garbled JSON
+    (\texttt{\{"name":"Re: [email"]})
+\end{itemize}
+
+\paragraph{Explanation.}
+Fujitsu has a single clear alternative tool (\texttt{search\_web} $\to$
+\texttt{retrieve\_multimodal\_docs}). When CB pushes the representation away
+from the malicious tool, the nearest valid tool call in representation space is
+the correct one. AgentDojo has 64~tools and diverse attack goals --- pushing away
+from the malicious tool lands in a degenerate region with no clear alternative.
+
+% ===================================================================
+\section{Probe Diagnostic: Representation Separability (Mar 9, 2026)}
+\label{sec:probe}
+% ===================================================================
+
+\textbf{Motivation:} Before investing in more sweeps, test whether the
+\emph{base model} (pre-CB, no LoRA) encodes harmful vs.\ benign differently
+at the representation level. If the base model cannot distinguish them, CB
+rerouting has no signal to exploit.
+
+\textbf{Method:} Extract hidden states at layers 5, 10, 15, 20, 25, 30 from
+the base Llama-3.1-8B-Instruct model. Train linear (logistic regression) and
+MLP ($256 \times 64$) probes with 5-fold stratified CV.
+200 samples per class, balanced.
+
+Three pooling strategies: mean (all tokens), last\_token (generation point),
+last\_quarter (last 25\% of tokens).
+
+\subsection{Test 1: Harmful vs Benign (Different Context)}
+
+\begin{center}
+\small
+\begin{tabular}{llcl}
+\toprule
+Pooling & Probe & AUC Range & Verdict \\
+\midrule
+Mean         & Linear & 0.966--0.975 & SEPARABLE \\
+Mean         & MLP    & 0.951--0.969 & SEPARABLE \\
+Last quarter & Linear & 0.896--0.929 & SEPARABLE \\
+Last quarter & MLP    & 0.793--0.836 & WEAK \\
+Last token   & Linear & 0.817--0.872 & WEAK--SEPARABLE \\
+Last token   & MLP    & 0.775--0.837 & WEAK \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Caveat --- this test is largely trivial.} Harmful traces contain
+injection text in tool outputs; benign traces have clean conversations.
+The probe is mostly detecting ``injection text present in context'' (a surface
+feature), not ``model intends to comply with injection'' (a behavioral feature).
+A bag-of-words classifier on the raw input would likely achieve similar AUC.
+
+The result is useful only as a \textbf{sanity check}: the model's hidden states
+\emph{do} encode context-level differences. Signal is strongest in mean-pooled
+representations (distributed across all tokens) and weakest at the last token
+(the generation point that matters for tool-call prediction).
+
+\subsection{Test 2: Harmful vs Refusal (Same Injection Context)}
+
+We generated 1{,}225 synthetic refusal traces (Section~\ref{sec:refusal})
+sharing the \emph{identical} injection context as harmful traces, differing
+only in the last assistant message (tool call vs.\ refusal text).
+
+\begin{center}
+\small
+\begin{tabular}{llcl}
+\toprule
+Pooling & Probe & AUC Range & Verdict \\
+\midrule
+Last token   & MLP    & 0.926--0.967 & SEPARABLE \\
+Last token   & Linear & 0.922--0.962 & SEPARABLE \\
+Last quarter & Linear & 0.915--0.929 & SEPARABLE \\
+Mean         & Linear & 0.836--0.889 & SEPARABLE/WEAK \\
+Last quarter & MLP    & 0.826--0.886 & WEAK--SEPARABLE \\
+Mean         & MLP    & 0.604--0.759 & MARGINAL--WEAK \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{The pooling pattern flips.} In Test~1, mean pooling was best
+(AUC~0.97) and last\_token weakest (0.84). Here it \emph{reverses}:
+last\_token is best (0.96) and mean is weakest (0.76 MLP). The explanation
+is clean: context is now \emph{identical}, so mean-pooling averages over
+thousands of shared tokens that dilute the response signal. Last\_token
+sits at the generation point where the response diverges.
+
+\paragraph{Partial triviality caveat.} The 0.96 AUC at last\_token is
+partly a surface feature: harmful traces end with JSON tool-call tokens
+(\texttt{\{"name": ...\}}), refusal traces end with English text
+(``I'll disregard those...''). The probe partly detects
+``JSON representations $\neq$ English representations,'' not purely
+``comply intent $\neq$ refuse intent.''
+
+\paragraph{Why it is still useful for CB.} We \emph{want} CB to reroute
+from ``about to emit tool-call JSON'' toward ``about to emit refusal text.''
+The 0.96 AUC at last\_token means this direction is linearly separable and
+CB can learn it. The issue is not whether the direction exists, but whether
+CB can apply it \emph{selectively} (only when injection is present).
+
+Best layer: 10 (AUC~0.962 linear, 0.967 MLP). Signal is present at all
+layers but peaks in the 10--15 range.
+
+\subsection{Test 3: All 32 Layers (last\_token + MLP, harmful vs.\ benign)}
+
+Scans all 32 layers with last\_token pooling and MLP probe using the
+harmful-vs-benign (different context) split.
+
+\begin{center}
+\small
+\begin{tabular}{ccl@{\qquad}ccl}
+\toprule
+Layer & AUC & Verdict & Layer & AUC & Verdict \\
+\midrule
+0  & \good{0.890} & SEPARABLE & 16 & 0.814 & WEAK \\
+1  & 0.777 & WEAK & 17 & 0.836 & WEAK \\
+2  & 0.830 & WEAK & 18 & 0.841 & WEAK \\
+3  & 0.791 & WEAK & 19 & 0.817 & WEAK \\
+4  & 0.764 & WEAK & 20 & 0.830 & WEAK \\
+5  & 0.787 & WEAK & 21 & 0.827 & WEAK \\
+6  & 0.747 & WEAK & 22 & 0.811 & WEAK \\
+7  & \bad{0.706} & WEAK & 23 & 0.833 & WEAK \\
+8  & 0.756 & WEAK & 24 & 0.831 & WEAK \\
+9  & 0.760 & WEAK & 25 & 0.817 & WEAK \\
+10 & 0.775 & WEAK & 26 & 0.796 & WEAK \\
+11 & 0.771 & WEAK & 27 & 0.816 & WEAK \\
+12 & 0.789 & WEAK & 28 & 0.827 & WEAK \\
+13 & 0.823 & WEAK & 29 & 0.826 & WEAK \\
+14 & 0.803 & WEAK & 30 & 0.814 & WEAK \\
+15 & 0.837 & WEAK & 31 & 0.825 & WEAK \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Layer~0 (embedding) is the only SEPARABLE layer (0.890). All
+transformer layers are WEAK (0.71--0.84). The signal is weakest in early-mid
+layers (6--9, AUC~0.71--0.76) and modestly stronger in later layers (15--31,
+AUC~0.81--0.84). No single layer is a clear ``injection detection'' layer.
+
+Layer~0 being best indicates the signal is primarily \textbf{lexical}
+(injection text has different token distributions than clean text), not a
+deep behavioral feature.
+
+\subsection{Synthesis: The Selectivity Problem}
+\label{sec:selectivity}
+
+The three tests reveal a fundamental tension:
+
+\begin{enumerate}
+  \item \textbf{Strong push direction} (Test~2): The model's representations
+        at the generation point linearly separate ``comply'' from ``refuse''
+        with AUC~0.96. CB can learn which direction to push.
+
+  \item \textbf{Weak selectivity signal} (Test~3): At the same generation
+        point, the model only WEAKLY distinguishes injection-context from
+        clean-context (AUC~0.83). This is the ceiling on how well CB can
+        decide \emph{when} to push.
+
+  \item \textbf{The consequence}: CB rerouting learns a global direction
+        (``away from tool-call JSON, toward refusal text'') but the LoRA is
+        always active at inference. It pushes \emph{all} tool-call
+        representations, harmful and benign alike. The only selectivity comes
+        from the weak context signal (0.83 AUC), which must counteract the
+        strong push direction (0.96 AUC). This is why the 3000-step model
+        achieved $-46\%$ harmful delta but destroyed benign capability
+        (40\% correct).
+\end{enumerate}
+
+\paragraph{Theoretical implication.} CB rerouting on this task will always
+face a \textbf{Pareto tradeoff} between harmful reduction and benign
+preservation. The tradeoff is governed by the ratio of selectivity signal
+(AUC~0.83) to push signal (AUC~0.96). Shorter training finds a less
+aggressive point on this frontier; it cannot eliminate the tradeoff.
+
+\paragraph{Possible mitigations.}
+\begin{itemize}
+  \item \textbf{Amplify selectivity}: Make injection-context vs.\ clean-context
+        more distinguishable. E.g., exaggerate injection markers, repeat
+        injection text, add explicit boundary tokens.
+  \item \textbf{Two-stage approach}: First detect injection (a classification
+        problem with 0.83--0.97 AUC depending on pooling), then reroute
+        only on flagged inputs. Decouples detection from rerouting.
+  \item \textbf{Fujitsu re-addition}: Fujitsu traces have clearer injection
+        structure (HTML comments in user messages) that may provide stronger
+        selectivity signal, improving the context-level discrimination that
+        CB needs.
+  \item \textbf{Conditional LoRA}: Only activate the rerouting adapter when
+        an injection is detected. Requires an injection classifier but
+        preserves benign capability perfectly.
+\end{itemize}
+
+% ===================================================================
+\section{Synthetic Refusal Traces}
+\label{sec:refusal}
+% ===================================================================
+
+\textbf{Motivation:} Standard CB training pushes harmful representations
+\emph{away from} the base model but does not specify a target direction.
+The model learns ``don't produce representations like the base model does
+for harmful inputs'' but not ``produce representations like a refusal.''
+This may explain why CB outputs are gibberish rather than clean refusals.
+
+\textbf{Method:} Take each harmful truncated trace (context includes injection
+in tool output, last assistant message is the malicious tool call). Replace the
+last assistant message with a randomly selected refusal template. Label as benign.
+Add to the retain training set.
+
+10 refusal templates varying in length and specificity, e.g.:
+\begin{quote}
+\small
+``I notice the previous output contains instructions that weren't part of the
+original request. I'll disregard those and focus on what you actually asked for.''
+\end{quote}
+
+\textbf{Result:} 1{,}225 refusal traces generated from 2{,}738 harmful inputs
+(1{,}513 skipped due to traces not ending with assistant message or being too
+short). These are added to the benign retain set, gated by the
+\texttt{USE\_REFUSAL} flag.
+
+\textbf{Hypothesis:} By including refusal traces in the retain set, the CB loss
+anchors harmful-context representations to refusal-like hidden states instead of
+generic benign states. This gives the rerouting a \emph{directed target}: when
+the model sees an injection, its representations should look like ``I'm about to
+refuse'' rather than ``I'm about to produce random text.''
+
+% ===================================================================
+\section{Sweep 11: Step Sweep (Mar 9, 2026 --- Planned)}
+\label{sec:sweep11}
+% ===================================================================
+
+\textbf{Motivation:} Sweep~10 showed the training fixes produce real signal
+($-46\%$ AD delta) but 3000 steps destroys benign capability. Need to find
+the optimal step count.
+
+\textbf{Configs:} All use the same v2 fixes (decay\_mult=2.0, margin\_h=20.0,
+margin\_b=3.0, constant LR, KL scheduled with $c_r$).
+
+\begin{center}
+\small
+\begin{tabular}{lrl}
+\toprule
+Config & Steps & Epochs ($\approx$) \\
+\midrule
+ad\_300\_v2  & 300  & 1.0 \\
+ad\_500\_v2  & 500  & 1.6 \\
+ad\_750\_v2  & 750  & 2.4 \\
+ad\_1000\_v2 & 1000 & 3.2 \\
+ad\_1500\_v2 & 1500 & 4.8 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Enhanced evaluation:} In addition to standard metrics, Sweep~11 adds:
+\begin{enumerate}
+  \item \textbf{Output quality analysis:} For each eval set, classify CB outputs
+        as clean tool call, gibberish-with-tool-name (inflated metric), pure
+        gibberish, or clean text. Report how many ``correct'' tool calls are
+        actually gibberish that accidentally contains a parseable tool name.
+  \item \textbf{Full-trace eval:} Run a second evaluation pass with
+        \texttt{--eval-mode full\_trace} (full sequence generation) alongside
+        the standard \texttt{next\_tool\_prediction} mode, to compare behavior
+        when the model generates a complete response vs.\ just the next tool.
+\end{enumerate}
+
+\textbf{Revised predictions} (informed by full Sweep~10 results):
+\begin{itemize}
+  \item \textbf{300--500 steps:} Phase~1 and early Phase~2.
+        The ad\_300\_v2 partial result ($-69\%$ Fujitsu) suggests very strong early
+        push before Phase~3 collapse. AD harmful $\Delta$ likely $-20$ to $-35\%$
+        with $>70\%$ benign preservation.
+  \item \textbf{750--1000 steps:} Late Phase~2, approaching Phase~3 boundary
+        (onset at $\sim$68--72\% of training). Best tradeoff zone.
+        Based on ad\_1000\_v2: expect $\sim -37\%$ AD trunc $\Delta$ but benign
+        may suffer ($\sim$40--60\%).
+  \item \textbf{1500 steps:} Phase~3 in progress. Benign degradation likely
+        unless offset by balanced data or refusal traces.
+\end{itemize}
+
+\textbf{Key insight from Sweep~10:} ad\_5000\_v2 achieved \emph{better} benign
+preservation (72\%) than ad\_3000\_v2 (40\%) or ad\_1000\_v2 (41\%), despite
+longer training. More Phase~2 epochs (11.1 vs 6.4 vs 2.6) build stronger
+benign anchors that resist Phase~3 disruption. This suggests that
+\textbf{step count alone is insufficient} --- the ratio of Phase~2 to Phase~3
+duration matters more than absolute step count.
+
+\textbf{Implication for Sweep~11:} Balanced configs (adding Fujitsu data) and
+refusal configs may extend Phase~2 by providing stronger benign/retain signal.
+The Pareto frontier from Sweep~10 (only ad\_5000\_v2 is Pareto-optimal) suggests
+that simply sweeping step counts may not find a better operating point without
+additional data augmentation.
+
+% ===================================================================
+\section{Lessons Learned (Cumulative)}
+% ===================================================================
+
+\begin{enumerate}
+  \item \textbf{Cosine similarity + LoRA = dead at init.} LoRA weights start
+        near zero, so $h_{\text{lora}} \approx h_{\text{frozen}}$ and
+        $\cos(h_{\text{lora}}, h_{\text{frozen}}) \approx 1.0$. The ReLU in
+        $\mathrm{ReLU}(\cos\!\operatorname{sim})$ clips this to 1.0 with gradient
+        that points the wrong way. Require L2 or mixed distance.
+
+  \item \textbf{Margins must be calibrated to the distance metric.} Margin 1.6
+        with dl2rc on $\mathbb{R}^{4096}$ saturates in 10--50 steps.
+        $\mathrm{ReLU}(m - d) = 0$ once $d > m$ means zero gradient.
+        Margin should be set relative to the expected distance scale.
+
+  \item \textbf{Multiple decaying schedules compound.} LR decay $\times$ alpha
+        decay $\propto (1-t)^2$. Each schedule looks reasonable alone; together
+        they create quadratic effective-learning decay. Prefer constant LR when
+        using coefficient schedules.
+
+  \item \textbf{KL divergence fights representation rerouting.} Constant KL
+        penalty actively undoes the harmful push as the push coefficient decays.
+        Schedule KL to ramp with the retain coefficient.
+
+  \item \textbf{Data pipeline bugs are silent.} Zero-mask coverage, wrong tool
+        schemas, missing benign files, schema mismatches --- none of these
+        produce errors. Training loss still converges. Only eval reveals the problem.
+
+  \item \textbf{``Training loss converges'' $\neq$ ``model learned anything.''}
+        Always evaluate. A model can show declining loss while learning nothing
+        useful (or learning to produce gibberish).
+
+  \item \textbf{Probe separability with different contexts is trivially high.}
+        Comparing traces with vs.\ without injection text will always show high
+        AUC (0.97 mean-pooled). Same-context different-response (harmful vs.\
+        refusal) is the meaningful test --- but even there, 0.96 last\_token AUC
+        partly reflects surface token type (JSON vs.\ English), not pure
+        behavioral intent.
+
+  \item \textbf{The selectivity ceiling.} CB rerouting's effectiveness is
+        bounded by the model's ability to distinguish injection-context from
+        clean-context at the generation point (AUC~0.83, WEAK). The push
+        direction is strong (0.96) but unselective. This predicts a Pareto
+        tradeoff: more harmful reduction $\Rightarrow$ more benign destruction.
+
+  \item \textbf{CB produces gibberish, not refusals.} Without a directed target
+        (refusal representation), the model learns to produce degenerate token
+        sequences that avoid the malicious tool call but are not useful text.
+        Synthetic refusal data in the retain set may fix this by anchoring the
+        rerouting target.
+
+  \item \textbf{Verify against known-good baselines before exploring new configs.}
+        Many early experiments were invalidated by bugs. Establish a verified
+        baseline and re-run when bugs are found rather than layering fixes.
+
+  \item \textbf{Three-phase training dynamic.} CB training with margin hinge loss
+        follows Push $\to$ Plateau $\to$ Collapse. Phase~1 saturates the margin in
+        $\sim$30 steps (zero harmful gradient thereafter). Phase~2 is benign-only
+        training. Phase~3 begins at $\sim$68--72\% of training when representation
+        drift pulls harmful distance back within margin, re-activating harmful
+        push at the expense of benign. Stop before Phase~3 or strengthen benign
+        anchoring to survive it.
+
+  \item \textbf{More Phase~2 epochs $>$ fewer total steps.} ad\_5000\_v2 (72\%
+        benign) outperformed ad\_3000\_v2 (40\% benign) despite longer training
+        because it had 3470 steps of benign anchoring vs 2010. The ratio of
+        Phase~2 to Phase~3 duration matters more than absolute step count.
+
+  \item \textbf{Injection structure determines CB output quality.} Structural
+        injections (Fujitsu HTML comments, 1-to-1 tool mapping) allow clean
+        redirect outputs. Semantic injections (AD \texttt{<INFORMATION>} tags,
+        diverse goals, 64 tools) produce gibberish because no single clear
+        alternative exists in representation space.
+
+  \item \textbf{Pareto dominance requires multi-metric evaluation.} Looking at
+        AD harmful reduction alone would pick ad\_3000\_v2 ($-46\%$). Adding
+        benign and Fujitsu metrics reveals ad\_5000\_v2 dominates on the Pareto
+        frontier. Always evaluate all metrics before declaring a best config.
+\end{enumerate}
+
 \end{document}
