@@ -372,12 +372,12 @@ AMPLIFY_INJECTIONS="${_AMPLIFY:-false}"
 AMPLIFY_REPEATS="${_AMP_REPEATS:-2}"
 
 # Importance mask for SRMU-style feature-selective rerouting
-# "auto" = use default probe direction files from configs/probe_directions/
+# "auto" = use default probe direction files on scratch (writable)
 # explicit path = use that specific .pt file
 # empty = no mask (standard CB loss)
 IMPORTANCE_MASK_PATH=""
 if [[ "$_IMPORTANCE_MASK" == "auto" ]]; then
-    PROBE_DIR="$REPO_DIR/configs/probe_directions"
+    PROBE_DIR="$CB_SCRATCH/probe_directions"
     IMPORTANCE_MASK_PATH="$PROBE_DIR/layer10_last_token.pt"
 elif [[ -n "$_IMPORTANCE_MASK" ]]; then
     IMPORTANCE_MASK_PATH="$_IMPORTANCE_MASK"
@@ -573,7 +573,7 @@ if [[ -n "$IMPORTANCE_MASK_PATH" ]]; then
     echo "Step 0b: Probe direction (SRMU)"
     echo "========================================================"
 
-    PROBE_DIR="$REPO_DIR/configs/probe_directions"
+    PROBE_DIR="$CB_SCRATCH/probe_directions"
     mkdir -p "$PROBE_DIR"
 
     if [[ -f "$IMPORTANCE_MASK_PATH" ]]; then
