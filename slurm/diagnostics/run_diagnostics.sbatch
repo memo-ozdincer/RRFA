@@ -16,26 +16,38 @@
 # completed experiment runs. Compares SRMU vs non-SRMU when both are provided.
 #
 # Usage:
-#   # Single run:
-#   sbatch --export=ALL,RUN_DIR=$CB_SCRATCH/sweeps/s9_ad_5000_v2_*/run \
+#   CB=/scratch/memoozd/cb-scratch
+#
+#   # Single run (resolve glob on login node first):
+#   sbatch --export=ALL,RUN_DIR=$(ls -d $CB/sweeps/s9_ad_5000_v2_*/run) \
 #       slurm/diagnostics/run_diagnostics.sbatch
 #
-#   # Compare two runs (e.g., SRMU vs baseline):
-#   sbatch --export=ALL,RUN_DIR=$CB_SCRATCH/sweeps/s9_ad_1000_v2_*/run,COMPARE_DIR=$CB_SCRATCH/sweeps/s9_ad_1000_v2_srmu_*/run \
+#   # Compare two runs (SRMU vs baseline):
+#   sbatch --export=ALL,RUN_DIR=$(ls -d $CB/sweeps/s9_ad_1000_v2_*/run),COMPARE_DIR=$(ls -d $CB/sweeps/s9_ad_1000_v2_srmu_*/run) \
 #       slurm/diagnostics/run_diagnostics.sbatch
 #
-#   # Run on ALL completed sweep 11 experiments:
-#   sbatch --export=ALL,SWEEP_DIR=$CB_SCRATCH/sweeps,SWEEP_PATTERN="s9_ad_*_v2*" \
+#   # Batch: all completed sweep 10/11 experiments:
+#   sbatch --export=ALL,SWEEP_DIR=$CB/sweeps,SWEEP_PATTERN="s9_ad_*_v2*" \
 #       slurm/diagnostics/run_diagnostics.sbatch
 #
 # =============================================================================
 
 set -euo pipefail
 
-REPO_DIR="${REPO_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
-CB_SCRATCH="${CB_SCRATCH:-/scratch/memoozd/cb-scratch}"
-SHARED_DATA="${SHARED_DATA:-$CB_SCRATCH/shared_data_ts}"
-TOKENIZER="${TOKENIZER:-meta-llama/Llama-3.1-8B-Instruct}"
+# ── Hardcoded paths (same as sweep_ad_focused.sbatch) ─────────
+PROJECT_DIR="/project/def-zhijing/memoozd"
+REPO_DIR="$PROJECT_DIR/rrfa"
+VENV_DIR="$PROJECT_DIR/.venvs/cb_env"
+CB_SCRATCH="/scratch/memoozd/cb-scratch"
+SHARED_DATA="$CB_SCRATCH/shared_data_ts"
+TOKENIZER="meta-llama/Llama-3.1-8B-Instruct"
+
+# Activate venv
+if [[ -f "$VENV_DIR/bin/activate" ]]; then
+    source "$VENV_DIR/bin/activate"
+fi
+
+cd "$REPO_DIR"
 
 # Traces for metadata lookup
 AD_TRACES="${AD_TRACES:-$SHARED_DATA/agentdojo_truncated.jsonl}"
