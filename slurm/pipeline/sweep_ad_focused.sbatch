@@ -50,6 +50,12 @@
 #   CONFIG=ad_750_amp       750 steps, AD only, amplified injections
 #   CONFIG=ad_750_bal_amp   750 steps, balanced, amplified injections
 #
+# Sweep 11f — SRMU (importance-masked CB loss):
+#   CONFIG=ad_750_v2_srmu   750 steps, AD only, probe importance mask
+#   CONFIG=ad_1000_v2_srmu  1000 steps, AD only, probe importance mask
+#   CONFIG=ad_1500_v2_srmu  1500 steps, AD only, probe importance mask
+#   CONFIG=ad_1000_bal_srmu 1000 steps, balanced, probe importance mask
+#
 # Usage:
 #   # AD-only step sweep
 #   for c in ad_300_v2 ad_500_v2 ad_750_v2 ad_1000_v2 ad_1500_v2; do
@@ -63,6 +69,11 @@
 #
 #   # Refusal + tuning + amplification
 #   for c in ad_750_bal_r ad_1000_a5 ad_1000_m40 ad_750_amp; do
+#     sbatch --export=ALL,CONFIG=$c slurm/pipeline/sweep_ad_focused.sbatch
+#   done
+#
+#   # SRMU (probe extraction runs automatically if mask not cached)
+#   for c in ad_750_v2_srmu ad_1000_v2_srmu ad_1500_v2_srmu ad_1000_bal_srmu; do
 #     sbatch --export=ALL,CONFIG=$c slurm/pipeline/sweep_ad_focused.sbatch
 #   done
 #
@@ -80,6 +91,7 @@ CONFIG="${CONFIG:?ERROR: CONFIG is required. See case block below.}"
 _LR="" _ALPHA="" _KL="" _CB="" _LORA_R="" _LORA_ALPHA=""
 _MARGIN_H="" _MARGIN_B="" _DECAY_MULT="" _LR_SCHED="" _USE_REFUSAL=""
 _AMPLIFY="" _AMP_REPEATS=""
+_IMPORTANCE_MASK=""
 
 case "$CONFIG" in
   # --- Legacy sweep 9 configs (kept for reproducibility) ---
@@ -230,11 +242,47 @@ case "$CONFIG" in
     DATASET=balanced; TOTAL_STEPS=750;  RESISTED=retain;  FUJITSU_CAP=2500
     _DECAY_MULT=2.0; _MARGIN_H=20.0; _MARGIN_B=3.0; _LR_SCHED=constant; _AMPLIFY=true ;;
 
+  # ==========================================================================
+  # Sweep 11f — SRMU: importance-masked CB loss (feature-selective rerouting)
+  # ==========================================================================
+  # Uses a probe-derived importance mask to push only the hidden dimensions
+  # that discriminate harmful from benign, leaving other dimensions untouched.
+  # This directly addresses the selectivity problem (AUC 0.83) by focusing
+  # the push on features that matter and preserving generative capability.
+  #
+  # PREREQUISITE: Run probe extraction first (see Step 0b in pipeline below):
+  #   python scripts/extract_probe_direction.py \
+  #       --traces <truncated.jsonl> --model <model> --layer 10 \
+  #       --output configs/probe_directions/layer10_last_token.pt
+  #
+  # The mask .pt file must exist at IMPORTANCE_MASK_PATH before training.
+
+  ad_750_v2_srmu)
+    DATASET=ad_only;  TOTAL_STEPS=750;  RESISTED=retain;  FUJITSU_CAP=0
+    _DECAY_MULT=2.0; _MARGIN_H=20.0; _MARGIN_B=3.0; _LR_SCHED=constant
+    _IMPORTANCE_MASK=auto ;;
+
+  ad_1000_v2_srmu)
+    DATASET=ad_only;  TOTAL_STEPS=1000; RESISTED=retain;  FUJITSU_CAP=0
+    _DECAY_MULT=2.0; _MARGIN_H=20.0; _MARGIN_B=3.0; _LR_SCHED=constant
+    _IMPORTANCE_MASK=auto ;;
+
+  ad_1500_v2_srmu)
+    DATASET=ad_only;  TOTAL_STEPS=1500; RESISTED=retain;  FUJITSU_CAP=0
+    _DECAY_MULT=2.0; _MARGIN_H=20.0; _MARGIN_B=3.0; _LR_SCHED=constant
+    _IMPORTANCE_MASK=auto ;;
+
+  ad_1000_bal_srmu)
+    DATASET=balanced; TOTAL_STEPS=1000; RESISTED=retain;  FUJITSU_CAP=2500
+    _DECAY_MULT=2.0; _MARGIN_H=20.0; _MARGIN_B=3.0; _LR_SCHED=constant
+    _IMPORTANCE_MASK=auto ;;
+
   *)
     echo "ERROR: Unknown CONFIG=$CONFIG"
     echo "Valid: ad_300_v2 ad_500_v2 ad_750_v2 ad_1000_v2 ad_1500_v2 ad_3000_v2"
     echo "       ad_500_bal ad_750_bal ad_1000_bal ad_750_bal_r"
     echo "       ad_1000_a5 ad_1000_m40 ad_750_amp ad_750_bal_amp"
+    echo "       ad_750_v2_srmu ad_1000_v2_srmu ad_1500_v2_srmu ad_1000_bal_srmu"
     echo "       ad_1000_v2r ad_3000_v2r"
     exit 1 ;;
 esac
@@ -323,6 +371,18 @@ USE_REFUSAL="${_USE_REFUSAL:-false}"
 AMPLIFY_INJECTIONS="${_AMPLIFY:-false}"
 AMPLIFY_REPEATS="${_AMP_REPEATS:-2}"
 
+# Importance mask for SRMU-style feature-selective rerouting
+# "auto" = use default probe direction files from configs/probe_directions/
+# explicit path = use that specific .pt file
+# empty = no mask (standard CB loss)
+IMPORTANCE_MASK_PATH=""
+if [[ "$_IMPORTANCE_MASK" == "auto" ]]; then
+    PROBE_DIR="$REPO_DIR/configs/probe_directions"
+    IMPORTANCE_MASK_PATH="$PROBE_DIR/layer10_last_token.pt"
+elif [[ -n "$_IMPORTANCE_MASK" ]]; then
+    IMPORTANCE_MASK_PATH="$_IMPORTANCE_MASK"
+fi
+
 echo "========================================================"
 echo "SWEEP 11: AD-Focused Step Sweep — $CONFIG"
 echo "========================================================"
@@ -334,6 +394,7 @@ echo "Margins: harmful=$MARGIN_HARMFUL benign=$MARGIN_BENIGN"
 echo "LR: $LEARNING_RATE | LR sched: ${LR_SCHEDULE:-linear} | alpha: $ALPHA_MAX | gamma_kl: $GAMMA_KL"
 echo "Alpha decay mult: ${ALPHA_DECAY_MULT:-1.0 (default)} | Refusal data: $USE_REFUSAL"
 echo "Amplify injections: $AMPLIFY_INJECTIONS (repeats=$AMPLIFY_REPEATS)"
+echo "Importance mask: ${IMPORTANCE_MASK_PATH:-none}"
 echo "CB layers: $CB_LAYERS | LoRA: r=$LORA_R alpha=$LORA_ALPHA"
 echo ""
 
@@ -503,6 +564,52 @@ fi
 
 echo "  Data preparation done ($(( $(date +%s) - gen_start ))s)"
 echo ""
+
+# =============================================================================
+# Step 0b: Probe direction extraction (SRMU configs only)
+# =============================================================================
+if [[ -n "$IMPORTANCE_MASK_PATH" ]]; then
+    echo "========================================================"
+    echo "Step 0b: Probe direction (SRMU)"
+    echo "========================================================"
+
+    PROBE_DIR="$REPO_DIR/configs/probe_directions"
+    mkdir -p "$PROBE_DIR"
+
+    if [[ -f "$IMPORTANCE_MASK_PATH" ]]; then
+        echo "  Importance mask: REUSING existing ($IMPORTANCE_MASK_PATH)"
+    else
+        echo "  Extracting probe direction for importance mask..."
+        echo "  Layer 10, pooling=last_token, traces=$AGENTDOJO_SRC"
+        python "$REPO_DIR/scripts/extract_probe_direction.py" \
+            --traces "$AGENTDOJO_SRC" \
+            --model "$TOKENIZER" \
+            --layer 10 \
+            --pooling last_token \
+            --output "$IMPORTANCE_MASK_PATH" 2>&1 | tail -10
+
+        if [[ ! -f "$IMPORTANCE_MASK_PATH" ]]; then
+            echo "ERROR: Probe extraction failed — mask file not created"
+            exit 1
+        fi
+        echo "  Probe direction saved to $IMPORTANCE_MASK_PATH"
+    fi
+
+    # Log mask metadata
+    python3 -c "
+import torch
+d = torch.load('$IMPORTANCE_MASK_PATH', map_location='cpu', weights_only=True)
+m = d.get('metadata', {})
+print(f'    AUC={m.get(\"auc\",\"?\")}, accuracy={m.get(\"accuracy\",\"?\")}')
+print(f'    layer={m.get(\"layer\",\"?\")}, pooling={m.get(\"pooling\",\"?\")}')
+print(f'    n_harmful={m.get(\"n_harmful\",\"?\")}, n_benign={m.get(\"n_benign\",\"?\")}')
+imp = d.get('importance')
+if imp is not None:
+    nz = (imp > 0.1).sum().item()
+    print(f'    importance: shape={tuple(imp.shape)}, >0.1: {nz}/{imp.numel()} ({100*nz/imp.numel():.0f}%)')
+" 2>/dev/null || echo "    (could not read mask metadata)"
+    echo ""
+fi
 
 # =============================================================================
 # Step 1: ETL_B (render + lossmask)
@@ -793,6 +900,7 @@ python src/training/train_schema.py \
     --cb-target-layers $CB_LAYERS \
     ${ALPHA_DECAY_MULT:+--alpha-decay-multiplier "$ALPHA_DECAY_MULT"} \
     ${LR_SCHEDULE:+--lr-schedule "$LR_SCHEDULE"} \
+    ${IMPORTANCE_MASK_PATH:+--importance-mask "$IMPORTANCE_MASK_PATH"} \
     --mode mixed \
     --harmful-renders "${HARMFUL_RENDERS[@]}" \
     --harmful-lossmasks "${HARMFUL_LOSSMASKS[@]}" \
@@ -880,6 +988,7 @@ cat > "$RUN_DIR/run_config.json" << RUNCFG
   "use_refusal": "$USE_REFUSAL",
   "amplify_injections": "$AMPLIFY_INJECTIONS",
   "amplify_repeats": $AMPLIFY_REPEATS,
+  "importance_mask": "${IMPORTANCE_MASK_PATH:-none}",
   "lora_r": $LORA_R,
   "lora_alpha": $LORA_ALPHA,
   "margin_free": false,
