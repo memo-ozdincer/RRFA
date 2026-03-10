@@ -533,15 +533,18 @@ fi
 # Generate synthetic refusal traces (only for v2r / refusal configs)
 REFUSAL_SRC="$SHARED_DATA/agentdojo_refusal_synthetic.jsonl"
 
-# Cache-busting: regenerate if refusal traces have old source format
+# Cache-busting: regenerate if refusal traces have old/incompatible format
+# Known stale formats: 'original_source' in source dict, 'synthetic' in labels
 if [[ -f "$REFUSAL_SRC" ]]; then
     _has_old_format=$(head -1 "$REFUSAL_SRC" | python3 -c "
 import json,sys
 d=json.loads(sys.stdin.readline())
-print('old' if 'original_source' in str(d.get('source',{})) else 'ok')
+stale = 'original_source' in str(d.get('source',{}))
+stale = stale or 'synthetic' in d.get('labels',{})
+print('old' if stale else 'ok')
 " 2>/dev/null || echo "ok")
     if [[ "$_has_old_format" == "old" ]]; then
-        echo "  Refusal traces: OLD FORMAT detected, regenerating..."
+        echo "  Refusal traces: STALE FORMAT detected, regenerating..."
         rm -f "$REFUSAL_SRC"
         rm -f "$SHARED_DATA/renders/agentdojo_refusal_synthetic.jsonl"
         rm -f "$SHARED_DATA/lossmasks/agentdojo_refusal_synthetic.jsonl"
