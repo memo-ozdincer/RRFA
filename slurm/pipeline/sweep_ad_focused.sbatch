@@ -34,8 +34,35 @@
 #   CONFIG=ad_5000_v2       5000 steps, all four fixes — expect worse
 #   (Legacy sweep 9 configs still available: ad_500, ad_1000, etc.)
 #
+# Sweep 11b — balanced (Fujitsu + AD):
+#   CONFIG=ad_500_bal       500 steps, Fujitsu+AD, cap=2500
+#   CONFIG=ad_750_bal       750 steps, Fujitsu+AD, cap=2500
+#   CONFIG=ad_1000_bal      1000 steps, Fujitsu+AD, cap=2500
+#
+# Sweep 11c — balanced + refusal:
+#   CONFIG=ad_750_bal_r     750 steps, balanced + refusal data
+#
+# Sweep 11d — alpha/margin tuning:
+#   CONFIG=ad_1000_a5       1000 steps, alpha_max=5.0
+#   CONFIG=ad_1000_m40      1000 steps, margin_harmful=40.0
+#
+# Sweep 11e — amplified injections:
+#   CONFIG=ad_750_amp       750 steps, AD only, amplified injections
+#   CONFIG=ad_750_bal_amp   750 steps, balanced, amplified injections
+#
 # Usage:
+#   # AD-only step sweep
 #   for c in ad_300_v2 ad_500_v2 ad_750_v2 ad_1000_v2 ad_1500_v2; do
+#     sbatch --export=ALL,CONFIG=$c slurm/pipeline/sweep_ad_focused.sbatch
+#   done
+#
+#   # Balanced (Fujitsu + AD)
+#   for c in ad_500_bal ad_750_bal ad_1000_bal; do
+#     sbatch --export=ALL,CONFIG=$c slurm/pipeline/sweep_ad_focused.sbatch
+#   done
+#
+#   # Refusal + tuning + amplification
+#   for c in ad_750_bal_r ad_1000_a5 ad_1000_m40 ad_750_amp; do
 #     sbatch --export=ALL,CONFIG=$c slurm/pipeline/sweep_ad_focused.sbatch
 #   done
 #
@@ -52,6 +79,7 @@ CONFIG="${CONFIG:?ERROR: CONFIG is required. See case block below.}"
 # Per-config override vars (empty = use defaults below)
 _LR="" _ALPHA="" _KL="" _CB="" _LORA_R="" _LORA_ALPHA=""
 _MARGIN_H="" _MARGIN_B="" _DECAY_MULT="" _LR_SCHED="" _USE_REFUSAL=""
+_AMPLIFY="" _AMP_REPEATS=""
 
 case "$CONFIG" in
   # --- Legacy sweep 9 configs (kept for reproducibility) ---
@@ -138,9 +166,76 @@ case "$CONFIG" in
     DATASET=ad_only;  TOTAL_STEPS=3000; RESISTED=retain;  FUJITSU_CAP=0
     _DECAY_MULT=2.0; _MARGIN_H=20.0; _MARGIN_B=3.0; _LR_SCHED=constant; _USE_REFUSAL=true ;;
 
+  # ==========================================================================
+  # Sweep 11b — balanced (Fujitsu + AD) with v2 fixes
+  # ==========================================================================
+  # Re-adds Fujitsu data alongside AD. Hypothesis: Fujitsu's structural
+  # injection pattern (HTML comments → clean tool redirects) provides a
+  # clearer CB signal that transfers to AD, improving selectivity.
+  # FUJITSU_CAP=2500 gives ~2500 harmful + ~2500 benign Fujitsu traces,
+  # balanced against ~2500 AD harmful + ~3100 AD benign.
+
+  ad_500_bal)
+    DATASET=balanced; TOTAL_STEPS=500;  RESISTED=retain;  FUJITSU_CAP=2500
+    _DECAY_MULT=2.0; _MARGIN_H=20.0; _MARGIN_B=3.0; _LR_SCHED=constant ;;
+
+  ad_750_bal)
+    DATASET=balanced; TOTAL_STEPS=750;  RESISTED=retain;  FUJITSU_CAP=2500
+    _DECAY_MULT=2.0; _MARGIN_H=20.0; _MARGIN_B=3.0; _LR_SCHED=constant ;;
+
+  ad_1000_bal)
+    DATASET=balanced; TOTAL_STEPS=1000; RESISTED=retain;  FUJITSU_CAP=2500
+    _DECAY_MULT=2.0; _MARGIN_H=20.0; _MARGIN_B=3.0; _LR_SCHED=constant ;;
+
+  # ==========================================================================
+  # Sweep 11c — balanced + refusal data
+  # ==========================================================================
+  # Combines balanced (Fujitsu + AD) with 1225 synthetic refusal traces in
+  # benign set. Gives CB a directed refusal target instead of just "push away."
+  # Hypothesis: refusal traces reduce gibberish and improve benign preservation.
+
+  ad_750_bal_r)
+    DATASET=balanced; TOTAL_STEPS=750;  RESISTED=retain;  FUJITSU_CAP=2500
+    _DECAY_MULT=2.0; _MARGIN_H=20.0; _MARGIN_B=3.0; _LR_SCHED=constant; _USE_REFUSAL=true ;;
+
+  # ==========================================================================
+  # Sweep 11d — alpha/margin tuning
+  # ==========================================================================
+  # Test whether lower alpha or higher margin improves Pareto tradeoff.
+  # ad_1000_a5: α_max=5.0 (vs default 10.0). Slower Phase 1 push, reduced
+  #   Phase 3 destructiveness. May allow more selective weight updates.
+  # ad_1000_m40: margin_h=40.0 (vs default 20.0). Higher ceiling should delay
+  #   Phase 3 collapse (harmful reps take longer to drift back within margin).
+
+  ad_1000_a5)
+    DATASET=ad_only;  TOTAL_STEPS=1000; RESISTED=retain;  FUJITSU_CAP=0
+    _DECAY_MULT=2.0; _MARGIN_H=20.0; _MARGIN_B=3.0; _LR_SCHED=constant; _ALPHA=5.0 ;;
+
+  ad_1000_m40)
+    DATASET=ad_only;  TOTAL_STEPS=1000; RESISTED=retain;  FUJITSU_CAP=0
+    _DECAY_MULT=2.0; _MARGIN_H=40.0; _MARGIN_B=5.0; _LR_SCHED=constant ;;
+
+  # ==========================================================================
+  # Sweep 11e — amplified injections
+  # ==========================================================================
+  # Injection amplification: repeat <INFORMATION>...</INFORMATION> tags 2x in
+  # harmful traces to strengthen the context-level signal CB uses for selectivity
+  # (probe AUC 0.83 → aiming for 0.90+).
+
+  ad_750_amp)
+    DATASET=ad_only;  TOTAL_STEPS=750;  RESISTED=retain;  FUJITSU_CAP=0
+    _DECAY_MULT=2.0; _MARGIN_H=20.0; _MARGIN_B=3.0; _LR_SCHED=constant; _AMPLIFY=true ;;
+
+  ad_750_bal_amp)
+    DATASET=balanced; TOTAL_STEPS=750;  RESISTED=retain;  FUJITSU_CAP=2500
+    _DECAY_MULT=2.0; _MARGIN_H=20.0; _MARGIN_B=3.0; _LR_SCHED=constant; _AMPLIFY=true ;;
+
   *)
     echo "ERROR: Unknown CONFIG=$CONFIG"
-    echo "Valid: ad_300_v2 ad_500_v2 ad_750_v2 ad_1000_v2 ad_1500_v2 ad_3000_v2 ..."
+    echo "Valid: ad_300_v2 ad_500_v2 ad_750_v2 ad_1000_v2 ad_1500_v2 ad_3000_v2"
+    echo "       ad_500_bal ad_750_bal ad_1000_bal ad_750_bal_r"
+    echo "       ad_1000_a5 ad_1000_m40 ad_750_amp ad_750_bal_amp"
+    echo "       ad_1000_v2r ad_3000_v2r"
     exit 1 ;;
 esac
 
@@ -225,6 +320,8 @@ LR_SCHEDULE=""
 [[ -n "$_DECAY_MULT" ]] && ALPHA_DECAY_MULT="$_DECAY_MULT"
 [[ -n "$_LR_SCHED" ]]   && LR_SCHEDULE="$_LR_SCHED"
 USE_REFUSAL="${_USE_REFUSAL:-false}"
+AMPLIFY_INJECTIONS="${_AMPLIFY:-false}"
+AMPLIFY_REPEATS="${_AMP_REPEATS:-2}"
 
 echo "========================================================"
 echo "SWEEP 11: AD-Focused Step Sweep — $CONFIG"
@@ -236,6 +333,7 @@ echo "Loss: $LOSS_MODE | Distance: $DISTANCE | margin_free: $MARGIN_FREE"
 echo "Margins: harmful=$MARGIN_HARMFUL benign=$MARGIN_BENIGN"
 echo "LR: $LEARNING_RATE | LR sched: ${LR_SCHEDULE:-linear} | alpha: $ALPHA_MAX | gamma_kl: $GAMMA_KL"
 echo "Alpha decay mult: ${ALPHA_DECAY_MULT:-1.0 (default)} | Refusal data: $USE_REFUSAL"
+echo "Amplify injections: $AMPLIFY_INJECTIONS (repeats=$AMPLIFY_REPEATS)"
 echo "CB layers: $CB_LAYERS | LoRA: r=$LORA_R alpha=$LORA_ALPHA"
 echo ""
 
@@ -350,8 +448,45 @@ for f in "$AGENTDOJO_SRC"; do
     echo "  $(basename "$f"): $(wc -l < "$f") lines"
 done
 
-# Generate synthetic refusal traces (only for v2r configs)
+# Optional: amplify injections in harmful traces (repeat injection text Nx)
+if [[ "$AMPLIFY_INJECTIONS" == "true" ]]; then
+    AMPLIFIED_SRC="$SHARED_DATA/agentdojo_amplified_${AMPLIFY_REPEATS}x.jsonl"
+    if [[ -f "$AMPLIFIED_SRC" ]] && [[ -s "$AMPLIFIED_SRC" ]]; then
+        echo "  Amplified traces: REUSING existing ($(wc -l < "$AMPLIFIED_SRC") lines)"
+    else
+        echo "  Amplifying injections (repeats=$AMPLIFY_REPEATS)..."
+        python "$REPO_DIR/scripts/amplify_injections.py" \
+            --input "$AGENTDOJO_SRC" \
+            --output "$AMPLIFIED_SRC" \
+            --repeats "$AMPLIFY_REPEATS" \
+            --seed 42 2>&1 | tail -5
+    fi
+    if [[ -f "$AMPLIFIED_SRC" ]] && [[ -s "$AMPLIFIED_SRC" ]]; then
+        echo "  Using amplified traces for downstream processing"
+        AGENTDOJO_SRC="$AMPLIFIED_SRC"
+    else
+        echo "  WARNING: Amplification failed, using original traces"
+    fi
+fi
+
+# Generate synthetic refusal traces (only for v2r / refusal configs)
 REFUSAL_SRC="$SHARED_DATA/agentdojo_refusal_synthetic.jsonl"
+
+# Cache-busting: regenerate if refusal traces have old source format
+if [[ -f "$REFUSAL_SRC" ]]; then
+    _has_old_format=$(head -1 "$REFUSAL_SRC" | python3 -c "
+import json,sys
+d=json.loads(sys.stdin.readline())
+print('old' if 'original_source' in str(d.get('source',{})) else 'ok')
+" 2>/dev/null || echo "ok")
+    if [[ "$_has_old_format" == "old" ]]; then
+        echo "  Refusal traces: OLD FORMAT detected, regenerating..."
+        rm -f "$REFUSAL_SRC"
+        rm -f "$SHARED_DATA/renders/agentdojo_refusal_synthetic.jsonl"
+        rm -f "$SHARED_DATA/lossmasks/agentdojo_refusal_synthetic.jsonl"
+    fi
+fi
+
 if [[ "$USE_REFUSAL" == "true" ]]; then
     if [[ -f "$REFUSAL_SRC" ]] && [[ -s "$REFUSAL_SRC" ]]; then
         echo "  Refusal traces: REUSING existing ($(wc -l < "$REFUSAL_SRC") lines)"
@@ -743,6 +878,8 @@ cat > "$RUN_DIR/run_config.json" << RUNCFG
   "margin_harmful": $MARGIN_HARMFUL,
   "margin_benign": $MARGIN_BENIGN,
   "use_refusal": "$USE_REFUSAL",
+  "amplify_injections": "$AMPLIFY_INJECTIONS",
+  "amplify_repeats": $AMPLIFY_REPEATS,
   "lora_r": $LORA_R,
   "lora_alpha": $LORA_ALPHA,
   "margin_free": false,
