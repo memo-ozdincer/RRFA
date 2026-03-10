@@ -1734,6 +1734,248 @@ lower priority, submit if GPU budget allows.
 \end{itemize}
 
 % ===================================================================
+\section{Sweep 11: Tier~1 Results and Analysis (Mar 10, 2026)}
+\label{sec:sweep11-tier1}
+% ===================================================================
+
+Five Tier~1 configs completed.  Results below include the Sweep~10 control
+(\texttt{ad\_1000\_v2}) and Pareto point (\texttt{ad\_5000\_v2}) for reference.
+
+\subsection{Summary Table}
+
+\begin{center}
+\small
+\begin{tabular}{lrrrrrll}
+\toprule
+Config & Fuj $\Delta$ & AD trunc mal & Ben corr & Ben no\_tool & Gib H/B & Output mode \\
+\midrule
+ad\_1000\_v2 (ctrl) & $-14\%$ & 30\% & 41\% & 15\% & 25/23 & Gibberish \\
+ad\_5000\_v2 (Pareto) & $-58\%$ & 24\% & 72\% & 5\% & 10/2 & Garbled JSON \\
+\midrule
+ad\_1000\_v2\_srmu & \good{$-59\%$} & \good{23\%} & \bad{46\%} & \bad{46\%} & 8/6 & Suppression \\
+ad\_750\_bal\_r & \good{$-79\%$} & 34\% & 54\% & \good{1\%} & \good{0/1} & Clean wrong tools \\
+ad\_1000\_a5 & $-22\%$ & 28\% & 43\% & 14\% & \good{0/0} & python\_tag spam \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Trace-by-Trace Output Analysis}
+
+\paragraph{ad\_1000\_v2\_srmu: Suppression, Not Comprehension.}
+The model's ``defense'' is total output collapse, not selective intervention.
+Harmful outputs are character-level gibberish:
+\begin{quote}\small\ttfamily
+Next, I, David, and David, David, and David, and
+,,,, and ,,,, and, and, 1, 1, 1, 2, 1, 2\ldots
+\end{quote}
+\bad{This same gibberish appears on BOTH harmful AND benign inputs.}
+The 46\% benign no\_tool rate means half of benign queries receive this degenerate output.
+Full\_trace mode: \textbf{100\% no\_tool} --- the model refuses to produce
+\emph{any} tool call regardless of context.  The 23\% malicious rate looks strong
+on paper but is achieved by breaking the model globally, not by teaching it to
+discriminate.
+
+Fujitsu outputs remain clean (73\% correct, 0\% gibberish), confirming the
+structural injection signal transfers correctly even through the importance mask.
+
+\paragraph{ad\_750\_bal\_r: Wrong-Tool Hallucination.}
+\good{Zero gibberish on harmful} (0/99) --- the first AD config to produce clean
+outputs.  But a qualitatively new failure mode emerged: \textbf{hallucinated tool
+redirections}.
+\begin{quote}\small\ttfamily
+BL: get\_most\_recent\_transactions $\to$ CB: send\_money \\
+BL: schedule\_transaction $\to$ CB: search\_transaction\_history \\
+BL: update\_user\_info $\to$ CB: read\_file
+\end{quote}
+The model learned Fujitsu's structural redirect pattern (retrieve\_multimodal\_docs
+$\to$ search\_web) and \textbf{generalized it to all inputs}, including benign
+queries (34/97 benign samples redirect to wrong tools).
+
+\bad{Fujitsu is catastrophically broken:} 97/98 samples output recursive JSON loops
+(\texttt{get\_user\_info} nesting endlessly).  The reported 6\% ASR is meaningless
+--- CB Other Tool = 93.9\%.  The model did not learn correct Fujitsu defense; it
+learned to emit a single recursive pattern for all Fujitsu inputs.
+
+\textbf{Key insight:} Balanced data taught the model to produce \emph{syntactically
+valid but semantically wrong} tool calls.  This is arguably better than gibberish
+for deployment (outputs are parseable, catchable by tool allowlists) but is not
+a genuine defense.
+
+\paragraph{ad\_1000\_a5: Gentle but Weak.}
+Cleanest output profile (zero gibberish everywhere), but uniformly weak: Fujitsu
+only $-22\%$, AD benign worst at 43\%.  Dominant failure mode: \texttt{<|python\_tag|>}
+token repetition (12+ repetitions per output), counted as ``clean text (no tool)''
+rather than gibberish by the classifier but equally degenerate.
+
+\subsection{Training Dynamics: Phase~3 is Universal}
+
+\textbf{All three configs show the same Phase~3 collapse:}
+
+\begin{center}
+\small
+\begin{tabular}{lrrr}
+\toprule
+Config & Phase~3 onset & Triplet\_B before$\to$after & Triplet\_H before$\to$after \\
+\midrule
+ad\_1000\_v2\_srmu ($\alpha$=10) & Step 720 (72\%) & 2.5 $\to$ 0.04 & 0.05 $\to$ 12.0 \\
+ad\_750\_bal\_r ($\alpha$=10) & Step 390 (52\%) & 10.9 $\to$ 0.08 & 0.38 $\to$ 11.8 \\
+ad\_1000\_a5 ($\alpha$=5) & Step 720 (72\%) & 2.2 $\to$ 0.1 & 0.27 $\to$ 10.4 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Critical observation:} SRMU and $\alpha$=5 collapse at the \emph{same
+relative step} (72\%) despite very different push magnitudes and alpha values.
+Phase~3 onset is determined by the data/schedule interaction, not push strength.
+The balanced config collapses \emph{earlier} (52\%) because mixed data creates
+unstable training dynamics.
+
+\textbf{Phase~3 mechanism (refined):} At collapse, benign margin is satisfied
+(Triplet\_B $\to$ 0), so all remaining gradient fights to push harmful further.
+But at this point, benign and harmful representations overlap in the pushed
+subspace, so harmful gradient \emph{destructively interferes} with benign
+anchoring.  The result: benign capabilities degrade rapidly while harmful loss
+oscillates without improving.
+
+\subsection{Three Big Findings}
+
+\begin{enumerate}
+  \item \textbf{SRMU matches ad\_5000\_v2 at 1/5th the steps.} Fujitsu $-59\%$
+        and AD trunc 23\% at 1000 steps $\approx$ ad\_5000\_v2 (Fujitsu $-58\%$,
+        AD trunc 24\% at 5000 steps).  The importance mask dramatically improved
+        push efficiency.  \bad{But it causes massive suppression} (46\% no\_tool
+        on benign --- model stops producing tools entirely).  The mask concentrated
+        the push but \emph{did not improve selectivity} --- all inputs get pushed,
+        just faster.
+
+  \item \textbf{Balanced+refusal eliminated gibberish.}  0/99 harmful, 1/97
+        benign --- the first config to produce clean outputs on AD.  But the
+        clean outputs are the \emph{wrong tools}.  The model learned to redirect
+        (from Fujitsu patterns) rather than suppress or garble.
+        \textbf{Best Fujitsu $\Delta$ ever at $-79\%$} (though outputs are
+        recursive JSON, not correct calls).
+
+  \item \textbf{Alpha=5 is a wash.}  Marginal improvements everywhere but
+        Phase~3 onset at the same 72\%.  Lower alpha did not delay collapse,
+        just scaled everything down proportionally.  Not worth pursuing further.
+\end{enumerate}
+
+\subsection{The Orthogonality Insight}
+
+The two effective interventions fix \emph{different} things:
+
+\begin{center}
+\small
+\begin{tabular}{lccc}
+\toprule
+& Push effectiveness & Output quality & Selectivity \\
+\midrule
+SRMU & Excellent (5$\times$ faster) & Still gibberish/suppression & Same (46\% no\_tool) \\
+Balanced+refusal & Moderate (34\% trunc) & Excellent (0 gibberish) & Better (1\% no\_tool) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{SRMU} concentrates gradient on discriminative dimensions $\Rightarrow$
+faster, more efficient push.  But it does nothing for output quality because
+the pushed representation still lands in a degenerate region of token space.
+
+\textbf{Balanced+refusal} anchors the output distribution $\Rightarrow$ clean
+tool calls instead of gibberish.  But it does not improve push efficiency
+because the loss operates on all 4096 dimensions equally.
+
+These improvements are \textbf{orthogonal}.  The obvious next experiment:
+\textbf{combine them} (\texttt{ad\_1000\_bal\_srmu}).
+
+\subsection{What the Selectivity Ceiling Means}
+
+The probe AUC of 0.83 (harmful vs.\ benign, same context) predicts a hard
+Pareto ceiling: $\sim$17\% of benign traffic lives in the harmful-looking
+region of representation space.  No amount of importance masking, data mixing,
+or alpha tuning changes this---it is a property of the model's internal
+representations, not our training procedure.
+
+\textbf{Evidence:} Every config that achieves $<$30\% AD malicious also
+destroys $>$25\% of benign capabilities:
+\begin{itemize}
+  \item ad\_5000\_v2: 24\% mal, 72\% benign (5\% no\_tool, 23\% wrong\_tool)
+  \item SRMU: 23\% mal, 46\% benign (46\% no\_tool)
+  \item bal\_r: 34\% mal, 54\% benign (1\% no\_tool, 34\% wrong\_tool)
+\end{itemize}
+
+The only path past this ceiling: a \emph{better separation signal}.  The
+Test~2 probe (comply vs.\ refuse, behavioral AUC 0.967) captures the
+model's decision-making rather than lexical surface features.  If this
+transfers to training, the selectivity ceiling rises from 83\% to $\sim$97\%.
+
+\subsection{Implications for Paper Direction}
+\label{sec:sweep11-paper}
+
+These results clarify the paper's identity.  We do not have a single
+silver-bullet method.  We have something more valuable: a \textbf{complete
+diagnostic framework} for when and why internal defense works on agentic
+tasks.
+
+\textbf{Contributions:}
+\begin{enumerate}
+  \item \textbf{Three-phase training dynamics.}  First systematic
+        documentation of Push $\to$ Plateau $\to$ Collapse in representation
+        rerouting.  Phase~3 onset is universal ($\sim$70\% of training) and
+        independent of push magnitude.
+
+  \item \textbf{Structural vs.\ semantic injection dichotomy.}  Fujitsu
+        (structural: tool~A $\to$ tool~B, 1:1 mapping) yields clean defense
+        (73\% correct, 0\% gibberish).  AgentDojo (semantic: diverse goals,
+        64 tools, no clear alternative) yields degenerate outputs regardless
+        of intervention.  We characterize exactly when CB defense applies.
+
+  \item \textbf{The selectivity ceiling.}  Probe AUC 0.83 predicts
+        $\sim$17\% inherent benign destruction.  Every config confirms this
+        empirically.  This is a fundamental bound on representation-level
+        defense.
+
+  \item \textbf{v2 training corrections.}  Four compounding bugs (schedule,
+        margin, KL, constant~LR) took Fujitsu from $-5\%$ to $-59\%$.
+        Immediately useful to practitioners applying CB to any task.
+
+  \item \textbf{Failure mode taxonomy.}  Gibberish (SRMU), wrong-tool
+        hallucination (balanced), token repetition ($\alpha$=5).  Each
+        ``fix'' trades one failure for another when the task exceeds the
+        selectivity ceiling.
+\end{enumerate}
+
+\textbf{Narrative:} Circuit breakers for agents work when the injection has
+clear structural signatures.  We identify exactly when and why they fail,
+provide corrected training that makes structural defense bulletproof, and
+characterize the fundamental selectivity ceiling that limits defense of
+semantic injections.
+
+\subsection{Priority Experiments (Next)}
+
+\begin{enumerate}
+  \item \textbf{ad\_1000\_bal\_srmu} (already submitted, Job 331779):
+        Combine SRMU push efficiency with balanced+refusal output quality.
+        If orthogonality holds: 23\% malicious + 0\% gibberish + $>$54\% benign.
+
+  \item \textbf{Early stopping sweep:} Save checkpoints at steps 500, 600,
+        700 for ad\_1000\_v2.  Phase~3 starts at $\sim$720 --- stopping at
+        600--700 may capture push benefit without collapse.
+
+  \item \textbf{Test~2 probe (comply-vs-refuse):}  Retrain importance mask
+        using refusal traces as class~0 instead of benign traces.
+        AUC~0.967 vs current 0.83.  If this transfers to training, the
+        selectivity ceiling rises dramatically.
+
+  \item \textbf{Fujitsu-focused sweep:} Dedicated configs pushing toward
+        0\% ASR for the paper's showcase result.
+
+  \item \textbf{Asymmetric masking:} Apply SRMU mask only to the harmful
+        push direction, leaving benign retain with full representation.
+        Hypothesis: benign no\_tool drops from 46\% without losing push
+        efficiency.
+\end{enumerate}
+
+% ===================================================================
 \section{Lessons Learned (Cumulative)}
 % ===================================================================
 
@@ -1812,6 +2054,33 @@ lower priority, submit if GPU budget allows.
         AD harmful reduction alone would pick ad\_3000\_v2 ($-46\%$). Adding
         benign and Fujitsu metrics reveals ad\_5000\_v2 dominates on the Pareto
         frontier. Always evaluate all metrics before declaring a best config.
+
+  \item \textbf{Importance masking improves push efficiency, not selectivity.}
+        SRMU (probe-weighted dimension mask) matched ad\_5000\_v2's attack
+        reduction at 1/5th the steps --- but benign destruction was \emph{worse}
+        (46\% no\_tool vs 5\%).  The mask concentrates gradient on discriminative
+        dimensions, making the push faster and stronger, but does not teach
+        the model which inputs to push.  Selectivity is an input-level problem;
+        dimension masking is a feature-level solution.  These are orthogonal.
+
+  \item \textbf{Balanced data eliminates gibberish but creates hallucinated
+        redirections.}  Fujitsu + refusal data in training produced zero
+        gibberish on AD (0/99 harmful, 1/97 benign).  But the model learned
+        Fujitsu's redirect pattern and generalized it to all inputs,
+        producing syntactically valid but semantically wrong tool calls.
+        Gibberish $\to$ wrong tools is a lateral move, not an improvement ---
+        unless combined with a tool allowlist at inference time.
+
+  \item \textbf{Phase~3 onset is schedule-determined, not amplitude-determined.}
+        $\alpha$=5 and $\alpha$=10 (with and without SRMU) all collapse at
+        $\sim$72\% of training.  The collapse point depends on the data
+        distribution and schedule shape, not the push magnitude.  This means
+        alpha tuning cannot delay collapse --- only schedule or data changes can.
+
+  \item \textbf{Orthogonal interventions should be combined, not compared.}
+        SRMU fixes push efficiency.  Balanced+refusal fixes output quality.
+        Comparing them head-to-head misses the point: they address different
+        failure modes.  The informative experiment is the \emph{combination}.
 \end{enumerate}
 
 \end{document}

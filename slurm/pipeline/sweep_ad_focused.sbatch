@@ -94,6 +94,7 @@ _AMPLIFY="" _AMP_REPEATS=""
 _IMPORTANCE_MASK=""
 _IMPORTANCE_MASK_MODE=""
 _IMPORTANCE_MASK_TOPK=""
+_LORA_TARGET_LAYERS=""
 
 case "$CONFIG" in
   # --- Legacy sweep 9 configs (kept for reproducibility) ---
@@ -358,15 +359,39 @@ case "$CONFIG" in
     _DECAY_MULT=2.0; _MARGIN_H=20.0; _MARGIN_B=3.0; _LR_SCHED=constant
     _IMPORTANCE_MASK=auto ;;
 
+  # ── Tier 2: Data ratio fix (reduce Fujitsu redirect dominance) ──
+  ad_1000_bal_r_low)
+    DATASET=balanced; TOTAL_STEPS=1000; RESISTED=retain;  FUJITSU_CAP=500
+    _DECAY_MULT=2.0; _MARGIN_H=20.0; _MARGIN_B=3.0; _LR_SCHED=constant; _USE_REFUSAL=true ;;
+
+  # ── Tier 2: Narrow LoRA (restrict to layers near CB targets) ──
+  ad_1000_v2_narrow)
+    DATASET=ad_only;  TOTAL_STEPS=1000; RESISTED=retain;  FUJITSU_CAP=0
+    _DECAY_MULT=2.0; _MARGIN_H=20.0; _MARGIN_B=3.0; _LR_SCHED=constant
+    _LORA_TARGET_LAYERS="8-22" ;;
+
+  # ── Tier 2: Combo — Test 2 probe + balanced + refusal ──
+  ad_1000_bal_srmu_t2)
+    DATASET=balanced; TOTAL_STEPS=1000; RESISTED=retain;  FUJITSU_CAP=2500
+    _DECAY_MULT=2.0; _MARGIN_H=20.0; _MARGIN_B=3.0; _LR_SCHED=constant; _USE_REFUSAL=true
+    _IMPORTANCE_MASK="$CB_SCRATCH/probe_directions/layer10_test2_last_token.pt" ;;
+
+  # ── Tier 2: Combo — Test 2 + balanced + low Fujitsu ──
+  ad_1000_bal_r_low_srmu_t2)
+    DATASET=balanced; TOTAL_STEPS=1000; RESISTED=retain;  FUJITSU_CAP=500
+    _DECAY_MULT=2.0; _MARGIN_H=20.0; _MARGIN_B=3.0; _LR_SCHED=constant; _USE_REFUSAL=true
+    _IMPORTANCE_MASK="$CB_SCRATCH/probe_directions/layer10_test2_last_token.pt" ;;
+
   *)
     echo "ERROR: Unknown CONFIG=$CONFIG"
     echo "Valid: ad_300_v2 ad_500_v2 ad_750_v2 ad_1000_v2 ad_1500_v2 ad_3000_v2"
-    echo "       ad_500_bal ad_750_bal ad_1000_bal ad_750_bal_r"
+    echo "       ad_500_bal ad_750_bal ad_1000_bal ad_750_bal_r ad_1000_bal_r_low"
     echo "       ad_1000_a5 ad_1000_m40 ad_750_amp ad_750_bal_amp"
     echo "       ad_750_v2_srmu ad_1000_v2_srmu ad_1500_v2_srmu ad_1000_bal_srmu"
     echo "       ad_1000_v2_srmu_asym ad_1000_v2_srmu_s10 ad_1000_v2_srmu_s30"
     echo "       ad_1000_v2_srmu_asym_s10 ad_1000_v2_srmu_t2 ad_1000_v2_srmu_t2_asym"
-    echo "       ad_1000_v2r ad_3000_v2r"
+    echo "       ad_1000_v2r ad_3000_v2r ad_1000_v2_narrow"
+    echo "       ad_1000_bal_srmu_t2 ad_1000_bal_r_low_srmu_t2"
     exit 1 ;;
 esac
 
@@ -469,6 +494,9 @@ fi
 # Importance mask mode and sparsity (only relevant when mask is set)
 IMPORTANCE_MASK_MODE="${_IMPORTANCE_MASK_MODE:-}"
 IMPORTANCE_MASK_TOPK="${_IMPORTANCE_MASK_TOPK:-}"
+
+# LoRA target layers (empty = all layers, e.g., "8-22" = layers 8 through 22)
+LORA_TARGET_LAYERS="${_LORA_TARGET_LAYERS:-}"
 
 echo "========================================================"
 echo "SWEEP 11: AD-Focused Step Sweep — $CONFIG"
@@ -1023,6 +1051,7 @@ python src/training/train_schema.py \
     ${IMPORTANCE_MASK_PATH:+--importance-mask "$IMPORTANCE_MASK_PATH"} \
     ${IMPORTANCE_MASK_MODE:+--importance-mask-mode "$IMPORTANCE_MASK_MODE"} \
     ${IMPORTANCE_MASK_TOPK:+--importance-mask-topk "$IMPORTANCE_MASK_TOPK"} \
+    ${LORA_TARGET_LAYERS:+--lora-target-layers "$LORA_TARGET_LAYERS"} \
     --mode mixed \
     --harmful-renders "${HARMFUL_RENDERS[@]}" \
     --harmful-lossmasks "${HARMFUL_LOSSMASKS[@]}" \
