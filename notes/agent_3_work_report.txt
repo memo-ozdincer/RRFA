@@ -1,0 +1,104 @@
+Agent 3 Work Report
+Agent 3 Work Report: Paper + SRMU Implementation
+
+  Task: Implement feature-selective rerouting and rewrite the COLM 2026 paper
+
+  ---
+  What Was Done
+
+  1. Probe Direction Extraction Script (scripts/extract_probe_direction.py)
+
+  Created a new script that extracts the linear probe's weight vector as an importance mask for
+  SRMU-style feature-selective CB training. It reuses the data loading and hidden state extraction
+  logic from probe_separability.py, trains a logistic regression probe at a specified layer/pooling,
+  and saves a .pt file containing:
+  - direction: unit-normalized weight vector (4096-dim)
+  - importance: |w_i| / max(|w_i|) in [0, 1] — the mask used during training
+  - metadata: AUC, accuracy, scaler params for reproducibility
+
+  Supports the same two data modes as probe_separability.py (single file with labels, or explicit
+  class-0/class-1 files).
+
+  2. Importance-Weighted CB Loss (4 files modified)
+
+  Added SRMU-style feature-selective rerouting to the training pipeline:
+
+  - src/training/losses.py: Added importance_masks: Optional[Dict[int, Tensor]] parameter to
+  _per_token_directional_loss, _per_token_expscale_loss, and per_token_cb_loss. When provided, both
+  h_model and h_frozen are element-wise multiplied by the importance mask before computing distance.
+  Dimensions with small probe weights contribute negligibly, so the optimizer doesn't push shared
+  features.
+  - src/training/trainer.py: After model setup in __init__, loads the .pt file if
+  importance_mask_path is set. Creates a per-layer dict mapping each CB target layer to the same
+  importance tensor. Logs shape, sparsity, and top-100 mean. Passes
+  importance_masks=self.importance_masks to the per_token_cb_loss call.
+  - src/training/config.py: Added importance_mask_path: Optional[str] = None to CircuitBreakerConfig.
+  - src/training/train_schema.py: Added --importance-mask CLI arg and mapping to config field.
+
+  All changes are fully backwards compatible — when no mask is provided, all code paths are
+  unchanged.
+
+  3. Paper Rewrite (paper/_COLM_2026__AgentDefense/colm2026_conference.tex)
+
+  Complete rewrite of the paper (gitignored, lives locally). The old paper described stale results
+  (triplet loss, 200 steps, Fujitsu-only 8.2% ASR, LLMail placeholders). The new paper reflects the
+  actual state of the project:
+
+  - New title: "Representation Rerouting for Agentic Safety: Diagnosing and Addressing the
+  Selectivity Problem in Circuit Breakers for Tool-Calling Agents"
+  - New abstract: Selectivity problem (AUC 0.97 push vs 0.83 selectivity), 9x improvement from
+  training fixes, three-phase dynamic, probe-guided feature-selective rerouting
+  - 5 contributions: (1) selectivity problem diagnosis, (2) three-phase training dynamic, (3)
+  training inefficiency analysis, (4) probe-guided feature-selective rerouting, (5) cross-dataset
+  analysis
+  - Updated method: per_token_cb with dl2rc distance (replaces triplet), corrected schedules
+  (decay_mult=2.0, constant LR, KL scheduled with cr), importance-masked loss equations
+  - New Section 5 — Probe Diagnostic: The pooling flip (mean best for Test 1, last_token best for
+  Test 2), theoretical Pareto ceiling (83% benign, 97% harmful reduction), no injection detection
+  layer
+  - Updated results: Full Sweep 10 table (ad_1000/3000/5000_v2), Pareto frontier showing ad_5000_v2
+  as only non-dominated config
+  - New analysis sections: Three-phase dynamic (push → plateau → collapse at 68-72%), four training
+  bugs and their 9x impact, cross-dataset divergence (clean Fujitsu redirects vs AD gibberish)
+  - Updated appendix: Full probe AUC tables, training curve data, phase boundary consistency across
+  step counts, corrected hyperparameter table
+
+  Also updated colm2026_conference.bib with new references: SRMU, RMU/WMDP, LoRA, BIPIA, latent
+  unlearning.
+
+  4. Publication Figures (scripts/plot_publication_figures.py)
+
+  Rewrote the figure generation script (previously loaded from sweep directories, now uses hardcoded
+  Sweep 10 data). Generates three publication-quality figures:
+
+  - training_curve.pdf/png: Dual-axis plot of Triplet_H and Triplet_B for ad_3000_v2 with three phase
+   regions shaded and labeled, transition markers at steps 40 and 2050
+  - pareto_frontier.pdf/png: AD truncated malicious rate vs benign correct rate, 6 data points
+  (baseline, sweep 9, three v2 configs, theoretical ceiling), ad_5000_v2 highlighted as
+  Pareto-optimal
+  - probe_heatmap.pdf/png: Side-by-side heatmaps for Test 1 (selectivity) and Test 2 (push direction)
+   showing the pooling flip — mean row highlighted in Test 1, last_token row highlighted in Test 2
+
+  All figures saved as both PDF (for LaTeX) and PNG (for review) in
+  paper/_COLM_2026__AgentDefense/figures/.
+
+  ---
+  Commit
+
+  142630f — "Add probe-guided feature-selective rerouting (SRMU) and paper rewrite"
+
+  4 tracked files changed (686 insertions, 217 deletions):
+  - scripts/extract_probe_direction.py (new, 373 lines)
+  - scripts/plot_publication_figures.py (rewritten)
+  - src/training/losses.py (+42 lines)
+  - src/training/trainer.py (+20 lines)
+
+  Plus untracked paper files in gitignored paper/ directory.
+
+  ---
+  What's NOT Done (Requires Cluster Runs)
+
+  - Extracting the actual probe .pt files (needs GPU model forward passes)
+  - Running Sweep 11 with --importance-mask (needs Agent 2 to wire into sbatch)
+  - Filling in SRMU experimental results in the paper (pending sweep runs)
+  - Experiment log update (notes/experiment_log.tex) — deferred since results aren't in yet
