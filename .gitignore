@@ -16,7 +16,19 @@ llmail-inject-challenge/
 
 # Tier B: ETL_A outputs (canonical traces)
 data/traces/
-
+newtraces
+notes
+devkit
+evalfix_20260304_124149
+latestresults
+llmail-inject-challenge
+PAPERS
+reports
+results_for_agent1
+results10pm
+resultsmar10
+resultsmar102
+eddi
 # Tier C: ETL_B outputs (renders + lossmasks)
 data/renders/
 data/lossmasks/

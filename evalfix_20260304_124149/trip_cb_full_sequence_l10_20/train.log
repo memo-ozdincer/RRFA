@@ -1,75 +1,0 @@
-2026-03-04 14:59:43,983 [INFO] __main__: Mixed mode loaded harmful=10399 benign=8793
-2026-03-04 14:59:43,983 [INFO] __main__: Starting schema training via shared trainer core
-2026-03-04 14:59:43,983 [INFO] __main__:   loss_mode=triplet_full
-2026-03-04 14:59:43,984 [INFO] __main__:   output_dir=/scratch/memoozd/cb-scratch/sweeps/evalfix_20260304_124149/trip_cb_full_sequence_l10_20/model
-2026-03-04 14:59:43,984 [INFO] __main__:   harmful=10399 benign=8793
-2026-03-04 14:59:44,234 [INFO] __main__: SchemaDataset pairs=8793 (harmful=10399 benign=8793)
-`torch_dtype` is deprecated! Use `dtype` instead!
-2026-03-04 14:59:45,355 [INFO] accelerate.utils.modeling: We will use 90% of the memory on device 0 for storing the model, and 10% for the buffer to avoid OOM. You can set `max_memory` in to a higher value to use more memory (at your own risk).
-Loading model: /scratch/memoozd/cb-scratch/cache/hf/hub/models--meta-llama--Llama-3.1-8B-Instruct/snapshots/0e9e39f249a16976918f6564b8830bc894c89659
-trainable params: 41,943,040 || all params: 8,072,204,288 || trainable%: 0.5196
-Using externally provided training dataloader
-============================================================
-Starting Circuit Breaker Training
-  Model: /scratch/memoozd/cb-scratch/cache/hf/hub/models--meta-llama--Llama-3.1-8B-Instruct/snapshots/0e9e39f249a16976918f6564b8830bc894c89659
-  Total Steps: 150
-  Alpha Max: 10.0
-  Loss Mode: triplet_full
-  CB Target Layers: [10, 20]
-============================================================
-Skipping completion-mask validation (external pre-tokenized dataset)
-Training:   0%|          | 0/150 [00:00<?, ?it/s]Training:   1%|          | 1/150 [00:10<27:03, 10.89s/it]Training:   1%|▏         | 2/150 [00:19<23:56,  9.71s/it]Training:   2%|▏         | 3/150 [00:29<23:36,  9.63s/it]Training:   3%|▎         | 4/150 [00:38<23:21,  9.60s/it]Training:   3%|▎         | 5/150 [00:48<23:08,  9.57s/it]Training:   4%|▍         | 6/150 [00:57<22:56,  9.56s/it]Training:   5%|▍         | 7/150 [01:07<22:45,  9.55s/it]Training:   5%|▌         | 8/150 [01:16<22:35,  9.55s/it]Training:   6%|▌         | 9/150 [01:26<22:25,  9.54s/it]Training:   7%|▋         | 10/150 [01:36<22:15,  9.54s/it]Training:   7%|▋         | 11/150 [01:45<22:05,  9.54s/it]Training:   8%|▊         | 12/150 [01:55<21:56,  9.54s/it]Training:   9%|▊         | 13/150 [02:04<21:46,  9.54s/it]Training:   9%|▉         | 14/150 [02:14<21:37,  9.54s/it]Training:  10%|█         | 15/150 [02:23<21:27,  9.54s/it]Training:  11%|█         | 16/150 [02:33<21:17,  9.53s/it]Training:  11%|█▏        | 17/150 [02:42<21:08,  9.53s/it]Training:  12%|█▏        | 18/150 [02:52<20:58,  9.53s/it]Training:  13%|█▎        | 19/150 [03:01<20:48,  9.53s/it]Training:  13%|█▎        | 20/150 [03:11<20:39,  9.53s/it]Training:  14%|█▍        | 21/150 [03:20<20:30,  9.54s/it]Training:  15%|█▍        | 22/150 [03:30<20:20,  9.54s/it]Training:  15%|█▌        | 23/150 [03:40<20:11,  9.54s/it]Training:  16%|█▌        | 24/150 [03:49<20:01,  9.54s/it]Training:  17%|█▋        | 25/150 [03:59<19:52,  9.54s/it]Training:  17%|█▋        | 26/150 [04:08<19:43,  9.54s/it]Training:  18%|█▊        | 27/150 [04:18<19:33,  9.54s/it]Training:  19%|█▊        | 28/150 [04:27<19:23,  9.54s/it]Training:  19%|█▉        | 29/150 [04:37<19:13,  9.53s/it]Training:  20%|██        | 30/150 [04:46<19:04,  9.53s/it]Training:  21%|██        | 31/150 [04:56<18:54,  9.53s/it]Training:  21%|██▏       | 32/150 [05:05<18:45,  9.54s/it]Training:  22%|██▏       | 33/150 [05:15<18:35,  9.54s/it]Training:  23%|██▎       | 34/150 [05:24<18:26,  9.54s/it]Training:  23%|██▎       | 35/150 [05:34<18:16,  9.54s/it]Training:  24%|██▍       | 36/150 [05:44<18:13,  9.59s/it]Training:  25%|██▍       | 37/150 [05:53<18:02,  9.58s/it]Training:  25%|██▌       | 38/150 [06:03<17:51,  9.56s/it]Training:  26%|██▌       | 39/150 [06:12<17:40,  9.56s/it]Training:  27%|██▋       | 40/150 [06:22<17:31,  9.56s/it]Training:  27%|██▋       | 41/150 [06:31<17:21,  9.55s/it]Training:  28%|██▊       | 42/150 [06:41<17:11,  9.55s/it]Training:  29%|██▊       | 43/150 [06:50<17:01,  9.55s/it]Training:  29%|██▉       | 44/150 [07:00<16:51,  9.54s/it]Training:  30%|███       | 45/150 [07:10<16:41,  9.54s/it]Training:  31%|███       | 46/150 [07:19<16:32,  9.54s/it]Training:  31%|███▏      | 47/150 [07:29<16:22,  9.54s/it]Training:  32%|███▏      | 48/150 [07:38<16:13,  9.54s/it]Training:  33%|███▎      | 49/150 [07:48<16:03,  9.54s/it]Training:  33%|███▎      | 50/150 [07:57<15:54,  9.54s/it]Training:  34%|███▍      | 51/150 [08:07<16:05,  9.75s/it]Training:  35%|███▍      | 52/150 [08:16<15:29,  9.49s/it]Training:  35%|███▌      | 53/150 [08:26<15:21,  9.50s/it]Training:  36%|███▌      | 54/150 [08:35<15:12,  9.51s/it]Training:  37%|███▋      | 55/150 [08:45<15:04,  9.52s/it]Training:  37%|███▋      | 56/150 [08:54<14:54,  9.52s/it]Training:  38%|███▊      | 57/150 [09:04<14:45,  9.52s/it]Training:  39%|███▊      | 58/150 [09:14<14:36,  9.53s/it]Training:  39%|███▉      | 59/150 [09:23<14:27,  9.53s/it]Training:  40%|████      | 60/150 [09:33<14:17,  9.53s/it]Training:  41%|████      | 61/150 [09:42<14:08,  9.53s/it]Training:  41%|████▏     | 62/150 [09:52<13:58,  9.53s/it]Training:  42%|████▏     | 63/150 [10:01<13:49,  9.53s/it]Training:  43%|████▎     | 64/150 [10:11<13:39,  9.53s/it]Training:  43%|████▎     | 65/150 [10:20<13:30,  9.53s/it]Training:  44%|████▍     | 66/150 [10:30<13:20,  9.53s/it]Training:  45%|████▍     | 67/150 [10:39<13:10,  9.53s/it]Training:  45%|████▌     | 68/150 [10:49<13:01,  9.53s/it]Training:  46%|████▌     | 69/150 [10:58<12:51,  9.52s/it]Training:  47%|████▋     | 70/150 [11:08<12:42,  9.53s/it]Training:  47%|████▋     | 71/150 [11:17<12:33,  9.53s/it]Training:  48%|████▊     | 72/150 [11:27<12:23,  9.53s/it]Training:  49%|████▊     | 73/150 [11:36<12:13,  9.53s/it]Training:  49%|████▉     | 74/150 [11:46<12:04,  9.53s/it]Training:  50%|█████     | 75/150 [11:56<11:55,  9.53s/it]Training:  51%|█████     | 76/150 [12:05<11:45,  9.53s/it]Training:  51%|█████▏    | 77/150 [12:15<11:35,  9.53s/it]Training:  52%|█████▏    | 78/150 [12:24<11:26,  9.53s/it]Training:  53%|█████▎    | 79/150 [12:34<11:16,  9.53s/it]Training:  53%|█████▎    | 80/150 [12:43<11:07,  9.53s/it]Training:  54%|█████▍    | 81/150 [12:53<10:57,  9.53s/it]Training:  55%|█████▍    | 82/150 [13:02<10:48,  9.53s/it]Training:  55%|█████▌    | 83/150 [13:12<10:38,  9.53s/it]Training:  56%|█████▌    | 84/150 [13:21<10:28,  9.53s/it]Training:  57%|█████▋    | 85/150 [13:31<10:19,  9.53s/it]Training:  57%|█████▋    | 86/150 [13:40<10:09,  9.53s/it]Training:  58%|█████▊    | 87/150 [13:50<10:00,  9.53s/it]Training:  59%|█████▊    | 88/150 [13:59<09:50,  9.53s/it]Training:  59%|█████▉    | 89/150 [14:09<09:41,  9.53s/it]Training:  60%|██████    | 90/150 [14:19<09:31,  9.53s/it]Training:  61%|██████    | 91/150 [14:28<09:22,  9.53s/it]Training:  61%|██████▏   | 92/150 [14:38<09:12,  9.53s/it]Training:  62%|██████▏   | 93/150 [14:47<09:03,  9.53s/it]Training:  63%|██████▎   | 94/150 [14:57<08:53,  9.53s/it]Training:  63%|██████▎   | 95/150 [15:06<08:44,  9.53s/it]Training:  64%|██████▍   | 96/150 [15:16<08:34,  9.53s/it]Training:  65%|██████▍   | 97/150 [15:25<08:25,  9.53s/it]Training:  65%|██████▌   | 98/150 [15:35<08:15,  9.54s/it]Training:  66%|██████▌   | 99/150 [15:44<08:06,  9.54s/it]Training:  67%|██████▋   | 100/150 [15:54<07:56,  9.54s/it]Training:  67%|██████▋   | 101/150 [16:04<07:57,  9.74s/it]Training:  68%|██████▊   | 102/150 [16:13<07:35,  9.49s/it]Training:  69%|██████▊   | 103/150 [16:23<07:26,  9.50s/it]Training:  69%|██████▉   | 104/150 [16:32<07:17,  9.52s/it]Training:  70%|███████   | 105/150 [16:42<07:08,  9.52s/it]Training:  71%|███████   | 106/150 [16:51<06:59,  9.53s/it]Training:  71%|███████▏  | 107/150 [17:01<06:50,  9.54s/it]Training:  72%|███████▏  | 108/150 [17:10<06:40,  9.54s/it]Training:  73%|███████▎  | 109/150 [17:20<06:31,  9.54s/it]Training:  73%|███████▎  | 110/150 [17:29<06:21,  9.55s/it]Training:  74%|███████▍  | 111/150 [17:39<06:12,  9.54s/it]Training:  75%|███████▍  | 112/150 [17:48<06:02,  9.54s/it]Training:  75%|███████▌  | 113/150 [17:58<05:53,  9.55s/it]Training:  76%|███████▌  | 114/150 [18:08<05:43,  9.55s/it]Training:  77%|███████▋  | 115/150 [18:17<05:34,  9.54s/it]Training:  77%|███████▋  | 116/150 [18:27<05:24,  9.54s/it]Training:  78%|███████▊  | 117/150 [18:36<05:14,  9.54s/it]Training:  79%|███████▊  | 118/150 [18:46<05:05,  9.54s/it]Training:  79%|███████▉  | 119/150 [18:55<04:55,  9.54s/it]Training:  80%|████████  | 120/150 [19:05<04:51,  9.71s/it]Training:  81%|████████  | 121/150 [19:15<04:40,  9.66s/it]Training:  81%|████████▏ | 122/150 [19:24<04:29,  9.62s/it]Training:  82%|████████▏ | 123/150 [19:34<04:19,  9.60s/it]Training:  83%|████████▎ | 124/150 [19:43<04:08,  9.58s/it]Training:  83%|████████▎ | 125/150 [19:53<03:59,  9.56s/it]Training:  84%|████████▍ | 126/150 [20:03<03:49,  9.55s/it]Training:  85%|████████▍ | 127/150 [20:12<03:39,  9.55s/it]Training:  85%|████████▌ | 128/150 [20:22<03:30,  9.55s/it]Training:  86%|████████▌ | 129/150 [20:31<03:20,  9.54s/it]Training:  87%|████████▋ | 130/150 [20:41<03:10,  9.54s/it]Training:  87%|████████▋ | 131/150 [20:50<03:01,  9.53s/it]Training:  88%|████████▊ | 132/150 [21:00<02:51,  9.54s/it]Training:  89%|████████▊ | 133/150 [21:09<02:42,  9.54s/it]Training:  89%|████████▉ | 134/150 [21:19<02:32,  9.53s/it]Training:  90%|█████████ | 135/150 [21:28<02:22,  9.53s/it]Training:  91%|█████████ | 136/150 [21:38<02:13,  9.54s/it]Training:  91%|█████████▏| 137/150 [21:47<02:03,  9.53s/it]Training:  92%|█████████▏| 138/150 [21:57<01:54,  9.53s/it]Training:  93%|█████████▎| 139/150 [22:07<01:44,  9.54s/it]Training:  93%|█████████▎| 140/150 [22:16<01:35,  9.54s/it]Training:  94%|█████████▍| 141/150 [22:26<01:25,  9.53s/it]Training:  95%|█████████▍| 142/150 [22:35<01:16,  9.54s/it]Training:  95%|█████████▌| 143/150 [22:45<01:06,  9.54s/it]Training:  96%|█████████▌| 144/150 [22:54<00:57,  9.54s/it]Training:  97%|█████████▋| 145/150 [23:04<00:47,  9.54s/it]Training:  97%|█████████▋| 146/150 [23:13<00:38,  9.54s/it]Training:  98%|█████████▊| 147/150 [23:23<00:28,  9.54s/it]Training:  99%|█████████▊| 148/150 [23:32<00:19,  9.54s/it]Training:  99%|█████████▉| 149/150 [23:42<00:09,  9.54s/it]Training: 100%|██████████| 150/150 [23:51<00:00,  9.54s/it]Training: 100%|██████████| 150/150 [23:52<00:00,  9.55s/it]
-
---- Epoch 1 ---
-✓ Using SINGLE FORWARD PASS (DDP-safe version)
-Warning: The cache directory for DeepSpeed Triton autotune, /scratch/memoozd/cb-scratch/cache/triton, appears to be on an NFS system. While this is generally acceptable, if you experience slowdowns or hanging when DeepSpeed exits, it is recommended to set the TRITON_CACHE_DIR environment variable to a non-NFS path.
-
-  Decoupled masks: INACTIVE (pooling_mask_policy=auto)
-
-======================================================================
-POOLING DIAGNOSTIC (step 0)
-  Current pooling_mode: correct
-  Harmful mask active tokens: 274 / 16384
-  Benign mask active tokens:  1270 / 16384
-======================================================================
-
-  [CORRECT] ← ACTIVE
-    h_new   L2 norm=      5.66  sparsity=0.0%
-    h_old   L2 norm=      5.66  sparsity=0.0%
-    b_new   L2 norm=      5.09  sparsity=0.0%
-    b_old   L2 norm=      5.09  sparsity=0.0%
-    Distances (dmix = 0.5*L2 + 0.5*cos_dist):
-      d(b_old, b_new)            L2=      0.00  cos=-0.0000  mix=     -0.00  (benign pos)
-      d(b_new, h_mean)           L2=      2.77  cos=0.1407  mix=      1.46  (benign neg)
-      d(h_new, h_mean)           L2=      0.00  cos=0.0000  mix=      0.00  (harmful pos)
-      d(h_new, h_old)            L2=      0.00  cos=0.0000  mix=      0.00  (harmful neg)
-
-  INTER-CLASS SEPARATION (pooling_mode=correct):
-    dmix=1.46  cos_dist=0.1407
-    Current margins:  benign=1.2  harmful=1.6
-======================================================================
-
-[Step 0] mode=triplet_full | L_b=1.0725 L_h=1.6224 L_kl=-0.0000
-  grad_norm=0.0000
-Step 10: mode=triplet_full, loss=0.5447, triplet_b=1.0840, triplet_h=1.6709, triplet_kl=0.0008, α=0.4500
-Step 20: mode=triplet_full, loss=1.1459, triplet_b=1.1116, triplet_h=1.6258, triplet_kl=0.0010, α=0.9500
-Step 30: mode=triplet_full, loss=1.2191, triplet_b=1.1386, triplet_h=1.6233, triplet_kl=0.0047, α=1.0000
-Step 40: mode=triplet_full, loss=1.1911, triplet_b=1.0468, triplet_h=1.6660, triplet_kl=0.0134, α=1.0000
-Step 50: mode=triplet_full, loss=1.1947, triplet_b=1.0886, triplet_h=1.6231, triplet_kl=0.0117, α=1.0000
-[Step 50] mode=triplet_full | L_b=1.0681 L_h=1.6159 L_kl=0.0116
-  grad_norm=0.0184
-Step 60: mode=triplet_full, loss=1.2132, triplet_b=1.1388, triplet_h=1.6045, triplet_kl=0.0199, α=1.0000
-Step 70: mode=triplet_full, loss=1.1509, triplet_b=1.0068, triplet_h=1.6138, triplet_kl=0.0193, α=1.0000
-Step 80: mode=triplet_full, loss=1.1735, triplet_b=1.0174, triplet_h=1.6565, triplet_kl=0.0218, α=1.0000
-Step 90: mode=triplet_full, loss=1.1365, triplet_b=1.0238, triplet_h=1.5536, triplet_kl=0.0317, α=1.0000
-Step 100: mode=triplet_full, loss=1.1216, triplet_b=1.0641, triplet_h=1.4594, triplet_kl=0.0578, α=1.0000
-[Step 100] mode=triplet_full | L_b=1.1786 L_h=1.3412 L_kl=0.1789
-  grad_norm=0.1948
-Step 110: mode=triplet_full, loss=1.1294, triplet_b=1.0457, triplet_h=1.5007, triplet_kl=0.0628, α=1.0000
-Step 120: mode=triplet_full, loss=0.9863, triplet_b=1.0313, triplet_h=1.1339, triplet_kl=0.1708, α=1.0000
-Step 130: mode=triplet_full, loss=0.9313, triplet_b=0.9744, triplet_h=1.0748, triplet_kl=0.1417, α=1.0000
-Step 140: mode=triplet_full, loss=0.9244, triplet_b=0.9526, triplet_h=1.1095, triplet_kl=0.0429, α=1.0000
-Step 150: mode=triplet_full, loss=0.8809, triplet_b=0.9320, triplet_h=1.0150, triplet_kl=0.0893, α=1.0000
-💾 Saved checkpoint to /scratch/memoozd/cb-scratch/sweeps/evalfix_20260304_124149/trip_cb_full_sequence_l10_20/model/final
-
-✅ Training complete!

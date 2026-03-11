@@ -1,6 +1,0 @@
-2026-03-10 02:40:43,460 [INFO] Found 4 eval files in /scratch/memoozd/cb-scratch/sweeps/s9_ad_no_resisted_20260308_220725/run/eval/next_tool_prediction
-2026-03-10 02:40:43,460 [INFO] Processing agentdojo_benign_eval.json
-2026-03-10 02:40:43,467 [INFO] Processing agentdojo_harmful_full_eval.json
-2026-03-10 02:40:43,477 [INFO] Processing agentdojo_harmful_trunc_eval.json
-2026-03-10 02:40:43,486 [INFO] Processing fujitsu_eval.json
-2026-03-10 02:40:43,490 [ERROR] No samples found in eval files
