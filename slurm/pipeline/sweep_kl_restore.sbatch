@@ -134,12 +134,106 @@ done
 echo ""
 
 # =============================================================================
-# Shared data directory (reuse from sweep_completed_v1)
+# Shared data directory (generate if missing)
 # =============================================================================
 SHARED_DATA="$CB_SCRATCH/sweeps/shared_data_${POLICY}_ts"
+mkdir -p "$SHARED_DATA"/{renders,lossmasks,split_agentdojo}
 echo "Shared data: $SHARED_DATA"
 
-# Verify shared data exists (ETL_B must have been run by sweep_completed_v1)
+POOLING_POLICY=cb_full_sequence
+
+# --- Step 0: Truncate AgentDojo if needed ---
+AGENTDOJO_SRC="$SHARED_DATA/agentdojo_truncated.jsonl"
+if [[ -f "$AGENTDOJO_SRC" ]] && [[ -s "$AGENTDOJO_SRC" ]]; then
+    echo "  AgentDojo truncated: REUSING existing ($(wc -l < "$AGENTDOJO_SRC") lines)"
+else
+    echo "  Truncating AgentDojo to injection window..."
+    python "$REPO_DIR/scripts/truncate_to_injection_window.py" \
+        --input "$AGENTDOJO_RAW" \
+        --output "$AGENTDOJO_SRC" 2>&1 | tail -5
+fi
+
+# --- Step 1: ETL_B (render + lossmask) — skip if exists ---
+echo ""
+echo "Step 1: ETL_B"
+etl_start=$(date +%s)
+
+for src in "$FUJITSU_DS" "$FUJITSU_DR" "$AGENTDOJO_SRC"; do
+    bn=$(basename "$src" .jsonl)
+    render_out="$SHARED_DATA/renders/${bn}.jsonl"
+    mask_out="$SHARED_DATA/lossmasks/${bn}.jsonl"
+
+    # Select correct tool schema per source
+    if [[ "$bn" == *fujitsu* ]]; then
+        ETL_SCHEMA="$TOOL_SCHEMA"
+    else
+        ETL_SCHEMA="$AD_TOOL_SCHEMA"
+    fi
+
+    if [[ -f "$render_out" ]] && [[ -s "$render_out" ]] && [[ -f "$mask_out" ]] && [[ -s "$mask_out" ]]; then
+        echo "  $bn: REUSING existing ($(wc -l < "$render_out") renders)"
+    else
+        echo "  $bn (policy=$POLICY, pool=$POOLING_POLICY)..."
+        python src/schemas/tools/ETL_B.py \
+            --traces "$src" \
+            --render-out "$render_out" \
+            --lossmask-out "$mask_out" \
+            --tokenizer "$TOKENIZER" \
+            --max-length "$MAX_SEQ_LENGTH" \
+            --policy-override "$POLICY" \
+            --pooling-policy-override "$POOLING_POLICY" \
+            --tool-schema "$ETL_SCHEMA" 2>&1 | tail -3
+    fi
+done
+
+echo "  ETL_B done ($(( $(date +%s) - etl_start ))s)"
+
+# Lossmask coverage summary
+echo ""
+echo "  Lossmask coverage:"
+for lm in "$SHARED_DATA/lossmasks"/*.jsonl; do
+    if [[ -f "$lm" ]]; then
+        python3 -c "
+import json
+total_samples = 0; zero_samples = 0; total_ratio = 0
+with open('$lm') as f:
+    for line in f:
+        if not line.strip(): continue
+        d = json.loads(line)
+        s = d.get('stats', {})
+        total_samples += 1
+        ratio = s.get('mask_ratio', 0)
+        total_ratio += ratio
+        if ratio == 0:
+            zero_samples += 1
+avg = total_ratio / total_samples if total_samples > 0 else 0
+print(f'    $(basename "$lm"): {total_samples} samples, avg_coverage={avg:.1%}, zero_mask={zero_samples}')
+" 2>/dev/null
+    fi
+done
+
+# --- Step 2: Split AgentDojo harmful/benign ---
+echo ""
+echo "Step 2: Split harmful/benign"
+
+echo "  Fujitsu DS (harmful): $(wc -l < "$SHARED_DATA/renders/fujitsu_b4_ds.jsonl") renders"
+echo "  Fujitsu DR (benign):  $(wc -l < "$SHARED_DATA/renders/fujitsu_b4_dr.jsonl") renders"
+
+if [[ -s "$SHARED_DATA/split_agentdojo/agentdojo_renders_harmful.jsonl" ]] && \
+   [[ -s "$SHARED_DATA/split_agentdojo/agentdojo_renders_benign.jsonl" ]] && \
+   [[ -s "$SHARED_DATA/split_agentdojo/agentdojo_lossmasks_harmful.jsonl" ]] && \
+   [[ -s "$SHARED_DATA/split_agentdojo/agentdojo_lossmasks_benign.jsonl" ]]; then
+    echo "  AgentDojo split: REUSING existing"
+else
+    python "$REPO_DIR/scripts/split_agentdojo.py" \
+        --traces "$AGENTDOJO_SRC" \
+        --renders "$SHARED_DATA/renders/agentdojo_truncated.jsonl" \
+        --lossmasks "$SHARED_DATA/lossmasks/agentdojo_truncated.jsonl" \
+        --output-dir "$SHARED_DATA/split_agentdojo" \
+        --legacy-harmful-naming 2>&1 | tail -5
+fi
+
+# Verify everything exists
 for required in \
     "$SHARED_DATA/renders/fujitsu_b4_ds.jsonl" \
     "$SHARED_DATA/renders/fujitsu_b4_dr.jsonl" \
@@ -150,12 +244,10 @@ for required in \
     "$SHARED_DATA/split_agentdojo/agentdojo_lossmasks_harmful.jsonl" \
     "$SHARED_DATA/split_agentdojo/agentdojo_lossmasks_benign.jsonl"; do
     if [[ ! -f "$required" ]] || [[ ! -s "$required" ]]; then
-        echo "ERROR: Missing shared data: $required"
-        echo "Run sweep_completed_v1.sbatch first to generate ETL_B data."
-        exit 1
+        echo "ERROR: ETL failed — missing: $required"; exit 1
     fi
 done
-echo "  Shared data verified (all renders/lossmasks/splits present)"
+echo "  All shared data verified"
 echo ""
 
 # =============================================================================
