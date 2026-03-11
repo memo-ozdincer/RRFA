@@ -706,6 +706,9 @@ def per_token_cb_loss(
     margin_free: bool = False,
     importance_masks: Optional[Dict[int, torch.Tensor]] = None,
     importance_mask_mode: str = "both",
+    kl_scaling: str = "constant",
+    alpha_max: float = 1.0,
+    c_r: float = 0.0,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """Per-token circuit breaker loss (Option A from technical plan).
 
@@ -763,7 +766,15 @@ def per_token_cb_loss(
         temperature=kl_temperature,
     )
 
-    total = alpha_benign * benign_loss + beta_harmful * harmful_loss + gamma_kl * kl_loss
+    if kl_scaling == "constant":
+        kl_coeff = gamma_kl
+    elif kl_scaling == "cr":
+        # KL ramps with retain coefficient: actual coeff = (c_r / alpha_max) * gamma_kl
+        kl_coeff = (c_r / max(alpha_max, 1e-8)) * gamma_kl
+    else:
+        raise ValueError(f"Unknown kl_scaling: {kl_scaling}")
+
+    total = alpha_benign * benign_loss + beta_harmful * harmful_loss + kl_coeff * kl_loss
 
     metrics = {
         "triplet_benign_loss": benign_loss.item(),
@@ -772,6 +783,8 @@ def per_token_cb_loss(
         "triplet_alpha": float(alpha_benign),
         "triplet_beta": float(beta_harmful),
         "triplet_gamma": float(gamma_kl),
+        "kl_coeff": float(kl_coeff),
+        "kl_scaling": kl_scaling,
         "mean_harmful_dist": mean_harmful_dist,
         "mean_benign_dist": mean_benign_dist,
         "total_loss": total.item(),
@@ -853,6 +866,7 @@ def original_rr_loss(
     benign_teacher_logits: Optional[torch.Tensor] = None,
     benign_attention_mask: Optional[torch.Tensor] = None,
     kl_temperature: float = 1.0,
+    kl_scaling: str = "constant",
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """Original RR loss from Zou et al. (2024), Algorithm 1, with optional KL.
 
@@ -887,6 +901,7 @@ def original_rr_loss(
 
     # Optional KL term
     loss_kl_val = 0.0
+    kl_coeff = 0.0
     if gamma_kl > 0 and benign_student_logits is not None and benign_teacher_logits is not None:
         loss_kl = kl_divergence_loss(
             student_logits=benign_student_logits,
@@ -895,7 +910,14 @@ def original_rr_loss(
             loss_mask=None,  # NOT loss_mask — benign loss_mask is all-zero with injection_aware
             temperature=kl_temperature,
         )
-        total = total + gamma_kl * loss_kl
+        if kl_scaling == "constant":
+            kl_coeff = gamma_kl
+        elif kl_scaling == "cr":
+            # KL ramps with retain coefficient: actual coeff = c_r * gamma_kl
+            kl_coeff = c_r * gamma_kl
+        else:
+            raise ValueError(f"Unknown kl_scaling: {kl_scaling}")
+        total = total + kl_coeff * loss_kl
         loss_kl_val = loss_kl.item()
 
     metrics = {
@@ -905,6 +927,8 @@ def original_rr_loss(
         "c_s": c_s,
         "c_r": c_r,
         "gamma_kl": gamma_kl,
+        "kl_coeff": kl_coeff,
+        "kl_scaling": kl_scaling,
         "cos_sim_mean": rr_metrics["cos_sim_mean"] if rr_metrics else 0.0,
         "cos_sim_positive_frac": rr_metrics["cos_sim_positive_frac"] if rr_metrics else 0.0,
     }

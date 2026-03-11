@@ -136,6 +136,9 @@ class CircuitBreakerConfig:
     # - Eliminates margin tuning (no triplet_margin_benign/harmful needed)
     margin_free: bool = False
 
+    # KL scaling mode: 'constant' (gamma_kl used as-is) or 'cr' (multiply by retain coeff)
+    kl_scaling: str = "constant"
+
     # Path to .pt file with importance mask for SRMU-style feature-selective rerouting.
     # The file should contain a dict with key "importance" -> (H,) tensor in [0, 1].
     # When None, standard (uniform) CB loss is used.

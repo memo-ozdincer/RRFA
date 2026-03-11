@@ -1925,11 +1925,15 @@ class CircuitBreakerTrainer:
                                 f"b={getattr(self.config, 'triplet_margin_benign', 1.2)})"
                             )
 
-            # Schedule KL with retain coefficient so it doesn't fight harmful push.
-            # cr goes 0→alpha_max; dividing by alpha_max gives fraction 0→1.
             _gamma_kl_config = float(getattr(self.config, "triplet_gamma_kl", 0.9))
             _alpha_max = self.config.alpha_max if self.config.alpha_max > 0 else 1.0
-            _kl_coeff = (cr / _alpha_max) * _gamma_kl_config
+            _kl_scaling = getattr(self.config, "kl_scaling", "constant")
+
+            # When kl_scaling='cr', the loss function handles ramping internally.
+            # When kl_scaling='constant', pass gamma_kl directly.
+            # Legacy behavior (kl_scaling='cr') used to pre-scale here; now the
+            # loss function does it via c_r and alpha_max parameters.
+            _kl_coeff = _gamma_kl_config  # base gamma_kl passed to loss fn
 
             total_loss, ptcb_metrics = per_token_cb_loss(
                 harmful_model_reps=harmful_model_reps,
@@ -1952,6 +1956,9 @@ class CircuitBreakerTrainer:
                 margin_free=_margin_free,
                 importance_masks=self.importance_masks,
                 importance_mask_mode=self.importance_mask_mode,
+                kl_scaling=_kl_scaling,
+                alpha_max=_alpha_max,
+                c_r=cr,
             )
 
             metrics = {
@@ -2080,6 +2087,7 @@ class CircuitBreakerTrainer:
                 benign_teacher_logits=teacher_logits_benign if _gamma_kl > 0 else None,
                 benign_attention_mask=benign_attention_mask if _gamma_kl > 0 else None,
                 kl_temperature=kl_temp,
+                kl_scaling=getattr(self.config, "kl_scaling", "constant"),
             )
 
             metrics = {

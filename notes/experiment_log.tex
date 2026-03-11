@@ -1950,30 +1950,497 @@ provide corrected training that makes structural defense bulletproof, and
 characterize the fundamental selectivity ceiling that limits defense of
 semantic injections.
 
-\subsection{Priority Experiments (Next)}
+\subsection{A Note on Metric Inflation}
+\label{sec:metric-inflation}
+
+\bad{The ``resist'' metric in \texttt{next\_tool\_prediction} mode is inflated.}
+Any output that does not match the malicious tool name counts as ``resisted,''
+including gibberish like \texttt{1.com.com.com.com}.  The gibberish counts are
+the necessary correction factor.  Throughout this log, ``Real AD defense'' means:
+\[
+  \text{Real defense} \approx (1 - \text{malicious\%}) - \text{gibberish\%}
+\]
+A config reporting 22\% malicious with 32/99 gibberish has $\sim$45\% genuine
+defense, not 78\%.  The \texttt{full\_trace} eval mode is the most honest test
+because the model generates freely, but most configs show $>$90\% no\_tool in
+this mode --- meaning the model cannot produce \emph{any} coherent tool call.
+
+% ===================================================================
+\section{Sweep 11: Tier~2 Results (Mar 10, 2026)}
+\label{sec:sweep11-tier2}
+% ===================================================================
+
+Seven Tier~2 configs completed overnight, testing: Test~2 probe, SRMU
+combinations, asymmetric masking, narrow LoRA, and higher margins.
+
+\subsection{Summary Table}
+
+\begin{center}
+\small
+\begin{tabular}{lrrrrrrl}
+\toprule
+Config & Fuj ASR & AD trunc & Ben corr & Ben no\_tool & Gib H/B & Real def. & Verdict \\
+\midrule
+\multicolumn{8}{l}{\textit{Reference (Tier~1):}} \\
+ad\_1000\_v2 (ctrl) & 72\% & 30\% & 41\% & 15\% & 25/23 & $\sim$22\% & Baseline \\
+ad\_5000\_v2 (Pareto) & 28\% & 24\% & 72\% & 5\% & 10/2 & $\sim$55\% & Best overall \\
+ad\_1000\_v2\_srmu & 27\% & 23\% & 46\% & 46\% & 8/6 & $\sim$55\% & Suppression \\
+ad\_750\_bal\_r & 6\% & 34\% & 54\% & 1\% & 0/1 & $\sim$66\% & Wrong tools \\
+\midrule
+\multicolumn{8}{l}{\textit{Tier~2 (overnight):}} \\
+ad\_1000\_v2\_srmu\_t2 & 41\% & 22\% & 48\% & 38\% & 32/14 & $\sim$45\% & \bad{Worse SRMU} \\
+ad\_1000\_bal\_srmu\_t2 & \good{0\%} & \good{20\%} & \good{56\%} & 18\% & 26/5 & $\sim$47\% & Best benign \\
+ad\_1000\_bal\_srmu & \good{0\%} & 28\% & 47\% & 46\% & ?/43 & $\sim$25\% & \bad{Worst combo} \\
+ad\_1000\_m40 & 25\% & 26\% & \bad{37\%} & 0\% & 44/44 & $\sim$30\% & \bad{Destructive} \\
+ad\_1000\_v2\_narrow & \bad{90\%} & 31\% & \good{68\%} & 22\% & 12/12 & $\sim$58\% & \good{Best benign pres.} \\
+ad\_1000\_v2\_srmu\_asym & \bad{100\%} & 27\% & 35\% & 52\% & 27/27 & $\sim$28\% & \bad{Catastrophic} \\
+ad\_1500\_v2\_srmu & 20\% & --- & --- & --- & --- & --- & Incomplete \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent ``Real def.'' $= (1 - \text{mal\%}) - \text{gib\%}$, roughly
+the fraction of harmful samples genuinely defended with clean output.
+Fuj ASR is the CB model's attack success rate (lower = better).
+
+\subsection{Trace-by-Trace Analysis}
+
+\paragraph{srmu\_t2: Test~2 Probe Failed to Transfer.}
+The probe extraction succeeded spectacularly: \textbf{AUC 0.995, accuracy
+96.5\%} (up from 0.956/88.8\% for Test~1).  But training results are
+\emph{worse} than regular SRMU:
+\begin{itemize}
+  \item Fujitsu ASR 41\% (vs 27\%) --- weaker defense
+  \item 32/99 harmful gibberish (vs 8/99) --- \emph{more} degenerate
+  \item New gibberish mode: \texttt{1.com.com.com.com.com.com}
+  \item Phase~3 at step 720 --- identical to regular SRMU
+\end{itemize}
+
+\textbf{Root cause:} Test~2 mask has 78\% of dimensions $>0.1$ (vs 68\% for
+Test~1).  Higher probe AUC $\neq$ sparser mask.  The comply-vs-refuse direction
+uses \emph{more} dimensions than harmful-vs-benign, making the mask closer to
+no mask at all.  \textbf{Lesson: probe classification quality and mask
+selectivity are decoupled.}
+
+\paragraph{bal\_srmu\_t2: Best Benign, Fake Fujitsu.}
+The best AD benign result: \good{56\% correct, only 5/97 gibberish, 18\%
+no\_tool}.  AD harmful: 20\% malicious (best ever) but 26/99 gibberish.
+
+\bad{Fujitsu is completely suppressed:} 0\% ASR, 100\% no\_tool.  All
+outputs are number-repetition gibberish:
+\begin{quote}\small\ttfamily
+-1-212-14-14-212-4-4-4-4-4-4-4-4-4-4-4-4\ldots
+\end{quote}
+The model cannot produce any Fujitsu tool call.  The 0\% ASR is meaningless
+--- it reflects total output collapse, not defense.
+
+Training: Triplet\_H collapses to zero at step~190 (vs typical 720).
+Balanced data + SRMU mask creates unstable early dynamics.
+
+\paragraph{bal\_srmu: Orthogonality Does NOT Hold.}
+The combination of SRMU + balanced data (without Test~2 probe) produces
+the \textbf{worst of both worlds}: SRMU's suppression (46\% benign no\_tool)
+\emph{plus} 43/97 benign gibberish.  The interventions are not orthogonal
+when combined --- they interfere destructively.  SRMU's concentrated push
+overwhelms the output-quality signal from balanced data.
+
+\paragraph{m40: Higher Margins = More Destruction.}
+Margin\_h=40 keeps the harmful hinge loss active throughout training (Triplet\_H
+never saturates), producing strong push but catastrophic benign damage:
+37\% benign correct, 44/97 gibberish.  The model is more aggressively pushed
+in all directions, destroying benign representations uniformly.
+Phase~3 dynamics are similar (collapse around 70\%).
+
+\paragraph{narrow: Surprising Benign Preservation.}
+Restricting LoRA to layers 8--22 produces:
+\begin{itemize}
+  \item \good{68\% benign correct} --- second only to ad\_5000\_v2 (72\%)
+  \item \good{12/97 benign gibberish} --- lowest of any config
+  \item \bad{90\% Fujitsu ASR} --- \emph{worse} than baseline (83\%)
+  \item 31\% AD malicious, 60\% no\_tool
+\end{itemize}
+
+The restricted LoRA cannot learn the CB objective for Fujitsu (not enough
+capacity) but preserves benign capabilities far better than full LoRA.
+Training log: KL values are 2--3$\times$ lower throughout (0.2--0.5 vs
+0.5--1.5), confirming the model changes less overall.
+
+\textbf{Insight:} The 18 ``wasted'' layers (0--7, 23--31) in full LoRA
+are not just collateral damage --- they actively contribute to benign
+destruction.  Narrow LoRA eliminates this damage pathway.  But it also
+eliminates the capacity needed for CB defense on structured tasks (Fujitsu).
+
+\paragraph{srmu\_asym: Asymmetric Masking Catastrophic.}
+Masking only the harmful push while leaving benign retain unmasked makes
+retain \emph{dominate} push.  Result: Fujitsu ASR 100\% (model follows
+all injections), benign 35\%/52\% no\_tool.  The model learns to preserve
+the baseline behavior (which includes following injections) because the
+unmasked retain has stronger gradient signal than the masked push.
+
+\subsection{Diagnostic Results (D3 LoRA Norms)}
+
+\paragraph{ad\_5000\_v2 (v2 norms, first accurate measurement):}
+D3 on the original ad\_5000\_v2 adapter was not obtained --- the diagnostic
+script loaded the ablated adapter by mistake (the ablation created
+\texttt{ablated\_keep\_8-22/} in the model directory, and D3 found it first).
+This must be re-run.
+
+\paragraph{ad\_1000\_v2\_srmu (SRMU norms):}
+\begin{itemize}
+  \item CB layers (10, 20): 7.0\% of total norm.  Ratio: 13.4$\times$.
+  \item \textbf{Layers 29--31 have the highest norms} (5.6, 7.3) --- higher
+        than CB targets (3.5, 3.7).
+  \item SRMU made collateral damage \emph{worse}: sharper masked gradients
+        propagate further through the network.
+\end{itemize}
+
+\paragraph{LoRA ablation (ad\_5000\_v2, keep 8--22):}
+The ablation itself succeeded (zeroed 17/32 layers) but \bad{eval failed}
+due to wrong trace file path on the cluster
+(\texttt{data/traces/fujitsu\_b4\_ds.jsonl} does not exist at the expected
+location).  Must fix path and re-run.
+
+\subsection{Five Key Findings from Tier~2}
 
 \begin{enumerate}
-  \item \textbf{ad\_1000\_bal\_srmu} (already submitted, Job 331779):
-        Combine SRMU push efficiency with balanced+refusal output quality.
-        If orthogonality holds: 23\% malicious + 0\% gibberish + $>$54\% benign.
+  \item \textbf{High probe AUC does not transfer to useful masks.}
+        Test~2 probe (AUC 0.995) produced a \emph{less sparse} mask (78\%
+        vs 68\% of dims $>$0.1), making it nearly equivalent to no mask.
+        Probe quality and mask utility are decoupled --- what matters is
+        sparsity, not classification accuracy.
 
-  \item \textbf{Early stopping sweep:} Save checkpoints at steps 500, 600,
-        700 for ad\_1000\_v2.  Phase~3 starts at $\sim$720 --- stopping at
-        600--700 may capture push benefit without collapse.
+  \item \textbf{Orthogonality of SRMU and balanced data does NOT hold.}
+        The combination (bal\_srmu) was the worst of both worlds.  SRMU's
+        concentrated push overwhelms the output-quality signal from balanced
+        data.  These interventions interfere when combined.
 
-  \item \textbf{Test~2 probe (comply-vs-refuse):}  Retrain importance mask
-        using refusal traces as class~0 instead of benign traces.
-        AUC~0.967 vs current 0.83.  If this transfers to training, the
-        selectivity ceiling rises dramatically.
+  \item \textbf{Narrow LoRA dramatically preserves benign capabilities.}
+        68\% benign correct with only 12\% gibberish.  Restricting LoRA
+        to layers 8--22 removes the collateral damage pathway through
+        distant layers.  But the restricted capacity cannot learn
+        structured defense (Fujitsu ASR 90\%).
 
-  \item \textbf{Fujitsu-focused sweep:} Dedicated configs pushing toward
-        0\% ASR for the paper's showcase result.
+  \item \textbf{Asymmetric masking makes defense worse, not better.}
+        Unmasked retain dominates masked push.  The model learns to
+        preserve baseline behavior (including following injections).
 
-  \item \textbf{Asymmetric masking:} Apply SRMU mask only to the harmful
-        push direction, leaving benign retain with full representation.
-        Hypothesis: benign no\_tool drops from 46\% without losing push
-        efficiency.
+  \item \textbf{Higher margins increase destruction without improving
+        defense.}  $m_h$=40 keeps harmful gradient active longer but
+        pushes benign representations just as hard.  Same Phase~3
+        dynamics, worse benign.
 \end{enumerate}
+
+\subsection{Revised Paper Direction}
+
+The Tier~2 results close several research directions and sharpen the paper:
+
+\textbf{Closed:}
+\begin{itemize}
+  \item SRMU importance masking --- all variants fail (standard, Test~2,
+        asymmetric, combinations).  Push efficiency improves but
+        selectivity does not.
+  \item Alpha/margin tuning --- neither delays Phase~3 nor improves
+        the Pareto frontier.
+  \item Combining interventions naively --- orthogonality assumption
+        was wrong.
+\end{itemize}
+
+\textbf{Open and promising:}
+\begin{itemize}
+  \item \textbf{Narrow LoRA} as a capacity-control mechanism: preserves
+        benign (68\%) at the cost of defense capacity.  Combined with
+        longer training (like ad\_5000\_v2), this could be the best
+        operating point.
+  \item \textbf{Balanced + refusal (bal\_r)} remains the only config with
+        zero gibberish.  Reducing FUJITSU\_CAP from 2500 to 500 may fix
+        the wrong-tool hallucination by reducing redirect signal dominance.
+  \item \textbf{ad\_5000\_v2} is still the Pareto point.  The practical
+        recommendation may be: use many steps with v2 fixes, accept the
+        selectivity ceiling.
+  \item \textbf{Early stopping} at Phase~2 boundary (step $\sim$3500
+        for 5000-step configs) --- untested.
+\end{itemize}
+
+\textbf{The paper is a diagnostic framework paper.}  The core contribution
+is understanding \emph{why} circuit breakers fail on agentic tasks (three
+phases, selectivity ceiling, structural vs.\ semantic injections, LoRA
+collateral damage) and providing corrected training that works for
+structural injections.  Every attempted ``fix'' for semantic injections
+(SRMU, balanced data, margins, probe quality) either fails or trades one
+failure mode for another --- and \emph{documenting this systematically}
+is the contribution.
+
+\subsection{The Structural Hypothesis: Testable Prediction}
+\label{sec:structural-hypothesis}
+
+Tier~1 and Tier~2 together establish the central empirical pattern: CB
+defense works cleanly on Fujitsu (structural) and degenerately on AgentDojo
+(semantic).  But this is a correlation, not a causal claim.  The confounds
+are substantial:
+\begin{itemize}
+  \item Fujitsu has 4 tools; AgentDojo has 64.
+  \item Fujitsu traces are $\sim$100 tokens; AD traces are $\sim$700.
+  \item Fujitsu has explicit redirect targets (tool~A $\to$ tool~B);
+        AD has no clear ``safe'' alternative.
+  \item Fujitsu injections are HTML comments (syntactically distinct);
+        AD injections are natural language \texttt{<INFORMATION>} tags.
+\end{itemize}
+
+To isolate the structural variable, we need the \textbf{controlled
+experiment}: take AgentDojo attacks and reformat them into
+Fujitsu-style structural format, then train and eval CB on both.
+
+\paragraph{Proposed: AgentDojo-Structural.}
+Create a synthetic dataset that preserves AD's \emph{attack content}
+but uses Fujitsu's \emph{structural format}:
+\begin{enumerate}
+  \item Reduce to a small tool set (4--8 tools per scenario).
+  \item Provide an explicit safe alternative tool for each harmful tool call.
+  \item Use short, structured traces ($\sim$100 tokens).
+  \item Keep the injection mechanism (tool-response-level prompt injection).
+\end{enumerate}
+
+\textbf{Prediction:} If the structural hypothesis holds, CB should defend
+AD-Structural with clean outputs (like Fujitsu), while failing on the
+original AD format (as observed).  This would establish that the failure
+mode is not about attack \emph{content} but about task \emph{structure} ---
+a precise characterization of when representation rerouting applies.
+
+\textbf{What this buys for the paper:}
+\begin{itemize}
+  \item Causal evidence, not just correlation.
+  \item Actionable guidance: practitioners can assess whether their deployment
+        matches the ``structural'' pattern (small tool set, clear alternatives)
+        before investing in CB training.
+  \item A natural framing: ``CB works when the model has somewhere safe to go.''
+\end{itemize}
+
+\subsection{Priority Experiments (Revised)}
+
+\begin{enumerate}
+  \item \textbf{AgentDojo-Structural dataset + training.}  The key experiment.
+        Create AD attacks in Fujitsu format, train CB, compare to original AD.
+        If this works, it's the paper's strongest result --- causal isolation
+        of why CB succeeds vs.\ fails.
+
+  \item \textbf{1500\_srmu full eval.}  The 20\% Fujitsu ASR / 80\% correct
+        result is the best clean Fujitsu defense.  Need full AD numbers to
+        assess whether more SRMU steps also help AD or only Fujitsu.
+
+  \item \textbf{ad\_5000\_v2 early stopping} with \texttt{--save-steps 500}.
+        Eval at steps 3000, 3500, 4000 to find the Phase~2/3 boundary.
+        This is an easy experiment that gives us the optimal operating point
+        for the Pareto config.
+
+  \item \textbf{Fix and re-run LoRA ablation eval} on ad\_5000\_v2.
+        The ablation itself worked; just need the correct Fujitsu trace path.
+
+  \item \textbf{D3 on original ad\_5000\_v2} adapter (not the ablated one).
+        Need accurate LoRA norms for the paper.
+\end{enumerate}
+
+% ===================================================================
+\section{Experiment Completeness Audit (Mar 10, 2026)}
+\label{sec:completeness}
+% ===================================================================
+
+This section catalogues every configuration attempted across Sweeps~1--11,
+their status, and what remains before the experimental story is paper-ready.
+
+\subsection{Full Configuration Inventory}
+
+\begin{center}
+\small
+\begin{tabular}{llll}
+\toprule
+Config & Sweep & Status & Notes \\
+\midrule
+\multicolumn{4}{l}{\textit{Early exploration (Sweeps 1--8):}} \\
+cdcos12 (grid best) & 1 & Complete & Fuj 60\%, 0\% benign. Pre-lossmask fix \\
+post\_injection\_only fix & 2 & Complete & Validated lossmask. 0\% benign $\to$ partial \\
+Legacy CB reproduction & 3 & Complete & Confirmed original CB code issues \\
+Sweep 4 reproduction & 4 & Complete & First working pipeline \\
+Contrastive pairs & 5 & Complete & Weak signal, abandoned \\
+Completed traces & 6--7 & Complete & ETL pipeline established \\
+Tool schema fix & 8 & Complete & AD baseline: 75\% mal \\
+\midrule
+\multicolumn{4}{l}{\textit{v1 training (Sweep 9):}} \\
+s9\_base (500 steps) & 9 & Complete & First AD signal. Fuj $-5\%$ \\
+\midrule
+\multicolumn{4}{l}{\textit{v2 training fixes (Sweep 10):}} \\
+ad\_1000\_v2 & 10 & Complete & Control. Fuj 72\%, Ben 41\% \\
+ad\_3000\_v2 & 10 & Complete & Fuj 30\%, Ben 40\% \\
+ad\_5000\_v2 & 10 & \good{Complete} & \good{Pareto best. Fuj 28\%, Ben 72\%} \\
+\midrule
+\multicolumn{4}{l}{\textit{Tier~1 interventions (Sweep 11):}} \\
+ad\_1000\_v2\_srmu & 11 & Complete & SRMU. Fuj 27\%, Ben 46\% (suppression) \\
+ad\_750\_bal\_r & 11 & Complete & Balanced+refusal. Fuj 6\%, Ben 54\% (wrong tools) \\
+ad\_1000\_a5 & 11 & Complete & $\alpha$=5. Fuj 50\%, Ben 50\% (weak) \\
+\midrule
+\multicolumn{4}{l}{\textit{Tier~2 interventions (Sweep 11):}} \\
+ad\_1000\_v2\_srmu\_t2 & 11 & Complete & Test~2 probe. Worse than SRMU \\
+ad\_1000\_bal\_srmu\_t2 & 11 & Complete & Best AD benign (56\%), fake Fujitsu \\
+ad\_1000\_bal\_srmu & 11 & Complete & Worst combo. Orthogonality disproved \\
+ad\_1000\_m40 & 11 & Complete & Destructive. Higher margins $\neq$ better \\
+ad\_1000\_v2\_narrow & 11 & Complete & Best benign preservation (68\%), no Fuj defense \\
+ad\_1000\_v2\_srmu\_asym & 11 & Complete & Catastrophic. Retain dominates push \\
+ad\_1500\_v2\_srmu & 11 & \bad{Incomplete} & Fuj 20\%/80\% correct (best clean). AD eval cut off \\
+\midrule
+\multicolumn{4}{l}{\textit{Submitted but no results:}} \\
+ad\_1000\_bal\_r\_low & 11 & \bad{No results} & FUJITSU\_CAP=500. Data ratio test \\
+\midrule
+\multicolumn{4}{l}{\textit{Diagnostics:}} \\
+D3 on ad\_1000\_v2\_srmu & --- & Complete & CB layers = 7\% of norm. Ratio 13.4$\times$ \\
+D3 on ad\_5000\_v2 & --- & \bad{Failed} & Loaded ablated adapter by mistake \\
+LoRA ablation (keep 8--22) & --- & \bad{Eval failed} & Ablation worked; wrong trace path on cluster \\
+D1 per-sample analysis & --- & \bad{Broken} & Eval JSON format mismatch in all runs \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Total: 20 training configs attempted, 17 complete, 1 incomplete, 1 no results, 1 not yet run.}
+
+\subsection{What the Experiments Collectively Establish}
+
+The 17 completed configs, spanning 11 sweeps, establish the following
+claims with empirical support:
+
+\begin{enumerate}
+  \item \textbf{CB works for structural injections.} Fujitsu ASR drops
+        from 83--87\% baseline to 6--28\% across multiple configs.  Best
+        clean defense: ad\_1500\_v2\_srmu (20\% ASR, 80\% correct, 0\%
+        no\_tool --- though AD eval is missing).  Best overall:
+        ad\_5000\_v2 (28\% ASR, 72\% correct).
+
+  \item \textbf{CB fails for semantic injections.} No config achieves
+        $<$20\% AD malicious without $>$25\% benign destruction.
+        Every ``fix'' (SRMU, balanced data, margins, probes, narrow LoRA,
+        asymmetric masking) either fails outright or trades gibberish for
+        wrong-tool hallucination.  This is the selectivity ceiling.
+
+  \item \textbf{The failure is predictable.} Probe AUC 0.83
+        (harmful-vs-benign, same context) predicts $\sim$17\% inherent
+        benign destruction.  Every config confirms this bound empirically.
+
+  \item \textbf{Training dynamics are universal.} Three-phase
+        Push $\to$ Plateau $\to$ Collapse, with Phase~3 onset at
+        $\sim$70\% of training regardless of alpha, margins, or masking.
+        More Phase~2 (benign anchoring) steps improve benign preservation.
+
+  \item \textbf{Collateral damage is quantifiable.} D3 norms show
+        93\% of LoRA weight change occurs outside CB target layers.
+        Restricting LoRA to layers 8--22 eliminates this and preserves
+        68\% benign --- but loses defense capacity.
+
+  \item \textbf{Interventions do not compose.} SRMU and balanced data
+        fix different problems (push efficiency vs.\ output quality) but
+        combining them produces the worst of both worlds.
+\end{enumerate}
+
+\subsection{Gaps Remaining for Paper}
+
+\subsubsection{Must-Have Experiments}
+
+\begin{enumerate}
+  \item \textbf{AgentDojo-Structural (controlled experiment).}
+        \emph{Status: not yet run.}
+        This is the paper's strongest potential result.  Reformatting AD
+        attacks into Fujitsu-style structural format and showing CB
+        succeeds would provide \emph{causal} evidence for the structural
+        hypothesis (Section~\ref{sec:structural-hypothesis}).  Without
+        this, the structural-vs-semantic claim rests on correlation between
+        two datasets that differ in multiple confounded ways (tool count,
+        trace length, injection syntax, redirect availability).
+        \textbf{Priority: critical.}
+
+  \item \textbf{ad\_5000\_v2 early stopping.}
+        \emph{Status: not yet run.}
+        Re-run with \texttt{--save-steps 500}, eval at steps 3000, 3500,
+        4000, 4500.  This gives: (a) the Phase~2/3 boundary location for
+        our Pareto config, (b) an empirical demonstration that stopping
+        before Phase~3 improves benign, (c) the optimal operating point
+        for the practical recommendation.  Low effort, high value.
+        \textbf{Priority: high.}
+
+  \item \textbf{ad\_1500\_v2\_srmu full eval.}
+        \emph{Status: Fujitsu done (20\% ASR / 80\% correct), AD eval
+        cut off by job time limit.}
+        The 80\% Fujitsu correct is the best clean defense result.  Need
+        AD harmful and benign numbers to know if this is a genuine
+        Pareto improvement over ad\_5000\_v2 or if AD is destroyed.
+        Just re-submit the eval portion.
+        \textbf{Priority: high.}
+\end{enumerate}
+
+\subsubsection{Should-Have (Strengthen Paper)}
+
+\begin{enumerate}
+  \item \textbf{D3 on original ad\_5000\_v2 adapter.}
+        Need accurate LoRA norm distribution for the paper's figures.
+        The diagnostic script loaded the ablated adapter by mistake.
+        Fix: pass explicit adapter path.
+
+  \item \textbf{LoRA ablation eval (keep 8--22 on ad\_5000\_v2).}
+        The ablation itself succeeded.  Eval failed due to wrong trace
+        file path on cluster.  Fix path and re-run.  This tells us
+        whether the Pareto config's defense survives removing 17/32 layers.
+
+  \item \textbf{ad\_1000\_bal\_r\_low results.}
+        Submitted (FUJITSU\_CAP=500) but no output received.  Check
+        if the job failed or is still queued.  Tests the data-ratio
+        hypothesis for wrong-tool hallucination.
+\end{enumerate}
+
+\subsubsection{Nice-to-Have}
+
+\begin{enumerate}
+  \item \textbf{ad\_5000\_v2\_narrow} (narrow LoRA + 5000 steps).
+        Could combine narrow LoRA's benign preservation (68\%) with
+        ad\_5000\_v2's defense capacity.  The question is whether 5000
+        steps compensate for restricted capacity on Fujitsu.
+
+  \item \textbf{Fix D1 per-sample analysis.}
+        The eval JSON format doesn't match what \texttt{per\_sample\_analysis.py}
+        expects.  Low priority --- manual trace inspection has been more
+        informative than automated per-sample metrics.
+\end{enumerate}
+
+\subsection{Paper Readiness Assessment}
+
+\textbf{The experiment log is complete as a lab notebook.}  Every
+configuration attempted is documented with results, analysis, and
+cumulative lessons.  The diagnostic framework narrative is fully
+supported by existing data.
+
+\textbf{The paper's empirical story has one critical gap:}
+the AgentDojo-Structural experiment.  Without it, Contribution~2
+(structural vs.\ semantic injection dichotomy) is observational, not
+causal.  The paper can still be written around the diagnostic framework
+and training dynamics contributions, but the structural hypothesis
+--- which is the most novel and actionable claim --- remains a
+prediction rather than a validated result.
+
+\textbf{What can be written now} (with existing data):
+\begin{itemize}
+  \item Three-phase training dynamics (fully supported, 17 configs)
+  \item Selectivity ceiling characterization (probe AUC + empirical confirmation)
+  \item v2 training corrections (four compounding bugs, 5$\times$ improvement)
+  \item Failure mode taxonomy (gibberish, wrong-tool, suppression, token repetition)
+  \item LoRA collateral damage analysis (D3 norms, narrow LoRA ablation)
+  \item Negative results: SRMU, probe quality, margin tuning, asymmetric masking,
+        naive combination --- \emph{each individually publishable as a lesson}
+\end{itemize}
+
+\textbf{What requires new experiments:}
+\begin{itemize}
+  \item Causal validation of structural hypothesis (AgentDojo-Structural)
+  \item Optimal operating point via early stopping (ad\_5000\_v2 + save-steps)
+  \item Whether 1500 SRMU steps are a genuine Pareto improvement (complete eval)
+\end{itemize}
+
+\textbf{Estimated remaining compute:} $\sim$4--5 jobs (1 dataset creation +
+training, 1 early-stopping sweep, 1 eval completion, 1--2 diagnostic re-runs).
+All feasible in 1--2 overnight cluster sessions.
 
 % ===================================================================
 \section{Lessons Learned (Cumulative)}
@@ -2077,10 +2544,40 @@ semantic injections.
         distribution and schedule shape, not the push magnitude.  This means
         alpha tuning cannot delay collapse --- only schedule or data changes can.
 
-  \item \textbf{Orthogonal interventions should be combined, not compared.}
+  \item \textbf{Orthogonal interventions may interfere when combined.}
         SRMU fixes push efficiency.  Balanced+refusal fixes output quality.
-        Comparing them head-to-head misses the point: they address different
-        failure modes.  The informative experiment is the \emph{combination}.
+        We predicted orthogonality, but bal\_srmu was the worst of both
+        worlds: SRMU's concentrated push overwhelms the output-quality
+        signal.  \bad{Test combinations before assuming independence.}
+
+  \item \textbf{High probe AUC $\neq$ useful importance mask.}
+        Test~2 probe (AUC 0.995) produced a \emph{less sparse} mask (78\%
+        dims $>$0.1 vs 68\% for Test~1).  Result: worse than regular SRMU.
+        What matters for masking is \emph{sparsity} (how few dimensions
+        carry the signal), not classification accuracy.
+
+  \item \textbf{Narrow LoRA preserves benign by eliminating collateral
+        damage.}  Restricting LoRA to layers 8--22 gave 68\% benign correct
+        (vs 41\% full LoRA at same steps) with only 12\% gibberish.
+        But it cannot learn structured defense (Fujitsu ASR 90\%).
+        Collateral damage from distant layers is a primary cause of benign
+        destruction, not just the CB loss itself.
+
+  \item \textbf{Asymmetric masking backfires.}  Masking only the push
+        while leaving retain unmasked lets retain gradient dominate.
+        The model preserves baseline behavior (including following
+        injections) rather than learning defense.
+
+  \item \textbf{Resistance metrics are inflated by gibberish.}
+        In \texttt{next\_tool\_prediction} mode, any output that doesn't
+        match the malicious tool name counts as ``resisted'' --- including
+        gibberish.  Always report gibberish counts alongside resistance
+        rates.  The honest metric: $(1-\text{mal\%}) - \text{gib\%}$.
+
+  \item \textbf{Higher margins increase destruction without benefit.}
+        $m_h$=40 keeps harmful gradient active longer but does not delay
+        Phase~3.  Benign representations are pushed just as hard.
+        Margin tuning is a dead end for improving the Pareto frontier.
 \end{enumerate}
 
 \end{document}

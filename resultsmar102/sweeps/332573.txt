@@ -1,0 +1,110 @@
+SWEEP 11: AD-Focused Step Sweep — ad_1000_a5
+========================================================
+Job: 332573 | Tue 10 Mar 2026 02:45:34 AM EDT
+Dataset: ad_only | Steps: 1000 | Resisted: retain
+Fujitsu cap: 0 | Seq len: 2048
+Loss: per_token_cb | Distance: dl2rc | margin_free: false
+Margins: harmful=20.0 benign=3.0
+LR: 5e-5 | LR sched: constant | alpha: 5.0 | gamma_kl: 0.3
+Alpha decay mult: 2.0 | Refusal data: false
+Amplify injections: false (repeats=2)
+Importance mask: none
+CB layers: 10 20 | LoRA: r=16 alpha=32
+
+  Estimated: 8000 samples, ~3.2 epochs of harmful data
+
+Tokenizer: /scratch/memoozd/cb-scratch/cache/hf/hub/models--meta-llama--Llama-3.1-8B-Instruct/snapshots/0e9e39f249a16976918f6564b8830bc894c89659
+  agentdojo_augmented.jsonl: 5882 lines
+  contrastive_pairs.jsonl: 2760 lines
+
+Shared data: /scratch/memoozd/cb-scratch/sweeps/s9_shared_cb_full_sequence_seq2048_ts
+Split dir:   /scratch/memoozd/cb-scratch/sweeps/s9_shared_cb_full_sequence_seq2048_ts/split_agentdojo_retain
+Run output:  /scratch/memoozd/cb-scratch/sweeps/s9_ad_1000_a5_20260310_024534/run
+
+========================================================
+Step 0: Data preparation
+========================================================
+  AgentDojo truncated: REUSING existing (5657 lines)
+  agentdojo_truncated.jsonl: 5657 lines
+  Refusal traces: SKIPPED (USE_REFUSAL=false)
+  Data preparation done (0s)
+
+========================================================
+Step 1: ETL_B
+========================================================
+  agentdojo_truncated: REUSING existing (5654 renders)
+  ETL_B done (0s)
+
+  Lossmask coverage & token length check (max_seq_length=2048):
+    agentdojo_refusal_synthetic.jsonl: 1000 samples, tokens avg=922 min=315 max=2048
+      at_max_length (2048): 85/1000 (8.5%) ⚠ TRUNCATION HAPPENING
+      lossmask: avg_coverage=81.1%, zero_mask=0
+    agentdojo_truncated.jsonl: 5654 samples, tokens avg=665 min=151 max=2048
+      at_max_length (2048): 326/5654 (5.8%) ⚠ TRUNCATION HAPPENING
+      lossmask: avg_coverage=71.7%, zero_mask=0
+    fujitsu_b4_dr.jsonl: 5652 samples, tokens avg=94 min=83 max=111
+      at_max_length (2048): 0/5652 (0.0%)
+      lossmask: avg_coverage=50.1%, zero_mask=0
+    fujitsu_b4_ds.jsonl: 7661 samples, tokens avg=114 min=92 max=157
+      at_max_length (2048): 0/7661 (0.0%)
+      lossmask: avg_coverage=58.5%, zero_mask=0
+
+========================================================
+Step 2: Split & downsample (resisted=retain)
+========================================================
+  AgentDojo split: REUSING existing
+  AD harmful renders: 2513 lines
+  AD benign renders:  3141 lines
+
+========================================================
+Step 3: Training (ad_1000_a5, 1000 steps)
+========================================================
+  Harmful files: 1
+    agentdojo_renders_harmful.jsonl: 2513 lines
+  Benign files: 1
+    agentdojo_renders_benign.jsonl: 3141 lines
+
+  Training SUCCESS (69m)
+
+  Training history:
+    Steps logged: 20
+    First (step    0): mode=per_token_cb | L_b=0.0000 L_h=19.9981 L_kl=-0.0000 d_h=0.012 d_b=0.012 grad=0.0071
+    Mid   (step  500): mode=per_token_cb | L_b=9.2495 L_h=0.1011 L_kl=0.1818 d_h=20.842 d_b=11.759 grad=0.7907
+    Last  (step  950): mode=per_token_cb | L_b=0.1416 L_h=6.1263 L_kl=0.0121 d_h=16.365 d_b=2.619 grad=0.6560
+
+
+========================================================
+Step 3b: Frozen-rep sanity check
+========================================================
+  Loading base model (no LoRA)...
+  Running base model forward...
+  Loading LoRA model...
+  Running LoRA model with adapter DISABLED...
+  Running LoRA model with adapter ENABLED...
+  Running LoRA model with adapter DISABLED again...
+
+  Layer 10: [OK]
+    disabled vs base:     max_diff=0.00e+00 MATCH
+    disabled vs disabled: max_diff=0.00e+00 MATCH
+    enabled vs base:      max_diff=8.98e-01 MOVED
+  Layer 20: [OK]
+    disabled vs base:     max_diff=0.00e+00 MATCH
+    disabled vs disabled: max_diff=0.00e+00 MATCH
+    enabled vs base:      max_diff=1.27e+00 MOVED
+
+  FROZEN-REP CHECK: PASSED — disable_adapter() matches base model
+
+========================================================
+Step 4: Evaluation
+========================================================
+  [4a] Fujitsu eval...
+    Baseline: ASR=87% correct=13% no_tool=0%
+    CB: ASR=50% correct=50% no_tool=0%
+
+  [4b] AD harmful eval (full traces)...
+    AD full split: 2738 harmful, 3144 benign
+    AD Harmful (full): resist=74% malicious=26%
+
+  [4c] AD harmful eval (truncated — matches training format)...
+    AD trunc split: 2513 harmful, 3144 benign
+

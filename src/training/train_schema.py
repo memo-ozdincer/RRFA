@@ -533,6 +533,10 @@ def _parse_args() -> argparse.Namespace:
                           help="KL divergence coefficient for legacy_cb mode (default: 0.5 from config)")
     cb_group.add_argument("--margin-free", action="store_true", default=False,
                           help="Use margin-free loss (Option C): exp(-d/scale) for harmful, d for benign. No margin tuning.")
+    cb_group.add_argument("--kl-scaling", type=str, default=None,
+                          choices=["constant", "cr"],
+                          help="KL scaling mode: 'constant' uses gamma_kl directly, "
+                               "'cr' scales by retain coefficient (old-code behavior: cr * gamma_kl)")
     cb_group.add_argument("--importance-mask", type=Path, default=None,
                           help="Path to .pt probe direction file for importance-weighted CB loss (SRMU-style)")
     cb_group.add_argument("--importance-mask-mode", type=str, default=None,
@@ -638,6 +642,7 @@ def _build_config(args: argparse.Namespace) -> CircuitBreakerConfig:
         "pooling_mask_policy": "pooling_mask_policy",
         "beta_kl": "beta_kl",
         "margin_free": "margin_free",
+        "kl_scaling": "kl_scaling",
         "importance_mask": "importance_mask_path",
         "importance_mask_mode": "importance_mask_mode",
         "importance_mask_topk": "importance_mask_topk",
