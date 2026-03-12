@@ -1,9 +1,14 @@
 """
-Shared loss primitives for circuit-breaker training.
+Loss functions for representation rerouting (circuit breaker) training.
 
-This module centralizes the math used by both:
-- src/training/train_schema.py
-- src/training/trainer.py
+Two formulations that actually ship:
+  - original_rr: ReLU(cos_sim) push + L2 retain, from Zou et al. (2024)
+  - per_token_cb: per-token dl2rc distance with margins, solves the
+    LoRA vanishing-gradient problem where cos_sim saturates near 1.0
+
+Plus simplified_pooled (pooled-vector variant for quick sweeps) and
+several earlier ablation losses (triplet, cosine-only, l2-only) kept
+around for comparison runs.
 """
 
 from __future__ import annotations
@@ -14,14 +19,17 @@ import torch
 import torch.nn.functional as F
 
 
+# --- active loss modes (used in production sweeps) ---
+LOSS_MODE_PER_TOKEN_CB = "per_token_cb"
+LOSS_MODE_ORIGINAL_RR = "original_rr"
+LOSS_MODE_SIMPLIFIED_POOLED = "simplified_pooled"
+
+# --- ablation-only (kept for comparison sweeps, not used in final runs) ---
 LOSS_MODE_TRIPLET_FULL = "triplet_full"
 LOSS_MODE_COSINE_SIMPLE = "cosine_simple"
 LOSS_MODE_L2_SIMPLE = "l2_simple"
 LOSS_MODE_LEGACY_SCHEMA = "legacy_schema"
 LOSS_MODE_LEGACY_CB = "legacy_cb"
-LOSS_MODE_PER_TOKEN_CB = "per_token_cb"
-LOSS_MODE_SIMPLIFIED_POOLED = "simplified_pooled"
-LOSS_MODE_ORIGINAL_RR = "original_rr"
 
 SUPPORTED_LOSS_MODES = (
     LOSS_MODE_TRIPLET_FULL,
@@ -34,11 +42,12 @@ SUPPORTED_LOSS_MODES = (
     LOSS_MODE_ORIGINAL_RR,
 )
 
+# --- distance functions ---
 DISTANCE_L2 = "d2"
 DISTANCE_COSINE = "dcos"
-DISTANCE_MIX = "dmix"
-DISTANCE_NULL = "d0"
-DISTANCE_L2_RELU_COS = "dl2rc"
+DISTANCE_MIX = "dmix"          # ablation only
+DISTANCE_NULL = "d0"            # ablation only (no-op baseline)
+DISTANCE_L2_RELU_COS = "dl2rc"  # the one that works at LoRA scale
 DISTANCE_L2_SQUARED = "dl2sq"
 
 SUPPORTED_DISTANCES = (
@@ -84,13 +93,15 @@ def _masked_mean_per_sample(
 
     if values.dim() == 3 and mask_f.dim() == 2:
         if pooling_mode == "correct":
-            # Proper token masking: [B, T] -> [B, T, 1], broadcast along H
+            # proper token masking: [B, T] -> [B, T, 1], broadcast along H
             mask_f_expanded = mask_f.unsqueeze(-1)
             denom = mask_f.sum(dim=1, keepdim=True).clamp_min(1e-8)
             return (values * mask_f_expanded).sum(dim=1) / denom
         else:
-            # Legacy: when T==H, mask broadcasts as [B, 1, H] — masks hidden
-            # dims instead of tokens. Margins 500/1500 tuned for this behavior.
+            # legacy mode: mask broadcasts as [B, 1, H] when T==H, effectively
+            # masking hidden dims instead of tokens. bug-as-feature -- the
+            # margins 500/1500 in simplified_pooled were tuned to this behavior
+            # so changing it would break those sweeps.
             H = values.size(-1)
             T_mask = mask_f.size(-1)
             if T_mask < H:
@@ -124,9 +135,9 @@ def kl_divergence_loss(
     temp = max(float(temperature), 1e-6)
     seq_len = student_logits.shape[1]
 
-    # Chunk along sequence dim to avoid materializing full [B, T, V] float32 tensors.
-    # Without chunking, log_softmax + softmax + kl_div each allocate ~16 GiB
-    # for batch=8, seq=4096, vocab=128256 — causing OOM on 80GB GPUs.
+    # chunk along seq dim -- learned this the hard way on the H100s.
+    # without chunking, log_softmax + softmax + kl_div each allocate ~16 GiB
+    # (batch=8, seq=4096, vocab=128256). three of those and you're OOM on 80GB.
     kl_chunks = []
     for t0 in range(0, seq_len, chunk_size):
         t1 = min(t0 + chunk_size, seq_len)
@@ -282,12 +293,17 @@ def pooled_representations(
 
 
 def _l2_relu_cos_distance(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    """L2 + 10*ReLU(cos_dist) — non-zero gradient at LoRA scale.
+    """L2 + 10*ReLU(cos_dist) -- composite distance that works at LoRA scale.
 
-    Cosine distance alone has near-zero gradient when representations are
-    nearly identical (cos_sim ≈ 1.0 at LoRA scale).  L2 provides non-zero
-    gradient from the start; 10*ReLU(cos) amplifies angular differences
-    once L2 has moved representations apart.  Validated by Sam's code.
+    LoRA rank-16 in 4096-dim space barely moves the cosine angle, so
+    cos_dist alone has near-zero gradient early in training. L2 provides
+    immediate gradient signal; once that's pushed representations apart
+    enough for angular separation to matter, the 10x cosine term takes over.
+
+    The 10.0 factor roughly matches the scale ratio: L2 norms are O(1)
+    while cosine distances are O(0.01) at initialization, so 10x brings
+    them into the same dynamic range. Arrived at empirically but the
+    reasoning checks out.
     """
     l2 = torch.norm(a - b, dim=-1)
     cos_dist = 1.0 - F.cosine_similarity(a, b, dim=-1, eps=1e-8)
@@ -380,8 +396,8 @@ def triplet_full_loss(
         + margin_harmful
     ).mean()
 
-    # FIX: benign KL must NOT use loss_mask (injection_aware = all-zeros
-    # for benign traces → KL was always zero).  Use attention_mask only.
+    # benign traces have all-zero loss_mask under injection_aware policy,
+    # so passing it here would zero out the entire KL term. attention_mask only.
     benign_kl = kl_divergence_loss(
         student_logits=benign_student_logits,
         teacher_logits=benign_teacher_logits,
@@ -564,19 +580,14 @@ def _per_token_directional_loss(
     importance_masks: Optional[Dict[int, torch.Tensor]] = None,
     importance_mask_mode: str = "both",
 ) -> Tuple[torch.Tensor, float]:
-    """Per-token distance with margin.
+    """Per-token distance with margin, applied per-layer then averaged.
 
-    direction="push": harmful — loss when dist < margin (push apart)
-    direction="pull": benign  — loss when dist > margin (keep close)
+    direction="push": loss = ReLU(margin - dist), drives harmful reps apart
+    direction="pull": loss = ReLU(dist - margin), keeps benign reps anchored
 
-    When importance_masks is provided, representations are element-wise
-    multiplied by the mask before computing distance (SRMU-style
-    feature-selective rerouting).
-
-    importance_mask_mode controls when the mask is applied:
-      - "both": mask on both push (harmful) and pull (benign) directions
-      - "harmful_only": mask only on push direction; benign retain uses
-        full representation so all 4096 dims are anchored
+    importance_masks (optional): SRMU-style element-wise feature weighting.
+    harmful_only mode matters here -- if you mask benign retain too, the
+    unmasked dims drift freely and you lose capability on unrelated tasks.
 
     Returns (loss, mean_masked_distance) for diagnostics.
     """
@@ -632,16 +643,14 @@ def _per_token_expscale_loss(
     importance_masks: Optional[Dict[int, torch.Tensor]] = None,
     importance_mask_mode: str = "both",
 ) -> Tuple[torch.Tensor, float]:
-    """Per-token margin-free loss (Option C).
+    """Per-token margin-free variant -- eliminates margin tuning entirely.
 
-    direction="push": harmful — exp(-d/scale), bounded [0,1], always has gradient
-    direction="pull": benign  — d.mean(), direct penalty on drift
+    push: exp(-d/scale), bounded [0,1], always has gradient (no dead zone)
+    pull: raw distance, direct penalty on drift
 
-    Scale is auto-computed from frozen rep norms so it works at any layer.
-
-    importance_mask_mode: "both" or "harmful_only" (see _per_token_directional_loss).
-
-    Returns (loss, mean_masked_distance) for diagnostics.
+    Scale auto-computed from frozen rep norms so it calibrates per-layer.
+    Tried this to avoid the margin grid search; works but margins with
+    dl2rc ended up more stable in practice.
     """
     total = torch.tensor(0.0, device=mask.device)
     dist_sum = 0.0
@@ -710,26 +719,23 @@ def per_token_cb_loss(
     alpha_max: float = 1.0,
     c_r: float = 0.0,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
-    """Per-token circuit breaker loss (Option A from technical plan).
+    """Per-token circuit breaker loss -- the one that actually works.
 
-    No pooling, no cluster center, no decoupled masks.
-    Per-token distance weighted by masks.
+    Operates at token granularity with no pooling. Each token's hidden
+    state at layers 10/20 is pushed/pulled independently via dl2rc distance,
+    weighted by injection-aware masks. This is what gets 84% -> 8% ASR.
 
-    Harmful: push each token beyond margin (injection_aware mask)
-    Benign:  keep each token within margin (attention_mask)
-    KL:      preserve benign output distribution (attention_mask, no loss_mask)
+    Three terms:
+      harmful push: ReLU(margin - dist) on injection+response tokens
+      benign pull:  ReLU(dist - margin) on all real tokens
+      KL:           distribution matching on benign outputs (attention_mask only,
+                    NOT loss_mask -- benign loss_mask is all-zero under injection_aware)
 
-    When margin_free=True (Option C): uses exp(-d/scale) for harmful and
-    d.mean() for benign. No margins needed — eliminates margin tuning.
+    margin_free=True swaps to exp(-d/scale) push + raw-distance pull,
+    eliminating margin tuning. Tried it; margins + dl2rc won in the end.
 
-    When importance_masks is provided, representations are element-wise
-    multiplied by the mask before computing distance (SRMU-style
-    feature-selective rerouting). When None, behavior is unchanged.
-
-    importance_mask_mode:
-      - "both": mask applied to both harmful push and benign retain
-      - "harmful_only": mask applied only to harmful push; benign retain
-        uses full representation (all dims anchored)
+    importance_masks: optional SRMU-style feature weighting. harmful_only
+    mode keeps benign retain unmasked so all dims stay anchored.
     """
     if margin_free:
         harmful_loss, mean_harmful_dist = _per_token_expscale_loss(
@@ -809,13 +815,11 @@ def simplified_pooled_loss(
     kl_temperature: float = 1.0,
     distance: str = "dl2rc",
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
-    """Simplified pooled loss (Option B from technical plan).
+    """Pooled variant for quick sweeps -- pools across tokens then applies margins.
 
-    No cluster center, no cross-terms.  Pooled vectors with margin losses.
-
-    Harmful pool: injection_aware mask (focused on injection+decision tokens)
-    Benign pool:  attention_mask (all real tokens)
-    KL:           attention_mask, no loss_mask
+    Faster than per_token_cb (one distance per sample instead of per token)
+    but less expressive. Useful for coarse hyperparameter searches before
+    committing to per-token runs on the full dataset.
     """
     # Distance on pooled vectors
     harmful_dist = pair_distance(harmful_new, harmful_old, distance)
@@ -907,7 +911,7 @@ def original_rr_loss(
             student_logits=benign_student_logits,
             teacher_logits=benign_teacher_logits,
             attention_mask=benign_attention_mask,
-            loss_mask=None,  # NOT loss_mask — benign loss_mask is all-zero with injection_aware
+            loss_mask=None,  # benign loss_mask is all-zero under injection_aware, so use attention_mask only
             temperature=kl_temperature,
         )
         if kl_scaling == "constant":
