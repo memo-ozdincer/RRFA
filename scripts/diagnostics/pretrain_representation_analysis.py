@@ -239,6 +239,24 @@ def diagnostic_1_base_cosine(
     benign_by_id = {t["id"]: t for t in benign_traces}
     n_pairs = 0
 
+    # Pre-check: how many pairs can we form?
+    matchable = sum(1 for h in harmful_traces if pair_mapping.get(h["id"]) in benign_by_id)
+    if matchable == 0:
+        logger.error("ID MISMATCH: 0 harmful traces match contrastive pairs + benign set")
+        logger.error("  Sample harmful IDs: %s", [h["id"] for h in harmful_traces[:3]])
+        logger.error("  Sample pair keys:   %s", list(pair_mapping.keys())[:3])
+        logger.error("  Sample benign IDs:  %s", list(benign_by_id.keys())[:3])
+        # Check for partial matches
+        in_pairs = sum(1 for h in harmful_traces if h["id"] in pair_mapping)
+        logger.error("  Harmful in pairs (ignoring benign): %d/%d", in_pairs, len(harmful_traces))
+        if in_pairs > 0:
+            sample_b_ids = [pair_mapping[h["id"]] for h in harmful_traces if h["id"] in pair_mapping][:3]
+            logger.error("  Target benign IDs from pairs: %s", sample_b_ids)
+            logger.error("  These benign IDs in benign set? %s",
+                         [bid in benign_by_id for bid in sample_b_ids])
+    else:
+        logger.info("  %d/%d harmful traces have valid contrastive pairs", matchable, len(harmful_traces))
+
     for h_trace in harmful_traces:
         h_id = h_trace["id"]
         b_id = pair_mapping.get(h_id)

@@ -92,16 +92,54 @@ if [[ ! -f "$REFUSAL_TRACES" ]]; then
     fi
 fi
 
-# Generate contrastive pairs if missing
+OUTPUT_DIR="$CB_SCRATCH/diagnostics/pretrain_$(date +%Y%m%d_%H%M%S)"
+mkdir -p "$OUTPUT_DIR"
+
+# Use contrastive pairs from the repo (generated alongside agentdojo_augmented.jsonl)
+# If not on scratch, copy from repo; the repo's file is the source of truth
+CONTRASTIVE_PAIRS="$TRACES_DIR/contrastive_pairs.jsonl"
 if [[ ! -f "$CONTRASTIVE_PAIRS" ]]; then
-    echo "Generating contrastive pairs..."
-    python scripts/augment_agentdojo.py \
-        --traces-input "$HARMFUL_TRACES" \
-        --operations removal,contrastive \
-        --contrastive-output "$CONTRASTIVE_PAIRS" \
-        --output "$TRACES_DIR/_augment_temp.jsonl" 2>&1 | tail -5
-    rm -f "$TRACES_DIR/_augment_temp.jsonl"
+    REPO_PAIRS="$REPO_DIR/data/traces/contrastive_pairs.jsonl"
+    if [[ -f "$REPO_PAIRS" ]]; then
+        cp "$REPO_PAIRS" "$CONTRASTIVE_PAIRS"
+        echo "Copied contrastive pairs from repo"
+    else
+        echo "Generating contrastive pairs from $HARMFUL_TRACES..."
+        python scripts/augment_agentdojo.py \
+            --traces-input "$HARMFUL_TRACES" \
+            --operations removal,contrastive \
+            --contrastive-output "$CONTRASTIVE_PAIRS" \
+            --output "$OUTPUT_DIR/_augment_temp.jsonl" 2>&1 | tail -5
+        rm -f "$OUTPUT_DIR/_augment_temp.jsonl"
+    fi
 fi
+
+# Validate ID overlap between traces and pairs
+python3 -c "
+import json, sys
+pairs = {}
+with open('$CONTRASTIVE_PAIRS') as f:
+    for line in f:
+        d = json.loads(line.strip())
+        pairs[d['harmful_trace_id']] = d['benign_trace_id']
+harmful = set()
+benign = set()
+with open('$HARMFUL_TRACES') as f:
+    for line in f:
+        d = json.loads(line.strip())
+        cat = d.get('labels', {}).get('category', '')
+        tid = d.get('id', '')
+        if cat == 'harmful': harmful.add(tid)
+        elif cat == 'benign': benign.add(tid)
+matched = sum(1 for h in harmful if h in pairs)
+b_matched = sum(1 for b in pairs.values() if b in benign)
+print(f'Pair validation: {len(pairs)} pairs, {len(harmful)} harmful, {matched} h-matched, {b_matched} b-matched')
+if matched == 0:
+    print('ERROR: Zero ID matches — harmful IDs and pair keys are disjoint')
+    print(f'  Sample harmful IDs: {list(harmful)[:3]}')
+    print(f'  Sample pair keys:   {list(pairs.keys())[:3]}')
+    sys.exit(1)
+"
 
 # Verify data
 for f in "$HARMFUL_TRACES" "$CONTRASTIVE_PAIRS"; do
@@ -109,9 +147,6 @@ for f in "$HARMFUL_TRACES" "$CONTRASTIVE_PAIRS"; do
         echo "ERROR: Missing $f"; exit 1
     fi
 done
-
-OUTPUT_DIR="$CB_SCRATCH/diagnostics/pretrain_$(date +%Y%m%d_%H%M%S)"
-mkdir -p "$OUTPUT_DIR"
 
 echo "========================================================"
 echo "PRE-TRAINING REPRESENTATION DIAGNOSTICS"
