@@ -1,14 +1,22 @@
 """
 Loss functions for representation rerouting (circuit breaker) training.
 
-Two formulations that actually ship:
+Current loss modes (latest HF Model uses):
   - original_rr: ReLU(cos_sim) push + L2 retain, from Zou et al. (2024)
   - per_token_cb: per-token dl2rc distance with margins, solves the
     LoRA vanishing-gradient problem where cos_sim saturates near 1.0
+    Plus simplified_pooled (pooled-vector variant to see performance loss) and
+several earlier ablation losses (triplet, cosine-only, l2-only). 
+=======
 
-Plus simplified_pooled (pooled-vector variant for quick sweeps) and
-several earlier ablation losses (triplet, cosine-only, l2-only) kept
-around for comparison runs.
+Triplet is my supervisor (Sam Simko)'s original design. While it's been
+ablated away, we have plans to use a variant of it (next todo):
+
+Try to probe q,K,V's attention at Layers 10,20: "Can we classify the attentiveness
+of harmful outputs to to injection tokens?" If so, we're trying: 
+(1) - Using it as an alarm signal can it help us activate the circuit breaker?
+(2) - Rerouting the harmful attention patterns towards the retain set's representations 
+(and keeping those unchanged).
 """
 
 from __future__ import annotations
@@ -135,9 +143,10 @@ def kl_divergence_loss(
     temp = max(float(temperature), 1e-6)
     seq_len = student_logits.shape[1]
 
-    # chunk along seq dim -- learned this the hard way on the H100s.
+    # chunk along seq dim. need to for the h100s.
     # without chunking, log_softmax + softmax + kl_div each allocate ~16 GiB
     # (batch=8, seq=4096, vocab=128256). three of those and you're OOM on 80GB.
+    # edit: in hindsight, 4096 might not be necessary...
     kl_chunks = []
     for t0 in range(0, seq_len, chunk_size):
         t1 = min(t0 + chunk_size, seq_len)
@@ -293,7 +302,8 @@ def pooled_representations(
 
 
 def _l2_relu_cos_distance(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    """L2 + 10*ReLU(cos_dist) -- composite distance that works at LoRA scale.
+    """L2 + 10*ReLU(cos_dist): Performs better than cos_sim for our specific case.
+    Likely reason (1) - LoRA just has way smaller updates, and can't initialize.
 
     LoRA rank-16 in 4096-dim space barely moves the cosine angle, so
     cos_dist alone has near-zero gradient early in training. L2 provides
@@ -446,15 +456,12 @@ def simple_cosine_loss(
     All cosine terms are naturally bounded, so gamma_kl=1-10 is typically
     sufficient (vs 50-200 for triplet_full with unbounded margins).
     """
-    # Harmful: minimize cosine similarity (push away from frozen)
     harmful_cos = F.cosine_similarity(harmful_new, harmful_old, dim=-1, eps=1e-8)
-    harmful_loss = F.relu(harmful_cos).mean()
+    harmful_loss = F.relu(harmful_cos).mean()  # push until orthogonal
 
-    # Benign: keep representations close to frozen
     benign_cos = F.cosine_similarity(benign_new, benign_old, dim=-1, eps=1e-8)
-    benign_loss = (1.0 - benign_cos).mean()
+    benign_loss = (1.0 - benign_cos).mean()  # keep aligned with frozen
 
-    # KL divergence: preserve language modeling capability
     kl_loss = kl_divergence_loss(
         student_logits=benign_student_logits,
         teacher_logits=benign_teacher_logits,
@@ -511,20 +518,16 @@ def simple_l2_loss(
     The scale is auto-computed from the frozen model's representation norm
     so the loss is well-calibrated regardless of layer / model size.
     """
-    # Auto-scale: use the frozen model's norm as reference.
-    # Detach so it doesn't affect gradients.
+    # auto-scale from frozen norms so loss is calibrated per-layer
     scale_h = harmful_old.detach().norm(dim=-1).mean().clamp(min=1.0)
     scale_b = benign_old.detach().norm(dim=-1).mean().clamp(min=1.0)
 
-    # Harmful: push apart (maximize L2 distance from frozen)
-    harmful_l2 = (harmful_new - harmful_old).norm(dim=-1)  # per-token or per-sample
-    harmful_loss = torch.exp(-harmful_l2 / scale_h).mean()
+    harmful_l2 = (harmful_new - harmful_old).norm(dim=-1)
+    harmful_loss = torch.exp(-harmful_l2 / scale_h).mean()  # push apart
 
-    # Benign: keep close (minimize L2 distance from frozen)
     benign_l2 = (benign_new - benign_old).norm(dim=-1)
-    benign_loss = (1.0 - torch.exp(-(benign_l2 / scale_b).square())).mean()
+    benign_loss = (1.0 - torch.exp(-(benign_l2 / scale_b).square())).mean()  # keep close
 
-    # KL divergence: preserve language modeling capability
     kl_loss = kl_divergence_loss(
         student_logits=benign_student_logits,
         teacher_logits=benign_teacher_logits,
@@ -586,7 +589,10 @@ def _per_token_directional_loss(
     direction="pull": loss = ReLU(dist - margin), keeps benign reps anchored
 
     importance_masks (optional): SRMU-style element-wise feature weighting.
-    harmful_only mode matters here -- if you mask benign retain too, the
+    Jury is completely out here. I don't know whether I'm going to add it to the
+    paper or not, I will make Claude make some tests last minute or so...
+    
+    harmful_only mode matters here, f you mask benign retain too, the
     unmasked dims drift freely and you lose capability on unrelated tasks.
 
     Returns (loss, mean_masked_distance) for diagnostics.
@@ -821,13 +827,10 @@ def simplified_pooled_loss(
     but less expressive. Useful for coarse hyperparameter searches before
     committing to per-token runs on the full dataset.
     """
-    # Distance on pooled vectors
     harmful_dist = pair_distance(harmful_new, harmful_old, distance)
     benign_dist = pair_distance(benign_new, benign_old, distance)
 
-    # Harmful: push apart (loss when dist < margin)
     harmful_loss = F.relu(margin_harmful - harmful_dist).mean()
-    # Benign: keep close (loss when dist > margin)
     benign_loss = F.relu(benign_dist - margin_benign).mean()
 
     kl_loss = kl_divergence_loss(

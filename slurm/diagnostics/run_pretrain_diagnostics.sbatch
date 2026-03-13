@@ -2,9 +2,8 @@
 #SBATCH --job-name=pretrain_diag
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=1
-#SBATCH --cpus-per-task=12
+#SBATCH --cpus-per-task=24
 #SBATCH --time=02:00:00
-#SBATCH --mem=64G
 #SBATCH --output=/scratch/memoozd/cb-scratch/logs/%x_%j.out
 #SBATCH --error=/scratch/memoozd/cb-scratch/logs/%x_%j.err
 #SBATCH --account=def-zhijing
