@@ -369,10 +369,12 @@ def op_transplant(
 def op_contrastive(traces: List[Dict], stats: Dict[str, int]) -> List[Dict]:
     """Build contrastive pair mapping: harmful <-> benign (removal) traces.
 
-    For each harmful trace that has a corresponding removal-provenance benign
-    trace, create a mapping record linking both. The training pipeline uses
-    these pairs to provide counterfactual signal: "when you see injection,
-    still call the tool you would have called without it."
+    DEPRECATED: Use op_contrastive_original instead. This pairs harmful traces
+    with truncated removal copies, which are missing the post-injection
+    assistant turn. This causes the CB to compare representations at different
+    conversation positions (harmful msg[4] vs benign msg[2] only).
+
+    Kept for backwards compatibility.
     """
     # Index removal traces by parent_trace_id
     removal_by_parent: Dict[str, str] = {}
@@ -397,6 +399,68 @@ def op_contrastive(traces: List[Dict], stats: Dict[str, int]) -> List[Dict]:
             })
 
     stats["contrastive_pairs"] = len(pairs)
+    return pairs
+
+
+def op_contrastive_original(traces: List[Dict], stats: Dict[str, int]) -> List[Dict]:
+    """Build contrastive pair mapping: harmful <-> original benign (same task).
+
+    Unlike op_contrastive (which uses truncated removal copies), this pairs
+    harmful traces with the ORIGINAL unaugmented benign trace for the same
+    user_task_id. The original benign has the full conversation including
+    the correct post-injection tool call, so the CB can compare
+    representations at the same conversation position.
+
+    Example:
+      Harmful: system → user → assistant→read_file → tool(INJECTED) → assistant→send_money(evil_iban)
+      Benign:  system → user → assistant→read_file → tool(clean)    → assistant→send_money(correct_iban)
+
+    Now the CB compares msg[4] harmful (wrong args) vs msg[4] benign (right args)
+    at the same position, instead of harmful msg[4] vs benign msg[2] (truncated).
+    """
+    # Index original benign traces by (suite, user_task_id)
+    benign_by_task: Dict[str, str] = {}
+    for t in traces:
+        sf = (t.get("raw_metadata") or {}).get("source_fields") or {}
+        if sf.get("augmentation_provenance") != "original":
+            continue
+        cat = (t.get("labels") or {}).get("category", "")
+        if cat != "benign":
+            continue
+        suite = (t.get("source") or {}).get("subset", "")
+        task_id = sf.get("user_task_id", "")
+        if suite and task_id:
+            key = f"{suite}/{task_id}"
+            # Keep first match (there may be multiple benign traces per task)
+            if key not in benign_by_task:
+                benign_by_task[key] = t["id"]
+
+    pairs = []
+    unmatched = 0
+    for t in traces:
+        cat = (t.get("labels") or {}).get("category", "")
+        if cat not in ("harmful", "resisted"):
+            continue
+        sf = (t.get("raw_metadata") or {}).get("source_fields") or {}
+        suite = (t.get("source") or {}).get("subset", "")
+        task_id = sf.get("user_task_id", "")
+        key = f"{suite}/{task_id}"
+
+        if key in benign_by_task:
+            pairs.append({
+                "harmful_trace_id": t["id"],
+                "benign_trace_id": benign_by_task[key],
+                "pair_type": "original_task_match",
+            })
+        else:
+            unmatched += 1
+
+    stats["contrastive_original_pairs"] = len(pairs)
+    stats["contrastive_original_unmatched"] = unmatched
+    logger.info(
+        "op_contrastive_original: %d pairs, %d unmatched",
+        len(pairs), unmatched,
+    )
     return pairs
 
 
@@ -550,9 +614,12 @@ def main():
     # Step 4b: Contrastive pair mapping (must run after removal)
     if "contrastive" in ops:
         combined_for_pairs = traces + removal_traces + transplant_traces
-        print(">>> Running contrastive pair mapping...")
-        contrastive_pairs = op_contrastive(combined_for_pairs, stats)
-        print(f"    Created: {stats['contrastive_pairs']} contrastive pairs")
+        # Use original task-matched benign traces (full conversations)
+        # instead of truncated removal copies
+        print(">>> Running contrastive pair mapping (original task-match)...")
+        contrastive_pairs = op_contrastive_original(combined_for_pairs, stats)
+        print(f"    Created: {stats.get('contrastive_original_pairs', 0)} pairs "
+              f"({stats.get('contrastive_original_unmatched', 0)} unmatched)")
         if contrastive_pairs and args.contrastive_output:
             args.contrastive_output.parent.mkdir(parents=True, exist_ok=True)
             with open(args.contrastive_output, "w") as f:
