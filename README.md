@@ -11,8 +11,6 @@
   </p>
   <p align="center">
     <br>
-    <a href="internal_research_report.pdf"><strong>📕 Internal Research Report</strong></a>
-    <br>
     <a href="https://huggingface.co/memo-ozdincer/rrfa-runs"><strong>🤗 HuggingFace Models</strong></a>
     <br>
     <a href="https://huggingface.co/datasets/memo-ozdincer/rrfa-data"><strong>🤗 HuggingFace Datasets</strong></a>
